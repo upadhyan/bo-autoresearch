@@ -18,7 +18,15 @@ _Avoid_: Knob, flag, toggle, switch
 A checkable rule, pre-registered before the hypothesis enters the loop, whose satisfaction falsifies the hypothesis.
 _Avoid_: Kill criterion, stopping rule
 
+**Directive**:
+A user-stated limit on what the research may try, with a severity of **prohibited** (never tried), **discouraged** (allowed only with a stated reason, at lower priority) or **preferred** (a soft pull, e.g. downstream compatibility).
+_Avoid_: Constraint (reserved for objective feasibility), guardrail, scope rule
+
 ### Search
+
+**Constraint**:
+A feasibility condition on a trial's outcome, such as runtime < X. It is evaluated after the trial runs.
+_Avoid_: Using it for limits on what may be tried (see Directive)
 
 **Objective**:
 The single scalar the research is optimizing, produced by one trial.
