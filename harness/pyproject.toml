@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "boautoresearch"
+version = "0.1.0"
+description = "Deterministic harness for the BO Autoresearch plugin"
+requires-python = ">=3.10"
+dependencies = ["pyyaml"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+boautoresearch = "boautoresearch.cli:main"
+
+[tool.setuptools]
+packages = ["boautoresearch"]
