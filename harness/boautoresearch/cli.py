@@ -11,6 +11,7 @@ import math
 import os
 import random
 import shutil
+import statistics
 import sqlite3
 import subprocess
 import sys
@@ -19,10 +20,12 @@ from pathlib import Path
 
 import yaml
 
+from . import calibration
 from . import experiment_log as elog
 
 HARNESS_SRC = Path(__file__).resolve().parents[1]  # holds pyproject.toml when run from the plugin
-RUN_KEYS = {"objective", "direction", "budget_s", "runner", "reference_fidelity", "python"}
+RUN_KEYS = {"objective", "direction", "budget_s", "runner", "reference_fidelity", "python",
+            "ladder", "deterministic", "replicates_k"}
 
 
 class Refused(Exception):
@@ -74,6 +77,16 @@ def _load_run_yaml(path: Path) -> dict:
     cfg.setdefault("reference_fidelity", {})
     if not isinstance(cfg["reference_fidelity"], dict):
         raise Refused("run.yaml: reference_fidelity must be a mapping, e.g. {epochs: 20}")
+    ladder = cfg.setdefault("ladder", [])
+    if not isinstance(ladder, list) or not all(isinstance(r, dict) and r for r in ladder):
+        raise Refused("run.yaml: ladder must be a list of cheaper fidelities, e.g. [{epochs: 2}]")
+    if cfg["reference_fidelity"] in ladder or any(ladder.count(r) > 1 for r in ladder):
+        raise Refused("run.yaml: ladder rungs must differ from each other and from the reference")
+    if not isinstance(cfg.setdefault("deterministic", False), bool):
+        raise Refused("run.yaml: deterministic must be true or false")
+    k = cfg.setdefault("replicates_k", 5)
+    if isinstance(k, bool) or not isinstance(k, int) or k < 2:
+        raise Refused("run.yaml: replicates_k must be an integer of at least 2")
     cfg["python"] = str(cfg.get("python") or sys.executable)
     return cfg
 
@@ -132,33 +145,137 @@ def cmd_init(a) -> dict:
         "rationale": a.rationale, "run_id": run_id, "branch": branch, "base_commit": base_commit,
         "objective": cfg["objective"], "direction": cfg["direction"], "budget_s": cfg["budget_s"],
         "runner": cfg["runner"], "reference_fidelity": cfg["reference_fidelity"],
-        "python": cfg["python"], "venv_freeze": freeze,
+        "python": cfg["python"], "venv_freeze": freeze, "ladder": cfg["ladder"],
+        "deterministic": cfg["deterministic"], "replicates_k": cfg["replicates_k"],
     })
     _regenerate(run_dir, con)
     return {"run_dir": str(run_dir), "worktree": str(run_dir / "worktree"),
             "venv": str(run_dir / "venv"), **_status(elog.state(elog.read(con)))}
 
 
-def cmd_smoke(a) -> dict:
-    """One trial with every lever at its committed baseline, at the reference fidelity."""
-    run_dir, con = _open_run()
-    st = elog.state(elog.read(con))
-    run, n = st["run"], len(st["trials"]) + 1
-    worktree = run_dir / "worktree"
-    levers_file = worktree / "levers.json"
+def _baseline(run_dir: Path) -> dict:
+    """The committed lever baselines: the worktree's levers.json."""
+    levers_file = run_dir / "worktree" / "levers.json"
     try:
-        levers = json.loads(levers_file.read_text()) if levers_file.exists() else {}
+        return json.loads(levers_file.read_text()) if levers_file.exists() else {}
     except json.JSONDecodeError as e:
         raise Refused(f"levers.json is not valid JSON: {e}")
-    trial = {"trial": n, "levers": levers, "fidelity": run["reference_fidelity"],
+
+
+def _trial(run_dir: Path, con, a, kind: str, levers: dict, fidelity: dict, **extra) -> dict:
+    """Run one trial, or log `trial_refused` and refuse when the budget can't cover it.
+
+    `a` is the caller's action; None for a trial the harness schedules itself.
+    """
+    st = elog.state(elog.read(con))
+    run, n = st["run"], len(st["trials"]) + 1
+    remaining = _status(st)["budget"]["remaining_s"]
+    estimate = _cost(st["trials"], fidelity)
+    if remaining <= 0 or estimate > remaining:
+        elog.append(con, "trial_refused", "harness", {
+            "kind": kind, "fidelity": fidelity, "estimated_cost_s": estimate,
+            "remaining_s": remaining, **extra})
+        _regenerate(run_dir, con)
+        raise Refused(f"budget: a {kind} trial at {json.dumps(fidelity)} is estimated at "
+                      f"{estimate:.1f}s but {remaining:.1f}s of the budget remain")
+    worktree = run_dir / "worktree"
+    trial = {"trial": n, "kind": kind, "levers": levers, "fidelity": fidelity,
              "seed": random.Random(f"{run['run_id']}/{n}").getrandbits(31),
              "commit": _git(worktree, "rev-parse", "HEAD"),
-             "artifact_dir": f"artifacts/trial-{n}"}
-    elog.append(con, "trial_started", a.actor, {"rationale": a.rationale, **trial})
+             "artifact_dir": f"artifacts/trial-{n}", **extra}
+    elog.append(con, "trial_started", *((a.actor, {"rationale": a.rationale, **trial}) if a
+                                        else ("harness", trial)))
     outcome = _run_trial(run_dir, run["runner"], trial)
     elog.append(con, "trial_" + outcome.pop("status"), "harness", {"trial": n, **outcome})
     _regenerate(run_dir, con)
-    return {"trial": elog.state(elog.read(con))["trials"][-1]}
+    return elog.state(elog.read(con))["trials"][-1]
+
+
+def _cost(trials: list[dict], fidelity: dict) -> float:
+    """Mean wall-clock of the completed trials at this fidelity; 0 while unknown."""
+    done = [t["wall_clock_s"] for t in trials if t["fidelity"] == fidelity and "wall_clock_s" in t]
+    return statistics.fmean(done) if done else 0.0
+
+
+def cmd_smoke(a) -> dict:
+    """One trial with every lever at its committed baseline, at the reference fidelity."""
+    run_dir, con = _open_run()
+    run = elog.state(elog.read(con))["run"]
+    return {"trial": _trial(run_dir, con, a, "smoke", _baseline(run_dir), run["reference_fidelity"])}
+
+
+def cmd_round_run(a) -> dict:
+    run_dir, con = _open_run()
+    st = elog.state(elog.read(con))
+    if st["r0_complete"]:
+        raise Refused("round-run for R1 is refused: no hypothesis is registered")
+    return _run_r0(run_dir, con, a, st)
+
+
+def _run_r0(run_dir: Path, con, a, st: dict) -> dict:
+    """The calibration round: smoke, baseline replicates (σ), then ladder calibration."""
+    run = st["run"]
+    ref, ladder, k = run["reference_fidelity"], run["ladder"], run["replicates_k"]
+    baseline = _baseline(run_dir)
+    elog.append(con, "round_started", a.actor, {
+        "rationale": a.rationale, "round": 0, "fidelity": ref, "pid": os.getpid(),
+        "commit": _git(run_dir / "worktree", "rev-parse", "HEAD")})
+
+    def end(trigger, reason=None):
+        elog.append(con, "round_ended", "harness", {"round": 0, "trigger": trigger})
+        _regenerate(run_dir, con)
+        if reason:
+            raise Refused(reason)
+
+    try:
+        if not any(t.get("kind") == "smoke" and t["status"] == "finished" for t in st["trials"]):
+            smoke = _trial(run_dir, con, None, "smoke", baseline, ref, round=0)
+            if smoke["status"] != "finished":
+                end("smoke_failed", f"the smoke trial failed: {smoke['reason']}: {smoke['error']}")
+        rows = []
+        for f in (ref, *ladder):
+            done = [] if run["deterministic"] else [
+                _trial(run_dir, con, None, "baseline", baseline, f, round=0) for _ in range(k)]
+            values = [t["objective"] for t in done if t["status"] == "finished"]
+            if not run["deterministic"] and len(values) < 2:
+                end("failed", f"fewer than 2 baseline replicates finished at {json.dumps(f)}")
+            rows.append({"fidelity": f, "n": len(values), "trials": [t["trial"] for t in done],
+                         "sigma": calibration.sigma(values) if values else 0.0,
+                         "mean": statistics.fmean(values) if values else None,
+                         "cost_s": _cost(elog.state(elog.read(con))["trials"], f)})
+        elog.append(con, "noise_estimate", "harness", {
+            "round": 0, "sigma": rows[0]["sigma"], "deterministic": run["deterministic"],
+            "replication": any(r["sigma"] > 0 for r in rows), "rungs": rows})
+        out = {"round": 0, "noise_estimate": elog.state(elog.read(con))["noise"]}
+        if ladder:
+            out["fidelity_calibration"] = _calibrate_ladder(run_dir, con, rows)
+    except Refused:
+        if elog.state(elog.read(con))["rounds"].get(0, {}).get("ended"):
+            raise
+        end("budget_spent")
+        raise
+    end("calibrated")
+    return {**out, **_status(elog.state(elog.read(con)))}
+
+
+def _calibrate_ladder(run_dir: Path, con, noise_rows: list[dict]) -> dict:
+    run = elog.state(elog.read(con))["run"]
+    cfgs = calibration.configs(_baseline(run_dir), random.Random(f"{run['run_id']}/calibration"))
+    rows = [{"fidelity": r["fidelity"], "sigma": r["sigma"], "objectives": [], "trials": []}
+            for r in noise_rows]
+    for i, cfg in enumerate(cfgs):
+        for r in rows:
+            t = _trial(run_dir, con, None, "calibration", cfg, r["fidelity"], round=0, config=i)
+            r["trials"].append(t["trial"])
+            r["objectives"].append(t.get("objective"))
+    trials = elog.state(elog.read(con))["trials"]
+    for r in rows:
+        r["cost_s"] = _cost(trials, r["fidelity"])
+    chosen, fallback = calibration.choose(rows[0], rows[1:])
+    elog.append(con, "fidelity_calibration", "harness", {
+        "round": 0, "configs": cfgs, "reference": rows[0], "rungs": rows[1:],
+        "chosen": chosen, "fallback": fallback})
+    return elog.state(elog.read(con))["calibration"]
 
 
 def _run_trial(run_dir: Path, runner: str, trial: dict) -> dict:
@@ -197,7 +314,32 @@ def _status(st: dict) -> dict:
     return {"run_id": run["run_id"], "objective": run["objective"], "direction": run["direction"],
             "budget": {"total_s": run["budget_s"], "spent_s": spent,
                        "remaining_s": run["budget_s"] - spent},
-            "trials": {"total": len(trials), **count}}
+            "trials": {"total": len(trials), **count},
+            "r0_complete": st["r0_complete"], "fidelity": st["fidelity"],
+            "sigma": st["noise"]["sigma"] if st["noise"] else None,
+            "replication": st["noise"]["replication"] if st["noise"] else None}
+
+
+def cmd_accept_proxy(a) -> dict:
+    """The user's explicit acceptance of a ladder rung that failed calibration."""
+    run_dir, con = _open_run()
+    st = elog.state(elog.read(con))
+    try:
+        fidelity = json.loads(a.fidelity)
+    except json.JSONDecodeError as e:
+        raise Refused(f"--fidelity must be JSON, e.g. '{{\"epochs\": 2}}': {e}")
+    if not st["r0_complete"] or not st["calibration"]:
+        raise Refused("accept-proxy needs a completed ladder calibration in R0")
+    rung = next((r for r in st["calibration"]["rungs"] if r["fidelity"] == fidelity), None)
+    if rung is None:
+        raise Refused(f"{a.fidelity} is not a rung of the ladder")
+    if rung["passed"]:
+        raise Refused(f"{a.fidelity} passed calibration: it is validated, not an unvalidated proxy")
+    elog.append(con, "proxy_accepted_unvalidated", a.actor,
+                {"rationale": a.rationale, "fidelity": fidelity, "rho": rung["rho"],
+                 "spread": rung["spread"], "sigma": rung["sigma"]})
+    _regenerate(run_dir, con)
+    return _status(elog.state(elog.read(con)))
 
 
 def cmd_status(a) -> dict:
@@ -215,7 +357,7 @@ def _regenerate(run_dir: Path, con) -> None:
     trials = elog.state(elog.read(con))["trials"]
     groups = {"L:": "levers", "c:": "constraints", "t:": "telemetry"}
     extra = sorted({p + k for t in trials for p, g in groups.items() for k in t.get(g, {})})
-    meta = ["trial", "status", "objective", "seed", "fidelity", "commit", "wall_clock_s",
+    meta = ["trial", "kind", "status", "objective", "seed", "fidelity", "commit", "wall_clock_s",
             "peak_mem_mb", "exit_code", "artifact_dir"]
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\n")
@@ -241,6 +383,8 @@ def _parser() -> argparse.ArgumentParser:
 
     action("init", cmd_init).add_argument("run_yaml")
     action("smoke", cmd_smoke)
+    action("round-run", cmd_round_run)
+    action("accept-proxy", cmd_accept_proxy).add_argument("--fidelity", required=True)
     sub.add_parser("status").set_defaults(fn=cmd_status, action=False)
     sub.add_parser("trials").set_defaults(fn=cmd_trials, action=False)
     return p

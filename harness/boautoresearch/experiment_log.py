@@ -5,7 +5,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 SCHEMA_VERSION = 1
-EVENT_TYPES = {"run_started", "trial_started", "trial_finished", "trial_failed"}
+EVENT_TYPES = {"run_started", "trial_started", "trial_finished", "trial_failed", "trial_refused",
+               "round_started", "round_ended", "noise_estimate", "fidelity_calibration",
+               "proxy_accepted_unvalidated"}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -52,6 +54,8 @@ def state(events: list[dict]) -> dict:
     # ponytail: refolds the whole log per command; materialise state tables if logs get large
     run: dict = {}
     trials: dict[int, dict] = {}
+    rounds: dict[int, dict] = {}
+    noise = calib = proxy = None
     for e in events:
         p = {k: v for k, v in e["payload"].items() if k != "rationale"}
         if e["type"] == "run_started":
@@ -62,4 +66,23 @@ def state(events: list[dict]) -> dict:
             trials[p["trial"]].update(p, status="finished")
         elif e["type"] == "trial_failed":
             trials[p["trial"]].update(p, status="failed")
-    return {"run": run, "trials": [trials[n] for n in sorted(trials)]}
+        elif e["type"] == "round_started":
+            rounds[p["round"]] = {**p, "ended": None}
+        elif e["type"] == "round_ended":
+            rounds[p["round"]]["ended"] = p["trigger"]
+        elif e["type"] == "noise_estimate":
+            noise = p
+        elif e["type"] == "fidelity_calibration":
+            calib = p
+        elif e["type"] == "proxy_accepted_unvalidated":
+            proxy = p
+    r0_complete = rounds.get(0, {}).get("ended") == "calibrated"
+    if proxy:
+        fidelity = {"fidelity": proxy["fidelity"], "proxy": "unvalidated"}
+    elif calib:
+        fidelity = {"fidelity": calib["chosen"], "fallback": calib["fallback"],
+                    "proxy": "reference" if calib["chosen"] == run["reference_fidelity"] else "validated"}
+    else:
+        fidelity = {"fidelity": run.get("reference_fidelity"), "proxy": "reference"}
+    return {"run": run, "trials": [trials[n] for n in sorted(trials)], "rounds": rounds,
+            "noise": noise, "calibration": calib, "r0_complete": r0_complete, "fidelity": fidelity}

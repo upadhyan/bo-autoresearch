@@ -55,17 +55,29 @@ def repo(tmp_path):
     return r
 
 
-@pytest.fixture
-def run_yaml(tmp_path, project_python):
-    p = tmp_path / "run.yaml"
-    p.write_text(
+def write_run_yaml(path, python, extra=""):
+    path.write_text(
         "objective: loss\n"
         "direction: minimize\n"
-        "budget_s: 3600\n"
-        "reference_fidelity: {epochs: 4}\n"
-        f"python: {project_python}\n"
+        f"python: {python}\n" + (extra or "budget_s: 3600\nreference_fidelity: {epochs: 4}\n")
     )
-    return p
+    return path
+
+
+@pytest.fixture
+def run_yaml(tmp_path, project_python):
+    return write_run_yaml(tmp_path / "run.yaml", project_python)
+
+
+@pytest.fixture
+def init_run(repo, tmp_path, project_python):
+    """init with run.yaml lines of your own (budget_s and reference_fidelity included)."""
+    def _init(extra):
+        y = write_run_yaml(tmp_path / "run.yaml", project_python, extra)
+        code, out = bo(repo, "init", str(y), "--rationale", "start the toy run")
+        assert code == 0, out
+        return Path(out["run_dir"])
+    return _init
 
 
 @pytest.fixture
