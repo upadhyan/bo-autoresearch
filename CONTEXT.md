@@ -75,8 +75,12 @@ A declared exclusion between two hypotheses with different lever shapes: when th
 _Avoid_: Mutual exclusion (which, for same-shape levers, is a merge into one categorical lever)
 
 **Directive**:
-A user-stated limit on what the research may try, with a severity of **prohibited** (never tried), **discouraged** (allowed only with a stated reason, at lower priority) or **preferred** (a soft pull, e.g. downstream compatibility).
+A user-stated limit on what the research may try, with a severity of **prohibited** (never tried) or **discouraged** (allowed only with a stated reason, at lower priority). A preference is stated as a discouraged directive against its opposite.
 _Avoid_: Constraint (reserved for objective feasibility), guardrail, scope rule
+
+**Research brief**:
+The user's statement of what the research is for: its purpose, what counts as a contribution, how much complexity is welcome and what may be borrowed. Every hypothesis is judged against it for fit with the user's intent.
+_Avoid_: Goal, spec, intent (as a noun)
 
 **Protected path**:
 Code or data the research may never change, such as the objective and its evaluation, so a score can only improve through levers and never by changing how the score is measured.
