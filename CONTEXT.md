@@ -133,7 +133,7 @@ A round in which the incumbent has stopped improving by at least the minimum mea
 _Avoid_: Plateau, convergence
 
 **Budget**:
-The compute time a research run may spend, measured as the summed wall-clock time of its trials and tracked by the harness.
+The compute time the research loop may spend, measured as the summed wall-clock time of its trials and tracked by the harness. Wrap-up (distillation, verification and reporting) sits outside it.
 _Avoid_: Trial count, deadline
 
 **Warm start**:
@@ -153,5 +153,5 @@ A stretch of the experiment log over which the objective is the same function. A
 _Avoid_: Version, era, generation
 
 **Distilled branch**:
-The research's code with only the retained hypotheses' changes kept and the incumbent's lever values as defaults. The final confirmation checks it before the user receives it.
+A clean re-implementation of what worked: only the retained mechanisms, integrated into the project at their tuned values, with no research scaffolding. The user receives it once the harness has reproduced the research result on it.
 _Avoid_: Clean branch, final code, merge
