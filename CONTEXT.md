@@ -120,6 +120,10 @@ _Avoid_: Full run, real run
 One Optuna study run under a fixed hypothesis set and fidelity. Changing either ends the round.
 _Avoid_: Phase, generation, iteration
 
+**Calibration round**:
+The round before any hypothesis is tested, which measures the noise, checks cheaper fidelities against the reference fidelity, and confirms the objective runs at baseline.
+_Avoid_: Warm-up, burn-in (reserved for a hypothesis's first trials)
+
 **Verdict check**:
 A point at which the harness recomputes a hypothesis's verdict: first after its burn-in, then at a fixed spacing of fresh trials.
 _Avoid_: Checkpoint (reserved for the user pause between rounds), evaluation
