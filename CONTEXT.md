@@ -136,6 +136,10 @@ _Avoid_: Transfer, resume
 The append-only record of every trial and event in a research run. It is the single source of truth, and each round's study is derived from it.
 _Avoid_: Study (an Optuna study is disposable), database, history
 
+**Research summary**:
+A short, plain-language account of the whole run so far: what has been tested, what is working, what is not, and what is next. It is regenerated from the experiment log, never written freehand.
+_Avoid_: Report, digest, status (the harness's machine-readable snapshot)
+
 **Epoch**:
 A stretch of the experiment log over which the objective is the same function. A code change that alters the objective starts a new epoch, and trials from earlier epochs become telemetry.
 _Avoid_: Version, era, generation
