@@ -10,6 +10,10 @@ A research loop where an orchestrating agent proposes falsifiable hypotheses and
 A falsifiable claim about what limits the objective. It has a concise rationale, one or more levers, and reject conditions that are fixed before it enters the loop.
 _Avoid_: Idea, experiment, feature
 
+**Lens**:
+One angle from which hypotheses are generated, such as data or optimisation for a model, or memory for a speed-up. Several lenses run side by side, plus a wildcard, so the hypothesis list doesn't collapse onto one idea.
+_Avoid_: Category, theme, perspective
+
 **Lever**:
 A searchable parameter exposed by a hypothesis. It is a continuous or integer range or a categorical. A boolean is allowed only for a mechanism that cannot be graded.
 _Avoid_: Knob, flag, toggle, switch
