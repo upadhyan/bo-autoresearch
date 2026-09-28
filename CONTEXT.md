@@ -51,8 +51,12 @@ Vetoed by a prohibited directive before registration, so it is never tested.
 _Avoid_: Rejected (which requires a test)
 
 **Revival**:
-A rejected hypothesis re-entering the loop as a new version, with fresh reject conditions, because a newly added hypothesis might interact with it.
+A removed hypothesis re-entering the loop as a new version, with fresh reject conditions, because another hypothesis it might interact with is now being tested.
 _Avoid_: Retry, resurrection
+
+**Interplay review**:
+A forced review, triggered every time a hypothesis is removed from the loop, that weighs the removed hypothesis's evidence against the untested hypotheses and names any it might interact with.
+_Avoid_: Combination sweep, interaction search
 
 **Narrowing**:
 Shrinking an active hypothesis's lever ranges on evidence. The hypothesis and its reject conditions stay the same.
@@ -94,7 +98,7 @@ _Avoid_: Rerun, repeat, duplicate
 
 **Fidelity**:
 The cost level at which a trial evaluates the objective, e.g. training length or data fraction. All trials in a round share one fidelity.
-_Avoid_: Budget (reserved for trial counts), proxy (as a noun)
+_Avoid_: Budget (reserved for compute time), proxy (as a noun)
 
 **Reference fidelity**:
 The fidelity whose objective the user actually cares about. A proxy fidelity is valid only once checked against it.
@@ -103,6 +107,18 @@ _Avoid_: Full run, real run
 **Round**:
 One Optuna study run under a fixed hypothesis set and fidelity. Changing either ends the round.
 _Avoid_: Phase, generation, iteration
+
+**Verdict check**:
+A point at which the harness recomputes a hypothesis's verdict: first after its burn-in, then at a fixed spacing of fresh trials.
+_Avoid_: Checkpoint (reserved for the user pause between rounds), evaluation
+
+**Stall**:
+A round in which the incumbent has stopped improving by at least the minimum meaningful effect and no verdict is pending. It ends the round, never the run.
+_Avoid_: Plateau, convergence
+
+**Budget**:
+The compute time a research run may spend, measured as the summed wall-clock time of its trials and tracked by the harness.
+_Avoid_: Trial count, deadline
 
 **Warm start**:
 Seeding a new round's study with the eligible trials from the experiment log, rewritten into the new round's search space. For example, a newly added lever takes its baseline value in the old trials.
