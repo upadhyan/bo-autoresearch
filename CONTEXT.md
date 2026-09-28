@@ -18,8 +18,20 @@ _Avoid_: Knob, flag, toggle, switch
 A checkable rule, pre-registered before the hypothesis enters the loop, whose satisfaction falsifies the hypothesis.
 _Avoid_: Kill criterion, stopping rule
 
+**Minimum meaningful effect**:
+The smallest change in the objective, in the objective's own units, that the user counts as worth having. It is set once by the user and is the threshold for every verdict.
+_Avoid_: Tolerance, epsilon, τ
+
+**Predicted direction**:
+The way a hypothesis claims each of its graded levers moves the objective. It is pre-registered, but contradicting it flags the verdict rather than rejecting the hypothesis.
+_Avoid_: Expected sign, prior
+
+**Verdict record**:
+The harness's per-round statement of a hypothesis's verdict and the evidence behind it. Any interpretation of a verdict must cite it.
+_Avoid_: Report, judgement
+
 **Retained**:
-The positive verdict on a hypothesis: its levers demonstrably matter, interactions included. It is re-judged every round, so it can later become rejected.
+The positive verdict on a hypothesis: its levers demonstrably matter and demonstrably improve the objective beyond the minimum meaningful effect, interactions included. It is re-judged every round, so it can later become rejected.
 _Avoid_: Accepted, confirmed, proven
 
 **Inconclusive**:
