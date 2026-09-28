@@ -14,6 +14,10 @@ _Avoid_: Idea, experiment, feature
 A searchable parameter exposed by a hypothesis. It is a continuous or integer range or a categorical. A boolean is allowed only for a mechanism that cannot be graded.
 _Avoid_: Knob, flag, toggle, switch
 
+**Baseline**:
+The value of a lever at which its code does exactly what the code did before the lever existed. It always lies inside the lever's range.
+_Avoid_: Off, default, zero
+
 **Reject condition**:
 A checkable rule, pre-registered before the hypothesis enters the loop, whose satisfaction falsifies the hypothesis.
 _Avoid_: Kill criterion, stopping rule
@@ -101,5 +105,13 @@ One Optuna study run under a fixed hypothesis set and fidelity. Changing either 
 _Avoid_: Phase, generation, iteration
 
 **Warm start**:
-Seeding a new round's study with prior trials mapped into the new round's search space. For example, a newly added lever takes its "off" value in the old trials.
+Seeding a new round's study with the eligible trials from the experiment log, rewritten into the new round's search space. For example, a newly added lever takes its baseline value in the old trials.
 _Avoid_: Transfer, resume
+
+**Experiment log**:
+The append-only record of every trial and event in a research run. It is the single source of truth, and each round's study is derived from it.
+_Avoid_: Study (an Optuna study is disposable), database, history
+
+**Epoch**:
+A stretch of the experiment log over which the objective is the same function. A code change that alters the objective starts a new epoch, and trials from earlier epochs become telemetry.
+_Avoid_: Version, era, generation
