@@ -92,12 +92,7 @@ def cmd_init(a) -> dict:
     cfg = _load_run_yaml(Path(a.run_yaml))
     root = _repo_root()
     runs = root / ".bo-research"
-    exclude = Path(_git(root, "rev-parse", "--path-format=absolute", "--git-common-dir")) / "info" / "exclude"
-    exclude.parent.mkdir(exist_ok=True)
-    if "/.bo-research/" not in (exclude.read_text() if exclude.exists() else "").split():
-        with exclude.open("a") as f:
-            f.write("\n/.bo-research/\n")
-    if _git(root, "status", "--porcelain"):
+    if _git(root, "status", "--porcelain", "--", ".", ":!.bo-research"):
         raise Refused("the working tree has uncommitted changes; commit or stash them first")
     if not (root / cfg["runner"]).is_file():
         raise Refused(f"runner {cfg['runner']} is not in the repository")
@@ -110,6 +105,11 @@ def cmd_init(a) -> dict:
     if run_dir.exists():
         raise Refused(f"run {run_id} already exists")
     base_commit = _git(root, "rev-parse", "HEAD")
+    exclude = root / ".git" / "info" / "exclude"  # keeps .bo-research/ out of the user's status
+    exclude.parent.mkdir(exist_ok=True)
+    if "/.bo-research/" not in (exclude.read_text() if exclude.exists() else "").split():
+        with exclude.open("a") as f:
+            f.write("\n/.bo-research/\n")
     run_dir.mkdir(parents=True)
     try:
         _git(root, "worktree", "add", "-q", "-b", branch, str(run_dir / "worktree"), base_commit)
@@ -132,7 +132,7 @@ def cmd_init(a) -> dict:
         "rationale": a.rationale, "run_id": run_id, "branch": branch, "base_commit": base_commit,
         "objective": cfg["objective"], "direction": cfg["direction"], "budget_s": cfg["budget_s"],
         "runner": cfg["runner"], "reference_fidelity": cfg["reference_fidelity"],
-        "venv_freeze": freeze,
+        "python": cfg["python"], "venv_freeze": freeze,
     })
     _regenerate(run_dir, con)
     return {"run_dir": str(run_dir), "worktree": str(run_dir / "worktree"),
@@ -146,7 +146,10 @@ def cmd_smoke(a) -> dict:
     run, n = st["run"], len(st["trials"]) + 1
     worktree = run_dir / "worktree"
     levers_file = worktree / "levers.json"
-    levers = json.loads(levers_file.read_text()) if levers_file.exists() else {}
+    try:
+        levers = json.loads(levers_file.read_text()) if levers_file.exists() else {}
+    except json.JSONDecodeError as e:
+        raise Refused(f"levers.json is not valid JSON: {e}")
     trial = {"trial": n, "levers": levers, "fidelity": run["reference_fidelity"],
              "seed": random.Random(f"{run['run_id']}/{n}").getrandbits(31),
              "commit": _git(worktree, "rev-parse", "HEAD"),
@@ -180,9 +183,9 @@ def _run_trial(run_dir: Path, runner: str, trial: dict) -> dict:
         reason = "runner produced no result; it must call boautoresearch.run(fn)"
     else:
         result = json.loads(result_file.read_text())
-        if math.isfinite(result["objective"]):
+        if isinstance(result.get("objective"), float) and math.isfinite(result["objective"]):
             return {"status": "finished", **measured, **result}
-        reason = "degenerate trial: non-finite objective"
+        reason = "degenerate trial: objective is missing or non-finite"
     stderr = [ln for ln in (art / "stderr.txt").read_text().splitlines() if ln.strip()]
     return {"status": "failed", **measured, "reason": reason, "error": stderr[-1] if stderr else ""}
 
@@ -248,6 +251,8 @@ def main(argv=None) -> int:
         a = _parser().parse_args(argv)
         if a.action and not a.rationale.strip():
             raise Refused(f"{a.cmd} is an action: --rationale is required")
+        if a.action and a.actor.strip() in ("", "harness"):
+            raise Refused("--actor must name the caller; 'harness' is reserved for the harness")
         out = a.fn(a)
     except Refused as e:
         print(json.dumps({"refused": True, "reason": str(e)}))

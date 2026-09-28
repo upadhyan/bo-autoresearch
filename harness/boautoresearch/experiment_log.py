@@ -42,9 +42,9 @@ def append(con: sqlite3.Connection, type: str, actor: str, payload: dict) -> int
 
 
 def read(con: sqlite3.Connection) -> list[dict]:
-    rows = con.execute("SELECT seq, type, ts, actor, payload FROM events ORDER BY seq")
-    return [{"seq": s, "type": t, "ts": ts, "actor": a, "payload": json.loads(p)}
-            for s, t, ts, a, p in rows]
+    rows = con.execute("SELECT seq, type, schema_version, ts, actor, payload FROM events ORDER BY seq")
+    return [{"seq": s, "type": t, "schema_version": v, "ts": ts, "actor": a, "payload": json.loads(p)}
+            for s, t, v, ts, a, p in rows]
 
 
 def state(events: list[dict]) -> dict:

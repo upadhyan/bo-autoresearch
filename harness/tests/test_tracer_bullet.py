@@ -43,6 +43,7 @@ def test_init_refuses_a_dirty_user_tree(repo, run_yaml):
     assert "uncommitted" in out["reason"]
     assert not list((repo / ".bo-research").glob("*/log.db"))
     assert "bo-research/" not in git(repo, "branch", "--list")
+    assert ".bo-research" not in (repo / ".git" / "info" / "exclude").read_text()
 
 
 def test_init_refuses_an_invalid_run_yaml(repo, tmp_path):
@@ -129,6 +130,8 @@ def test_actions_require_a_rationale_and_log_their_actor(repo, run_dir):
     for args in (["smoke"], ["smoke", "--rationale", "  "]):
         code, out = bo(repo, *args)
         assert code != 0 and out["refused"] and "rationale" in out["reason"]
+    code, out = bo(repo, "smoke", "--rationale", "why", "--actor", "harness")
+    assert code != 0 and out["refused"] and "reserved" in out["reason"]
     assert len(events(run_dir)) == 1
 
     assert bo(repo, "smoke", "--rationale", "why", "--actor", "user")[0] == 0

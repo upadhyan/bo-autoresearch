@@ -32,7 +32,7 @@ def seed():
 
 
 def fidelity():
-    """This round's rung, e.g. {"epochs": 3}. Empty outside the harness: use the code's own defaults."""
+    """This round's fidelity, e.g. {"epochs": 3}. Empty outside the harness: the code's own values apply."""
     return dict(_trial["fidelity"]) if _trial else {}
 
 
