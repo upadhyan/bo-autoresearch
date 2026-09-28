@@ -17,9 +17,9 @@ def configs(baseline: dict, rng) -> list[dict]:
     """CONFIGS diverse configs: a Latin hypercube over a box around each lever's baseline."""
     # ponytail: box = baseline ± max(|b|, 1)/2 because levers.json carries no ranges yet;
     # use the registered hypotheses' lever boxes once they exist.
-    cols = {}
+    cols: dict[str, list] = {}
     for name, b in baseline.items():
-        u = [(i + rng.random()) / CONFIGS for i in range(CONFIGS)]
+        u = [(i + 0.5) / CONFIGS for i in range(CONFIGS)]  # stratum midpoints keep configs apart
         rng.shuffle(u)
         if isinstance(b, bool):
             cols[name] = [x >= 0.5 for x in u]

@@ -1,9 +1,11 @@
 """Calibration round (R0) and the budget ledger, against toys with planted noise, ranks and cost."""
 import os
+import random
+import statistics
 
 import pytest
 
-from conftest import bo, events
+from conftest import bo, events, write_run_yaml
 
 
 def toy_env(**planted):
@@ -34,7 +36,9 @@ def test_r0_estimates_the_planted_noise_from_baseline_replicates(repo, init_run)
     noise = only(run_dir, "noise_estimate")
     assert noise["actor"] == "harness"
     p = noise["payload"]
-    assert p["sigma"] == pytest.approx(0.5, rel=0.4)  # k=30: the sample sd is within 40% w.p. >0.999
+    planted = [0.5 * random.Random(t["seed"]).gauss(0, 1) for t in baseline]  # the toy's noise draws
+    assert p["sigma"] == pytest.approx(statistics.stdev(planted))
+    assert p["sigma"] == pytest.approx(0.5, rel=0.5)  # k=30: sd of the estimate is ~0.13σ
     assert p["replication"] is True and p["deterministic"] is False
     [ref] = p["rungs"]
     assert ref["fidelity"] == {"epochs": 4} and ref["sigma"] == p["sigma"]
@@ -69,7 +73,7 @@ def test_a_faithful_cheap_rung_is_chosen_when_it_is_cheaper_to_a_verdict(repo, i
 def test_a_scrambled_cheap_rung_fails_and_the_loop_falls_back_to_the_reference(repo, init_run):
     run_dir = init_run(LADDER)
     code, out = bo(repo, "round-run", "--rationale", "calibrate",
-                   env=toy_env(sigma=0.01, sleep_per_epoch=0.03, scramble_below=2))
+                   env=toy_env(sigma=0.01, sleep_per_epoch=0.03, cheap_below=2, scramble=1))
     assert code == 0, out
 
     cal = only(run_dir, "fidelity_calibration")["payload"]
@@ -88,6 +92,30 @@ def test_a_scrambled_cheap_rung_fails_and_the_loop_falls_back_to_the_reference(r
     assert accepted["payload"]["fidelity"] == {"epochs": 1}
     _, status = bo(repo, "status")
     assert status["fidelity"] == {"fidelity": {"epochs": 1}, "proxy": "unvalidated"}
+
+
+def test_a_rung_whose_spread_is_under_3_sigma_fails_even_with_faithful_ranks(repo, init_run):
+    run_dir = init_run(LADDER)
+    code, out = bo(repo, "round-run", "--rationale", "calibrate",
+                   env=toy_env(sigma=0.01, cheap_below=2, cheap_replicate_sigma=5))
+    assert code == 0, out
+    cal = only(run_dir, "fidelity_calibration")["payload"]
+    [rung] = cal["rungs"]
+    assert rung["rho"] == pytest.approx(1.0)
+    assert rung["spread"] < 3 * rung["sigma"] and rung["passed"] is False
+    assert cal["chosen"] == {"epochs": 8} and cal["fallback"] is True
+
+
+def test_a_passing_but_noisier_cheap_rung_loses_to_the_reference(repo, init_run):
+    run_dir = init_run(LADDER)
+    code, out = bo(repo, "round-run", "--rationale", "calibrate",
+                   env=toy_env(sigma=0.01, sleep_per_epoch=0.03, cheap_below=2,
+                               cheap_replicate_sigma=0.3))
+    assert code == 0, out
+    cal = only(run_dir, "fidelity_calibration")["payload"]
+    [rung] = cal["rungs"]
+    assert rung["passed"] is True and rung["cost_s"] < cal["reference"]["cost_s"]
+    assert cal["chosen"] == {"epochs": 8} and cal["fallback"] is False
 
 
 def test_accept_proxy_is_refused_for_the_reference_a_passing_rung_or_before_r0(repo, init_run):
@@ -132,8 +160,8 @@ def test_round_run_after_r0_is_refused_until_a_hypothesis_is_registered(repo, in
 
 
 def test_a_trial_costing_more_than_the_remaining_budget_is_refused_and_logged(repo, init_run):
-    run_dir = init_run("budget_s: 1.0\nreference_fidelity: {epochs: 4}\n")
-    env = toy_env(sleep_per_epoch=0.15)  # ~0.6 s per trial: the first fits, a second can't
+    run_dir = init_run("budget_s: 2.0\nreference_fidelity: {epochs: 4}\n")
+    env = toy_env(sleep_per_epoch=0.3)  # ~1.3 s per trial: the first fits, a second can't
     assert bo(repo, "smoke", "--rationale", "first", env=env)[0] == 0
     code, out = bo(repo, "smoke", "--rationale", "second", env=env)
     assert code != 0 and out["refused"] and "budget" in out["reason"]
@@ -149,8 +177,8 @@ def test_a_trial_costing_more_than_the_remaining_budget_is_refused_and_logged(re
 
 
 def test_r0_stops_when_the_budget_runs_out(repo, init_run):
-    run_dir = init_run("budget_s: 1.0\nreference_fidelity: {epochs: 4}\n")
-    code, out = bo(repo, "round-run", "--rationale", "calibrate", env=toy_env(sleep_per_epoch=0.15))
+    run_dir = init_run("budget_s: 2.0\nreference_fidelity: {epochs: 4}\n")
+    code, out = bo(repo, "round-run", "--rationale", "calibrate", env=toy_env(sleep_per_epoch=0.3))
     assert code != 0 and out["refused"] and "budget" in out["reason"]
     assert only(run_dir, "trial_refused")["payload"]["kind"] == "baseline"
     assert only(run_dir, "round_ended")["payload"] == {"round": 0, "trigger": "budget_spent"}
@@ -166,8 +194,20 @@ def test_r0_stops_when_the_budget_runs_out(repo, init_run):
     ("deterministic: maybe\n", "deterministic"),
 ])
 def test_init_refuses_an_invalid_calibration_setup(repo, tmp_path, project_python, extra, field):
-    from conftest import write_run_yaml
     y = write_run_yaml(tmp_path / "run.yaml", project_python,
                        "budget_s: 10\nreference_fidelity: {epochs: 4}\n" + extra)
     code, out = bo(repo, "init", str(y), "--rationale", "go")
     assert code != 0 and out["refused"] and field in out["reason"]
+
+
+def test_a_rerun_after_a_budget_stop_keeps_the_noise_estimate_it_paid_for(repo, init_run):
+    run_dir = init_run("budget_s: 3.5\nreference_fidelity: {epochs: 8}\nladder: [{epochs: 1}]\n"
+                       "replicates_k: 2\n")
+    env = toy_env(sleep_per_epoch=0.1)  # smoke + 2+2 replicates ~3 s; a reference config can't fit
+    for _ in range(2):
+        code, out = bo(repo, "round-run", "--rationale", "calibrate", env=env)
+        assert code != 0 and out["refused"] and "budget" in out["reason"]
+    assert len(trials_of(run_dir, "smoke")) == 1 and len(trials_of(run_dir, "baseline")) == 4
+    assert len([e for e in events(run_dir) if e["type"] == "noise_estimate"]) == 1
+    assert [e["payload"]["trigger"] for e in events(run_dir) if e["type"] == "round_ended"] == [
+        "budget_spent", "budget_spent"]

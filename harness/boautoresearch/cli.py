@@ -32,6 +32,10 @@ class Refused(Exception):
     pass
 
 
+class BudgetRefused(Refused):
+    pass
+
+
 class _Parser(argparse.ArgumentParser):
     def error(self, message):
         raise Refused(message)
@@ -176,15 +180,17 @@ def _trial(run_dir: Path, con, a, kind: str, levers: dict, fidelity: dict, **ext
             "kind": kind, "fidelity": fidelity, "estimated_cost_s": estimate,
             "remaining_s": remaining, **extra})
         _regenerate(run_dir, con)
-        raise Refused(f"budget: a {kind} trial at {json.dumps(fidelity)} is estimated at "
+        raise BudgetRefused(f"budget: a {kind} trial at {json.dumps(fidelity)} is estimated at "
                       f"{estimate:.1f}s but {remaining:.1f}s of the budget remain")
     worktree = run_dir / "worktree"
     trial = {"trial": n, "kind": kind, "levers": levers, "fidelity": fidelity,
              "seed": random.Random(f"{run['run_id']}/{n}").getrandbits(31),
              "commit": _git(worktree, "rev-parse", "HEAD"),
              "artifact_dir": f"artifacts/trial-{n}", **extra}
-    elog.append(con, "trial_started", *((a.actor, {"rationale": a.rationale, **trial}) if a
-                                        else ("harness", trial)))
+    if a:
+        elog.append(con, "trial_started", a.actor, {"rationale": a.rationale, **trial})
+    else:
+        elog.append(con, "trial_started", "harness", trial)
     outcome = _run_trial(run_dir, run["runner"], trial)
     elog.append(con, "trial_" + outcome.pop("status"), "harness", {"trial": n, **outcome})
     _regenerate(run_dir, con)
@@ -215,54 +221,59 @@ def cmd_round_run(a) -> dict:
 def _run_r0(run_dir: Path, con, a, st: dict) -> dict:
     """The calibration round: smoke, baseline replicates (σ), then ladder calibration."""
     run = st["run"]
-    ref, ladder, k = run["reference_fidelity"], run["ladder"], run["replicates_k"]
+    ref, ladder = run["reference_fidelity"], run["ladder"]
     baseline = _baseline(run_dir)
     elog.append(con, "round_started", a.actor, {
         "rationale": a.rationale, "round": 0, "fidelity": ref, "pid": os.getpid(),
         "commit": _git(run_dir / "worktree", "rev-parse", "HEAD")})
 
-    def end(trigger, reason=None):
-        elog.append(con, "round_ended", "harness", {"round": 0, "trigger": trigger})
-        _regenerate(run_dir, con)
-        if reason:
-            raise Refused(reason)
-
+    trigger = "failed"
     try:
         if not any(t.get("kind") == "smoke" and t["status"] == "finished" for t in st["trials"]):
             smoke = _trial(run_dir, con, None, "smoke", baseline, ref, round=0)
             if smoke["status"] != "finished":
-                end("smoke_failed", f"the smoke trial failed: {smoke['reason']}: {smoke['error']}")
-        rows = []
-        for f in (ref, *ladder):
-            done = [] if run["deterministic"] else [
-                _trial(run_dir, con, None, "baseline", baseline, f, round=0) for _ in range(k)]
-            values = [t["objective"] for t in done if t["status"] == "finished"]
-            if not run["deterministic"] and len(values) < 2:
-                end("failed", f"fewer than 2 baseline replicates finished at {json.dumps(f)}")
-            rows.append({"fidelity": f, "n": len(values), "trials": [t["trial"] for t in done],
-                         "sigma": calibration.sigma(values) if values else 0.0,
-                         "mean": statistics.fmean(values) if values else None,
-                         "cost_s": _cost(elog.state(elog.read(con))["trials"], f)})
-        elog.append(con, "noise_estimate", "harness", {
-            "round": 0, "sigma": rows[0]["sigma"], "deterministic": run["deterministic"],
-            "replication": any(r["sigma"] > 0 for r in rows), "rungs": rows})
+                trigger = "smoke_failed"
+                raise Refused(f"the smoke trial failed: {smoke['reason']}: {smoke['error']}")
+        if st["noise"] is None:  # a rerun after a stop keeps the σ it already paid for
+            _estimate_noise(run_dir, con, baseline)
         out = {"round": 0, "noise_estimate": elog.state(elog.read(con))["noise"]}
         if ladder:
-            out["fidelity_calibration"] = _calibrate_ladder(run_dir, con, rows)
-    except Refused:
-        if elog.state(elog.read(con))["rounds"].get(0, {}).get("ended"):
-            raise
-        end("budget_spent")
+            out["fidelity_calibration"] = _calibrate_ladder(run_dir, con, out["noise_estimate"])
+        trigger = "calibrated"
+    except BudgetRefused:
+        trigger = "budget_spent"
         raise
-    end("calibrated")
+    finally:
+        elog.append(con, "round_ended", "harness", {"round": 0, "trigger": trigger})
+        _regenerate(run_dir, con)
     return {**out, **_status(elog.state(elog.read(con)))}
 
 
-def _calibrate_ladder(run_dir: Path, con, noise_rows: list[dict]) -> dict:
+def _estimate_noise(run_dir: Path, con, baseline: dict) -> None:
+    """k baseline replicates at each fidelity give its σ; a deterministic objective skips them."""
+    run = elog.state(elog.read(con))["run"]
+    rows = []
+    for f in (run["reference_fidelity"], *run["ladder"]):
+        done = [] if run["deterministic"] else [
+            _trial(run_dir, con, None, "baseline", baseline, f, round=0)
+            for _ in range(run["replicates_k"])]
+        values = [t["objective"] for t in done if t["status"] == "finished"]
+        if not run["deterministic"] and len(values) < 2:
+            raise Refused(f"fewer than 2 baseline replicates finished at {json.dumps(f)}")
+        rows.append({"fidelity": f, "n": len(values), "trials": [t["trial"] for t in done],
+                     "sigma": calibration.sigma(values) if values else 0.0,
+                     "mean": statistics.fmean(values) if values else None,
+                     "cost_s": _cost(elog.state(elog.read(con))["trials"], f)})
+    elog.append(con, "noise_estimate", "harness", {
+        "round": 0, "sigma": rows[0]["sigma"], "deterministic": run["deterministic"],
+        "replication": any(r["sigma"] > 0 for r in rows), "rungs": rows})
+
+
+def _calibrate_ladder(run_dir: Path, con, noise: dict) -> dict:
     run = elog.state(elog.read(con))["run"]
     cfgs = calibration.configs(_baseline(run_dir), random.Random(f"{run['run_id']}/calibration"))
     rows = [{"fidelity": r["fidelity"], "sigma": r["sigma"], "objectives": [], "trials": []}
-            for r in noise_rows]
+            for r in noise["rungs"]]
     for i, cfg in enumerate(cfgs):
         for r in rows:
             t = _trial(run_dir, con, None, "calibration", cfg, r["fidelity"], round=0, config=i)
@@ -334,7 +345,7 @@ def cmd_accept_proxy(a) -> dict:
     if rung is None:
         raise Refused(f"{a.fidelity} is not a rung of the ladder")
     if rung["passed"]:
-        raise Refused(f"{a.fidelity} passed calibration: it is validated, not an unvalidated proxy")
+        raise Refused(f"{a.fidelity} passed calibration: the harness already chooses among validated rungs")
     elog.append(con, "proxy_accepted_unvalidated", a.actor,
                 {"rationale": a.rationale, "fidelity": fidelity, "rho": rung["rho"],
                  "spread": rung["spread"], "sigma": rung["sigma"]})
