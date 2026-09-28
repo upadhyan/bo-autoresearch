@@ -42,6 +42,10 @@ _Avoid_: Retry, resurrection
 Shrinking an active hypothesis's lever ranges on evidence. The hypothesis and its reject conditions stay the same.
 _Avoid_: Pruning, refinement
 
+**Fidelity-sensitive**:
+Declared at registration for a hypothesis whose mechanism may only pay off at higher fidelity. It can never be rejected at a proxy fidelity.
+_Avoid_: Slow-burn, long-horizon
+
 **Rival**:
 A hypothesis offering a competing explanation to another, through separate levers. Rivals are tested together, and a verdict on one says nothing about whether it explains the other.
 _Avoid_: Conflict (too broad), alternative
@@ -68,8 +72,20 @@ _Avoid_: Score, target, metric (when meaning the optimized value)
 One evaluation of the objective at a single assignment of lever values. It always leaves an artifact.
 _Avoid_: Run, experiment
 
+**Replicate**:
+A trial that repeats an earlier trial's lever assignment with a new seed. It stays a trial of its own and is never averaged in.
+_Avoid_: Rerun, repeat, duplicate
+
+**Fidelity**:
+The cost level at which a trial evaluates the objective, e.g. training length or data fraction. All trials in a round share one fidelity.
+_Avoid_: Budget (reserved for trial counts), proxy (as a noun)
+
+**Reference fidelity**:
+The fidelity whose objective the user actually cares about. A proxy fidelity is valid only once checked against it.
+_Avoid_: Full run, real run
+
 **Round**:
-One Optuna study run under a fixed hypothesis set. Changing the hypothesis set ends the round.
+One Optuna study run under a fixed hypothesis set and fidelity. Changing either ends the round.
 _Avoid_: Phase, generation, iteration
 
 **Warm start**:
