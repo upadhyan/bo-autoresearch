@@ -78,6 +78,10 @@ _Avoid_: Mutual exclusion (which, for same-shape levers, is a merge into one cat
 A user-stated limit on what the research may try, with a severity of **prohibited** (never tried), **discouraged** (allowed only with a stated reason, at lower priority) or **preferred** (a soft pull, e.g. downstream compatibility).
 _Avoid_: Constraint (reserved for objective feasibility), guardrail, scope rule
 
+**Protected path**:
+Code or data the research may never change, such as the objective and its evaluation, so a score can only improve through levers and never by changing how the score is measured.
+_Avoid_: Read-only file, frozen code
+
 ### Search
 
 **Constraint**:
@@ -131,3 +135,7 @@ _Avoid_: Study (an Optuna study is disposable), database, history
 **Epoch**:
 A stretch of the experiment log over which the objective is the same function. A code change that alters the objective starts a new epoch, and trials from earlier epochs become telemetry.
 _Avoid_: Version, era, generation
+
+**Distilled branch**:
+The research's code with only the retained hypotheses' changes kept and the incumbent's lever values as defaults. The final confirmation checks it before the user receives it.
+_Avoid_: Clean branch, final code, merge
