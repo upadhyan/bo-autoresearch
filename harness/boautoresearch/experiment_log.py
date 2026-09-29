@@ -13,7 +13,7 @@ EVENT_TYPES = {"run_started", "trial_started", "trial_finished", "trial_failed",
                "hypothesis_rejected", "hypothesis_inconclusive", "hypothesis_escalated", "lever_frozen", "record",
                "commit_change", "dependency_added", "equivalence_check", "epoch_started", "narrowed",
                "hypothesis_prioritized", "hypothesis_parked", "hypothesis_unparked", "trial_enqueued",
-               "agent_trial_dropped", "checkpoint", "user_pause", "user_resume"}
+               "agent_trial_skipped", "checkpoint", "user_pause", "user_resume"}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (

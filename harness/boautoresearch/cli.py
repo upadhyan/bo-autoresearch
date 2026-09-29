@@ -42,7 +42,7 @@ class Refused(Exception):
     pass
 
 
-class BudgetRefused(Refused):
+class TrialRefused(Refused):
     """No trial fits: the budget is spent, or (reason max_trials) the trial ceiling is reached."""
     def __init__(self, message: str, reason: str = "budget_spent"):
         super().__init__(message)
@@ -269,13 +269,13 @@ def _trial(run_dir: Path, con, a, kind: str, levers: dict, fidelity: dict, **ext
         elog.append(con, "trial_refused", "harness", {"kind": kind, "fidelity": fidelity,
                                                       "max_trials": run["max_trials"], **extra})
         _regenerate(run_dir, con)
-        raise BudgetRefused(f"the run's ceiling of {run['max_trials']} trials is reached", "max_trials")
+        raise TrialRefused(f"the run's ceiling of {run['max_trials']} trials is reached", "max_trials")
     if remaining <= 0 or estimate > remaining:
         elog.append(con, "trial_refused", "harness", {
             "kind": kind, "fidelity": fidelity, "estimated_cost_s": estimate,
             "remaining_s": remaining, **extra})
         _regenerate(run_dir, con)
-        raise BudgetRefused(f"budget: a {kind} trial at {json.dumps(fidelity)} is estimated at "
+        raise TrialRefused(f"budget: a {kind} trial at {json.dumps(fidelity)} is estimated at "
                       f"{estimate:.1f}s but {remaining:.1f}s of the budget remain")
     worktree = run_dir / "worktree"
     trial = {"trial": n, "kind": kind, "levers": levers, "fidelity": fidelity,
@@ -448,7 +448,9 @@ def cmd_prioritize(a) -> dict:
     """The orchestrator's priority for H (higher runs first); the harness fills the slots with it
     at the next round boundary."""
     run_dir, con = _open_run()
-    h = _hypothesis(elog.load(con), a.hypothesis)
+    st = elog.load(con)
+    _not_ended(st)
+    h = _hypothesis(st, a.hypothesis)
     if h["status"] in ("rejected", "inconclusive"):
         raise Refused(f"{h['id']} is {h['status']}: it has left the loop")
     elog.append(con, "hypothesis_prioritized", a.actor,
@@ -457,7 +459,7 @@ def cmd_prioritize(a) -> dict:
     return _status(elog.load(con))
 
 
-PAUSED = "the user reviews the run, then `checkpoint --resume`"
+RESUME_HINT = "the user reviews the run, then `checkpoint --resume`"
 
 
 def cmd_checkpoint(a) -> dict:
@@ -465,8 +467,7 @@ def cmd_checkpoint(a) -> dict:
     checkpoint-mode round boundary."""
     run_dir, con = _open_run()
     st = elog.load(con)
-    if st["run_ended"]:
-        raise Refused(f"the run has ended ({st['run_ended']})")
+    _not_ended(st)
     if a.resume:
         if not st["paused"]:
             raise Refused("the run is not paused: nothing to resume")
@@ -484,6 +485,7 @@ def cmd_park(a) -> dict:
     """Withdraw H without a verdict (never evidence against it); its levers run at baseline."""
     run_dir, con = _open_run()
     st = elog.load(con)
+    _not_ended(st)
     _between_rounds(st, "parking happens")
     h = _hypothesis(st, a.hypothesis)
     if h["status"] not in ("proposed", "registered", "active", "retained"):
@@ -502,6 +504,7 @@ def cmd_unpark(a) -> dict:
     rejoins the search at a round boundary, its verdict schedule restarting."""
     run_dir, con = _open_run()
     st = elog.load(con)
+    _not_ended(st)
     h = _hypothesis(st, a.hypothesis)
     if h["status"] != "parked":
         raise Refused(f"{h['id']} is {h['status']}, not parked")
@@ -517,8 +520,7 @@ def cmd_stop(a) -> dict:
     """The user ends the run; a running round ends at its next step (running trials finish)."""
     run_dir, con = _open_run()
     st = elog.load(con)
-    if st["run_ended"]:
-        raise Refused(f"the run has already ended ({st['run_ended']})")
+    _not_ended(st)
     elog.append(con, "run_ended", a.actor, {"rationale": a.rationale, "reason": "user_stop"})
     _regenerate(run_dir, con)
     return _status(elog.load(con))
@@ -573,6 +575,11 @@ def _commit(worktree: Path, message: str) -> str:
     _git(worktree, "-c", "user.name=boautoresearch", "-c", "user.email=harness@boautoresearch",
          "commit", "-q", "--no-verify", "-m", message)
     return _git(worktree, "rev-parse", "HEAD")
+
+
+def _not_ended(st: dict) -> None:
+    if st["run_ended"]:
+        raise Refused(f"the run has ended ({st['run_ended']})")
 
 
 def _between_rounds(st: dict, what: str) -> None:
@@ -732,7 +739,7 @@ def _equivalence_check(run_dir: Path, con, sha: str, change: str) -> dict:
             for _ in range(2):
                 runs.append(_trial(run_dir, con, None, "equivalence", levers, fidelity, equivalence_of=name,
                                    **({"replicate_of": inc["trial"]} if name == "incumbent" and inc else {})))
-        except BudgetRefused as e:  # the run can't go on anyway: no round fits either
+        except TrialRefused as e:  # the run can't go on anyway: no round fits either
             refused = str(e)
             break
         ys = [t["objective"] for t in runs if t["status"] == "finished"]
@@ -764,7 +771,7 @@ def _new_epoch(run_dir: Path, con, sha: str, change: str, breaking: bool) -> dic
     try:
         for _ in range(1 if run["deterministic"] else run["replicates_k"]):
             done.append(_trial(run_dir, con, None, "baseline", baseline, fidelity))
-    except BudgetRefused:
+    except TrialRefused:
         pass  # σ stays unmeasured in this epoch (None below); the budget ends the run
     ys = [t["objective"] for t in done if t["status"] == "finished"]
     sigma = 0.0 if run["deterministic"] else calibration.sigma(ys) if len(ys) >= 2 else None
@@ -781,37 +788,37 @@ def cmd_round_run(a) -> dict:
     if _git(run_dir / "worktree", "status", "--porcelain"):
         raise Refused("the worktree has uncommitted changes: a round runs on one commit, so commit "
                       "lever code with `commit-lever <H>` first")
-    if st["run_ended"]:
-        raise Refused(f"the run has ended ({st['run_ended']})")
+    _not_ended(st)
     if st["paused"]:
-        raise Refused(f"the run is paused at a checkpoint: {PAUSED}")
+        raise Refused(f"the run is paused at a checkpoint: {RESUME_HINT}")
     if not st["r0_complete"]:
         return _run_r0(run_dir, con, a, st)
-    def coded_selection(st: dict) -> list[dict]:
+    def ready_selection(st: dict) -> list[dict]:
+        """The selection, refused while its code or (once δ is set) its expected verdicts are missing."""
         selected = _selected(st)
         if not selected:
             raise Refused("no hypothesis is registered: propose and register one first")
         if uncoded := [h["id"] for h in selected if not h["commit"]]:
             raise Refused(f"the round selects {uncoded}, whose lever code is not committed: "
                           "write it, then `smoke <H>` and `commit-lever <H>`")
+        if st["delta"] is not None and (missing := _expected_missing(st)):
+            raise Refused(f"record expected {', '.join(missing)} first: before each round, an expected "
+                          "verdict (retain, reject or undecided, one-line reason) for every hypothesis it tests")
         return selected
 
-    selected = coded_selection(st)
+    selected = ready_selection(st)
     if st["run"]["ladder"] and not st["calibration"]:  # still part of R0; needs the lever boxes
         try:
             _calibrate_ladder(run_dir, con, st["noise"], _space(selected))
-        except BudgetRefused as e:
+        except TrialRefused as e:
             # R0 itself has ended: only the run ends
             return _end_run(run_dir, con, {"round": 0, "trigger": e.reason}, log_round=False)
         st = elog.load(con)
         if st["delta"] is None:  # shown before δ is set
             return {"round": 0, "fidelity_calibration": st["calibration"], **_status(st)}
-        coded_selection(st)  # the chosen rung's cost moves the dimension cap, so the selection too
+        ready_selection(st)  # the chosen rung's cost moves the dimension cap, so the selection too
     if st["delta"] is None:
         raise Refused(f"set δ first: `{_delta_duty(st)}`")
-    if missing := _expected_missing(st):
-        raise Refused(f"record expected {', '.join(missing)} first: before each round, an expected "
-                      "verdict (retain, reject or undecided, one-line reason) for every hypothesis it tests")
     return _run_round(run_dir, con, a, st)
 
 
@@ -835,7 +842,7 @@ def _run_r0(run_dir: Path, con, a, st: dict) -> dict:
             _estimate_noise(run_dir, con, baseline)
         out = {"round": 0, "noise_estimate": elog.load(con)["noise"]}
         trigger = "calibrated"  # the ladder is calibrated at the first R1 round-run (needs levers)
-    except BudgetRefused as e:
+    except TrialRefused as e:
         trigger = e.reason
         raise
     finally:
@@ -853,12 +860,13 @@ def _space(selected: list[dict]) -> dict:
     return {n: h["spec"]["levers"][n] for h in selected for n in _group(h)}
 
 
-def _end_run(run_dir: Path, con, round_ended: dict, log_round: bool = True, **ended) -> dict:
-    """The round and the run end together: the budget is spent (or the trial ceiling reached), or
-    the target is reached and confirmed. `ended`: the run_ended payload, the round's trigger by default."""
+def _end_run(run_dir: Path, con, round_ended: dict, log_round: bool = True) -> dict:
+    """No trial fits (the budget is spent, or the trial ceiling reached): the round and the run end
+    together, unless a user stop ended the run first."""
     if log_round:
         elog.append(con, "round_ended", "harness", round_ended)
-    elog.append(con, "run_ended", "harness", ended or {"reason": round_ended["trigger"]})
+    if not elog.load(con)["run_ended"]:
+        elog.append(con, "run_ended", "harness", {"reason": round_ended["trigger"]})
     _regenerate(run_dir, con)
     return {**round_ended, **_status(elog.load(con))}
 
@@ -890,6 +898,11 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
     def best(trials):
         return bo_study.incumbent(eligible(trials), sign, confirmations)
 
+    def user_trigger(st: dict) -> str | None:
+        """A `stop` (the only way the run ends from outside a round) or a `checkpoint` pause since
+        the round started: it ends at its next step."""
+        return "user_stop" if st["run_ended"] else "checkpoint" if st["paused"] else None
+
     inc, trigger, noise, drift = best(st["trials"]), None, None, None
     stall_after = max(5 * len(space), 20)
     share = ESCALATED_SHARE if any(e["step"] == "replicates" for h in selected
@@ -901,8 +914,10 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
                for q in st["queue"] if q["round"] == r]
     try:
         for kind, cfg, extra in chosen:
+            if trigger := user_trigger(elog.load(con)):
+                break
             if why := _config_error(cfg, space):  # bounds-checked again against the round's space
-                elog.append(con, "agent_trial_dropped", "harness",
+                elog.append(con, "agent_trial_skipped", "harness",
                             {"round": r, "kind": kind, "config": cfg, "reason": why, **extra})
                 continue
             t = _trial(run_dir, con, None, kind, {**baseline, **cfg}, fidelity, round=r, **extra)
@@ -911,11 +926,7 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
         while trigger is None:
             st = elog.load(con)
             inc = best(st["trials"])
-            if st["run_ended"]:  # only `stop` ends the run from outside the round
-                trigger = "user_stop"
-                break
-            if st["paused"]:  # the user's `checkpoint` while the round ran
-                trigger = "checkpoint"
+            if trigger := user_trigger(st):
                 break
             # the user's target, reached by the confirmed incumbent (≥ 2 replicates) at the reference
             # ponytail: never at a proxy fidelity; confirm a proxy's incumbent at the reference if
@@ -964,9 +975,9 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
         st = elog.load(con)
         inc = best(st["trials"])
         noise = _reestimate_noise(con, st, r, eligible, fidelity) if confirmations else None
-        if fidelity != ref and inc and trigger != "user_stop":  # a stopped run runs no more trials
+        if fidelity != ref and inc and not st["run_ended"]:  # a stopped run runs no more trials
             drift = _drift_check(run_dir, con, r, inc, eligible, sign)
-    except BudgetRefused as e:
+    except TrialRefused as e:
         _finalise_rejects(con, r, None)
         return {**_end_run(run_dir, con, {"round": r, "trigger": e.reason, "incumbent": inc}),
                 "verdicts": _round_verdicts(elog.load(con), r)}
@@ -978,7 +989,7 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
     if trigger == "stall":
         _escalate(con, elog.load(con), r)
     elog.append(con, "round_ended", "harness", {"round": r, "trigger": trigger, "incumbent": inc})
-    if trigger == "target":
+    if trigger == "target" and not elog.load(con)["run_ended"]:
         elog.append(con, "run_ended", "harness", {"reason": "target_reached", "incumbent": inc})
     st = elog.load(con)
     if run["checkpoint"] and not st["paused"] and not st["run_ended"]:  # checkpoint mode
@@ -1417,9 +1428,9 @@ def _dimension_cap(st: dict) -> int | None:
 
 def _exclusive(a: dict, b: dict) -> bool:
     """Either declares the other (any version) in exclusive_with."""
-    def names(x, y):
+    def declares(x, y):
         return any(int(re.match(r"H(\d+)", i)[1]) == y["number"] for i in x["spec"].get("exclusive_with", []))
-    return names(a, b) or names(b, a)
+    return declares(a, b) or declares(b, a)
 
 
 def _selected(st: dict) -> list[dict]:
@@ -1470,8 +1481,7 @@ def cmd_enqueue(a) -> dict:
     """An agent-chosen trial for the next round, with the objective the agent expects of it."""
     run_dir, con = _open_run()
     st = elog.load(con)
-    if st["run_ended"]:
-        raise Refused(f"the run has ended ({st['run_ended']})")
+    _not_ended(st)
     if not st["r0_complete"]:
         raise Refused("agent-chosen trials run in BO rounds, from R1: run the calibration round first")
     if not math.isfinite(a.expected):
@@ -1524,7 +1534,7 @@ def _next(st: dict) -> list[str]:
     duties += [f"record expected {h} (retain, reject or undecided, with a one-line reason) before the round"
                for h in _expected_missing(st)]
     if st["paused"]:
-        duties.append(f"the run is paused: {PAUSED}")
+        duties.append(f"the run is paused: {RESUME_HINT}")
     return duties or ["round-run"]
 
 

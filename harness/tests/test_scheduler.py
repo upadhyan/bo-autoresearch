@@ -272,7 +272,7 @@ def test_agent_chosen_trials_are_capped_per_round_by_a_shrinking_cap_and_need_an
     assert first[0]["levers"] == {"H1.x": 0.7, "H1.y": 0.3}
     assert [t["levers"]["H1.x"] for t in first[1:]] == [0.6, 0.65, 0.75]
     assert [t["expected"] for t in first[1:]] == [0.7] * 3 and "expected" not in first[0]
-    assert [(d["kind"], d["config"], "range" in d["reason"]) for d in of_type(run_dir, "agent_trial_dropped")] == [
+    assert [(d["kind"], d["config"], "range" in d["reason"]) for d in of_type(run_dir, "agent_trial_skipped")] == [
         ("seed", {"H1.x": 5.0}, True)]
     assert sum(t["kind"] in ("seed", "agent") for t in round_trials(run_dir, 1)) == 4
     # the cap shrinks: max(1, 6 − 2) = 4 in R2
