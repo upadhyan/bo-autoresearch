@@ -1,8 +1,12 @@
 """Parallel trials: run.yaml `workers` runs up to that many trials of a round at once."""
+import subprocess
+import sys
+import time
+
 import pytest
 
-from conftest import bo, events, round_run
-from test_rounds import BASE, coded, eligible_now, init, make_repo, of_type, started_in, toy_env
+from conftest import bo, events, expect_all, round_run
+from test_rounds import BASE, coded, eligible_now, gone, init, make_repo, of_type, started_in, toy_env
 
 ENDS = ("trial_finished", "trial_failed", "trial_abandoned")
 
@@ -93,3 +97,77 @@ def test_trials_in_flight_are_charged_up_front_so_parallel_trials_never_overdraw
     # the two in flight when the third was refused finished and were recorded in the round
     assert ended_before_round_end(run_dir, 1) and all(t["status"] == "finished" for t in trials)
     assert out["budget"]["spent_s"] <= 7.8
+
+
+def test_a_search_space_change_ends_a_parallel_round_once_the_trials_in_flight_are_recorded(tmp_path,
+                                                                                          project_python):
+    # δ out of reach: the bowl is `irrelevant` next to it; its confirmed reject ends the round
+    repo = make_repo(tmp_path)
+    run_dir = init(repo, project_python, BASE + "delta: 10\nseed: 3\nworkers: 3\n")
+    env = toy_env(sigma=0.01, sleep=0.2)
+    coded(repo, run_dir, tmp_path, env=env)
+    code, out = round_run(repo, "--rationale", "search", env=env)
+    assert code == 0, out
+    assert out["trigger"] == "search_space"
+    [first, confirming] = of_type(run_dir, "verdict")
+    assert first["outcome"] == "pending-reject" and confirming["outcome"] == "reject"
+    # checks fall due as trials land: one landing may bring up to 3 past the burn-in of 20
+    assert 20 <= first["burn_in"]["fresh"] <= 22
+    assert confirming["burn_in"]["fresh"] >= first["burn_in"]["fresh"] + 10
+    assert [p["id"] for p in of_type(run_dir, "hypothesis_rejected")] == ["H1.v1"]
+    assert max(len(others) for _, others in flights(run_dir, 1)) == 2
+    # the trials in flight at the confirming check finished and belong to the round
+    assert ended_before_round_end(run_dir, 1)
+    assert all(t["status"] == "finished" for t in started_in(run_dir, 1))
+
+
+def test_a_killed_parallel_round_resumes_with_every_trial_in_flight_abandoned_and_none_retried(
+        tmp_path, project_python):
+    repo = make_repo(tmp_path)
+    run_dir = init(repo, project_python, BASE + "delta: 10\nseed: 3\nworkers: 3\n")
+    coded(repo, run_dir, tmp_path, env=toy_env(sigma=0.01))
+    n = len(of_type(run_dir, "trial_started"))
+    # from the round's 7th trial on, every trial hangs: three of them end up in flight together
+    env = toy_env(sigma=0.01, sleep=120, sleep_from=n + 7)
+    expect_all(repo)
+    p = subprocess.Popen([sys.executable, "-m", "boautoresearch", "round-run", "--rationale", "go"],
+                         cwd=repo, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    deadline = time.monotonic() + 90
+
+    def hung():
+        return [t for t in started_in(run_dir, 1) if t["trial"] >= n + 7]
+
+    def beating(t):
+        return any(h["trial"] == t["trial"] and h["elapsed_s"] >= 1 for h in of_type(run_dir, "trial_heartbeat"))
+
+    while len(hung()) < 3 or not all(beating(t) for t in hung()):
+        assert time.monotonic() < deadline and p.poll() is None
+        time.sleep(0.1)
+    p.kill()
+    p.wait()
+    stuck = hung()
+    runners = {h["runner_pid"] for h in of_type(run_dir, "trial_heartbeat") if h["trial"] in {t["trial"] for t in stuck}}
+    assert len(stuck) == 3 and len(runners) == 3
+    spent = bo(repo, "status")[1]["budget"]["spent_s"]
+
+    code, out = round_run(repo, "--rationale", "resume", env=toy_env(sigma=0.01))
+    assert code == 0, out
+    assert all(gone(pid) for pid in runners)  # no orphaned runner goes on uncharged
+    abandoned = of_type(run_dir, "trial_abandoned")
+    assert sorted(a["trial"] for a in abandoned) == sorted(t["trial"] for t in stuck)
+    last_beat = {t["trial"]: max(h["elapsed_s"] for h in of_type(run_dir, "trial_heartbeat")
+                                 if h["trial"] == t["trial"]) for t in stuck}
+    assert all(a["wall_clock_s"] == last_beat[a["trial"]] for a in abandoned)
+    assert [(e["round"], e["trigger"]) for e in of_type(run_dir, "round_ended")][1:3] == [
+        (1, "interrupted"), (2, "search_space")]
+    # nothing lost or run twice: every trial id once, the abandoned ones never retried
+    r2 = started_in(run_dir, 2)
+    ids = [t["trial"] for t in of_type(run_dir, "trial_started")]
+    assert ids == list(range(1, len(ids) + 1))
+    assert not {t["trial"] for t in stuck} & {t["trial"] for t in r2}
+    assert ended_before_round_end(run_dir, 2)
+    # R2 is charged exactly its trials on top of what R1 left, abandoned trials up to their last heartbeat
+    _, status = bo(repo, "status")
+    assert status["trials"]["abandoned"] == 3
+    assert status["budget"]["spent_s"] == pytest.approx(
+        spent + sum(last_beat.values()) + sum(t["wall_clock_s"] for t in r2))

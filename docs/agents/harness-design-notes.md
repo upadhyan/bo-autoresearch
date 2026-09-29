@@ -714,3 +714,20 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   `exec`/`eval`, `builtins|sys.<exec|eval|modules|__import__>`, any str matching `\bboautoresearch\b`); refused when
   added against the base (Counter difference). Not "verify with the harness unimportable": the harness runner imports
   it in-process. Residual: a subprocess, a .pth file.
+- workers (parallel trials, #21 story 16): a BO round (R1+) keeps up to `workers` trials in flight; everything else (R0, ladder
+  calibration, smoke, equivalence, drift, wrap-up) stays one at a time (ponytail: their trials are few). `cli._start` (gates +
+  trial_started) and `cli._outcome` (trial_finished/failed) run on the main thread; only the subprocess wait (`_run_trial`,
+  heartbeats on its own connection) runs in a `ThreadPoolExecutor` worker, so the log and the Optuna study have one writer.
+  Pending points: GPSampler (Optuna 5) already conditions asks on RUNNING trials (qLogEI, Kriging believer), and an ask
+  is RUNNING until told, so no constant liar is added; an ask equal to an in-flight ask is told FAIL and the round waits
+  for a landing. Budget: the gate charges running trials their estimated cost (`_in_flight`, 0 serially), and so does
+  the round cap (which now also exempts only the first trial: `spent > 0 or flight`). Budget stays summed per-trial
+  wall-clock (spec), so W workers spend it ~W× faster in real time. Triggers with trials in flight: a stall is judged
+  only with nothing in flight (wait for a landing, re-evaluate: a trial still running may be a new incumbent owed
+  confirmations); every other trigger (search_space, cap, target, user_stop/checkpoint, prohibited, and a budget/ceiling
+  refusal) stops launching, lets the in-flight trials finish, and records them in the round before round_ended. Landed
+  trials are logged in trial order within one wait; "new incumbent"/owed confirmations replay in trial (start) order as
+  before. A verdict check may see up to `workers` trials past its due count. Replicate-floor picks count in-flight
+  replicates. A crash leaves every in-flight trial running with a dead pid: recovery abandons and killpgs each (no
+  change); a main-thread exception killpgs the in-flight runners. Timing makes parallel runs non-replayable (the log
+  still rebuilds every file). workers: 1 takes the same path with at most one trial in flight (same events).
