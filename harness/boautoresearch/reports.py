@@ -60,7 +60,8 @@ def _progress(t: dict) -> str:
     if v["outcome"] == "pending-reject":
         return f"a reject is pending, confirmed or dropped at {v['confirmation']['due_at']} fresh sampler trials"
     held = f"{v['held']}; " if v["held"] else ""
-    return f"{held}undecided after {fresh} fresh sampler trials (next check at {fresh + spacing}, inconclusive at {cap})"
+    return (f"{held}undecided after {fresh} fresh sampler trials (next check at {fresh + spacing}; evidence cap "
+            f"{v['burn_in']['evidence']} of {cap} sampler trials)")
 
 
 ASIDE = {"parked": "parked: {}", "pruned": "pruned under {}", "inconclusive": "inconclusive: {}", "merged": "{}"}

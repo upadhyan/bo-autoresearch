@@ -1863,13 +1863,12 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
                 trigger = "target"
                 break
             checked = _verdict_checks(con, st, r, space, baseline, eligible, sign)
-            if checked:  # SUMMARY.md changes after every verdict
-                _regenerate(run_dir, con)
+            if checked:  # SUMMARY.md changes after every verdict; a reject just gone pending must hold
+                _regenerate(run_dir, con)  # the round open below
+                st = elog.load(con)
             if any(v["frozen"] or v["outcome"] in ("reject", "inconclusive") for v in checked):
                 trigger = "search_space"  # a confirmed reject, a freeze or an inconclusive
                 break
-            if checked:  # a reject just gone pending must hold the round open below
-                st = elog.load(con)
             pending, since = _progress(st, r, eligible, sign, confirmations)
             holding = any((v := _latest(h, st)) is not None and v["outcome"] == "pending-reject"
                           for h in _in_search(st))  # a pending reject holds the round open
@@ -2032,14 +2031,27 @@ def _fresh(st: dict, h: dict, eligible) -> list[int]:
             and t["round"] >= h["activated_round"] and h["id"] not in t.get("masked", [])]
 
 
+def _evidence(st: dict, h: dict) -> int:
+    """The evidence cap's count: finished sampler trials of this epoch since the hypothesis entered the
+    search, where it was effective (not masked), at every fidelity and whatever its group was then (a
+    rung change or a freeze doesn't restart it). A fidelity-sensitive hypothesis counts only the current
+    fidelity's: a proxy fidelity's trials are no evidence about it at a dearer rung."""
+    fid = st["fidelity"]["fidelity"]
+    return sum(t["kind"] == "sampler" and t["status"] == "finished" and t.get("epoch", 0) == st["epoch"]["epoch"]
+               and t["round"] >= h["activated_round"] and h["id"] not in t.get("masked", [])
+               and (t["fidelity"] == fid or not h["spec"]["fidelity_sensitive"]) for t in st["trials"])
+
+
 def _burn_in(d: int) -> int:
     """Fresh sampler trials a d-lever group needs before its first verdict check."""
     return max(10 * d, 20)
 
 
 def _schedule(h: dict) -> dict:
+    """Burn-in and spacing on the current group; the evidence cap on the declared levers (a freeze
+    shrinks the group, not the evidence the hypothesis was allowed)."""
     d = len(_group(h))
-    return {"needed": _burn_in(d), "spacing": max(5 * d, 10), "cap": max(40 * d, 80)}
+    return {"needed": _burn_in(d), "spacing": max(5 * d, 10), "cap": max(40 * len(h["spec"]["levers"]), 80)}
 
 
 def _verdict_checks(con, st: dict, r: int, space: dict, baseline: dict, eligible,
@@ -2080,11 +2092,13 @@ def _verdict_checks(con, st: dict, r: int, space: dict, baseline: dict, eligible
             outcome = "retained"
         else:
             outcome = "active"
+        evidence = _evidence(st, h)
+        capped = outcome == "active" and evidence >= sched["cap"]
         # at a proxy fidelity the evidence cap waits for escalation (a stall moves the run up a rung)
         # ponytail: unbounded there until a stall or the budget ends it; escalate a held hypothesis at its
         # round's end if stalls prove too rare
-        if outcome == "active" and len(fresh) >= sched["cap"] and not late:
-            outcome, reason = "inconclusive", f"no verdict after {len(fresh)} fresh sampler trials"
+        if capped and not late:
+            outcome, reason = "inconclusive", f"no verdict after {evidence} sampler trials"
         frozen = []
         if gated and outcome in ("active", "retained") and len(group) > 1:
             # one lever per check, the least helpful first: two substitutes each show Δ_i ≈ 0 (the
@@ -2098,7 +2112,7 @@ def _verdict_checks(con, st: dict, r: int, space: dict, baseline: dict, eligible
             "id": vid, "hypothesis": h["id"], "round": r, "check": check, "group": group,
             "outcome": outcome, "condition": condition, "held": held, "reason": reason,
             **stats, "delta": delta, "gates": gates,
-            "burn_in": {"fresh": len(fresh), **sched, "passed": len(fresh) >= sched["needed"]},
+            "burn_in": {"fresh": len(fresh), "evidence": evidence, **sched, "passed": len(fresh) >= sched["needed"]},
             "confirmation": {"pending": outcome == "pending-reject",
                              "confirms": last["id"] if last and outcome == "reject" else None,
                              "due_at": len(fresh) + sched["spacing"] if outcome == "pending-reject"
@@ -2146,9 +2160,18 @@ def _against(lv: dict, best) -> bool:
 def _finalise_rejects(con, r: int, drift: dict | None) -> None:
     """The round's confirmed rejects. At a proxy fidelity they stand only once the drift check
     passed; a broken (or unchecked) proxy fidelity logs them as inconclusive instead, and an undecidable
-    drift check (the proxy ordered no config against the incumbent) defers them to a later round."""
+    drift check (the proxy ordered no config against the incumbent) defers them to a later round.
+    The round's freezes (a lever's reject) stand on the same terms: otherwise the lever is unfrozen."""
     st = elog.load(con)
-    at_proxy = st["fidelity"]["fidelity"] != st["run"]["reference_fidelity"]
+    at_proxy = st["rounds"][r]["fidelity"] != st["run"]["reference_fidelity"]
+    why = None if not at_proxy or (drift and drift["broken"] is False) else (
+        "undecidable proxy fidelity" if drift and drift.get("undecidable") else
+        "broken proxy fidelity" if drift and drift["broken"] else "proxy fidelity unchecked")
+    for h in _in_search(st):
+        for v in h["verdicts"]:
+            for n in v["frozen"] if why and v["round"] == r else []:
+                elog.append(con, "lever_unfrozen", "harness", {"id": h["id"], "lever": n, "verdict": v["id"],
+                                                               "reason": why})
     last = [(h, h["verdicts"][-1]) for h in _in_search(st) if h["verdicts"]]
     confirmed = [(h, v) for h, v in last if v["round"] == r and v["outcome"] == "reject"]
     # substitutes (two levers doing the same thing) each show Δ ≈ 0, the other optimised in both terms:
@@ -2163,16 +2186,14 @@ def _finalise_rejects(con, r: int, drift: dict | None) -> None:
         if v["condition"] == "no-improvement" and (v["delta_stat"]["upper"], v["id"]) != first:
             elog.append(con, "reject_deferred", "harness", {"id": h["id"], "verdict": v["id"], "round": r})
             continue
-        if at_proxy and drift and drift.get("undecidable"):
+        if why == "undecidable proxy fidelity":
             # ponytail: a proxy fidelity that never orders anything defers every round until the budget ends
             # or a stall escalates; send it up a rung after one such deferral if that shows up in practice
             elog.append(con, "reject_deferred", "harness", {"id": h["id"], "verdict": v["id"], "round": r,
-                                                            "reason": "undecidable proxy fidelity"})
-        elif at_proxy and not (drift and drift["broken"] is False):
-            reason = "broken proxy fidelity" if drift and drift["broken"] else "proxy fidelity unchecked"
-            elog.append(con, "hypothesis_inconclusive", "harness",
-                        {"id": h["id"], "verdict": v["id"], "reason": reason})
-            _removal(con, h["id"], "inconclusive", reason)
+                                                            "reason": why})
+        elif why:
+            elog.append(con, "hypothesis_inconclusive", "harness", {"id": h["id"], "verdict": v["id"], "reason": why})
+            _removal(con, h["id"], "inconclusive", why)
         else:
             elog.append(con, "hypothesis_rejected", "harness", {
                 "id": h["id"], "verdict": v["id"], "condition": v["condition"],
@@ -2288,7 +2309,7 @@ def _drift_check(run_dir: Path, con, r: int, inc: dict, eligible, sign: int) -> 
     def trusted(levers: dict) -> dict:
         return {**levers, **{n: v for n, v in inc["levers"].items() if n in late}}
     proxy = {c["trial"]: c for c in bo_study.ranked(eligible(st["trials"]), sign)}
-    p_sigma, p_df = _pooled_noise(st, st["fidelity"]["fidelity"])
+    p_sigma, p_df = _pooled_noise(st, st["rounds"][r]["fidelity"])  # the round's (an escalation moved the run's)
     p_q, top = _t(1 - CHECK_ALPHA, p_df), proxy[inc["trial"]]
 
     def ordered(t: dict) -> bool:
