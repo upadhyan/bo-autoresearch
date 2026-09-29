@@ -1639,6 +1639,9 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
     """R1+: GPSampler searches the selected hypotheses' levers until a round-end trigger fires."""
 
     run, r = st["run"], max(st["rounds"]) + 1
+    for n in _selection(st)[1]:  # the cap is tight: retained levers narrowed, never frozen
+        elog.append(con, "narrowed", "harness", {**n, "round": r, "cap": True})
+    st = elog.load(con)
     selected = _selected(st)
     space, baseline = _space(selected), _baseline(run_dir)
     fidelity, ref = st["fidelity"]["fidelity"], run["reference_fidelity"]
@@ -2355,17 +2358,31 @@ def _exclusive(a: dict, b: dict) -> bool:
 
 
 def _selected(st: dict) -> list[dict]:
+    return _selection(st)[0]
+
+
+def _selection(st: dict) -> tuple[list[dict], list[dict]]:
     """The hypotheses the next round searches, a deterministic function of the log: those in the
     search stay (retained ones included), then the queue joins in order while the lever dimensions
     fit the cap (a lower priority never jumps a higher one that doesn't fit; the first always fits an
-    empty round). A hypothesis exclusive with one already chosen is skipped."""
-    # ponytail: retained hypotheses keep their full ranges when the cap is tight; narrow the oldest
-    # concentrated ones (spec: "narrowed, not frozen") if they crowd the queue out
+    empty round). A hypothesis exclusive with one already chosen is skipped. When the cap is tight
+    (the next unit doesn't fit), the oldest retained hypotheses whose posterior is concentrated are
+    narrowed, never frozen, to their round's suggested windows, as few as let the unit fit: their
+    narrowed levers stay in the search as context, uncounted by the cap. -> (the selection, the
+    narrowings the round start logs: [{id, lever, before, after, verdict}])"""
     # ponytail: queued hypotheses flagged as interacting, and rivals, join together or not at all; a revived
     # version rides with its partner uncounted (spec: the same round), so it can take a round past the cap
     chosen, queue, hyps = _in_search(st), _queue(st), st["hypotheses"]
     linked = {frozenset((hyps[x]["number"], hyps[p]["number"])) for x, p in [*_links(st), *_rivals(st)]}
-    cap, dims = _dimension_cap(st), sum(len(_group(h)) for h in chosen)
+    cap, dims = _dimension_cap(st), sum(len(_group(h)) - len(_context(h)) for h in chosen)
+    windows: dict[str, list[dict]] = {}  # the last round's suggested narrowings of levers not yet context
+    for n in reports.narrowings(st, max(st["rounds"])) if st["r0_complete"] else []:
+        if n["lever"] in set(_group(hyps[n["id"]])) - _context(hyps[n["id"]]):  # (not frozen since)
+            windows.setdefault(n["id"], []).append(n)
+    # oldest first (one narrowed at this boundary already has its window's evidence spent)
+    spare = sorted((h for h in chosen if h["status"] == "retained" and h["id"] in windows
+                    and h.get("narrowed_round") != _upcoming(st)), key=lambda h: h["registered"])
+    narrowed: list[dict] = []
     for h in queue:
         if h in chosen or any(_exclusive(h, x) for x in chosen):
             continue
@@ -2376,10 +2393,21 @@ def _selected(st: dict) -> list[dict]:
                 unit.append(x)
         d = sum(len(_group(u)) for u in unit if "revived_from" not in u or u is h)
         if chosen and cap is not None and dims + d > cap:
-            break
+            k, free = 0, dims
+            while free + d > cap and k < len(spare):
+                free, k = free - len(windows[spare[k]["id"]]), k + 1
+            if free + d > cap:
+                break
+            narrowed += spare[:k]
+            spare, dims = spare[k:], free
         chosen += unit
         dims += d
-    return chosen
+    return chosen, [n for h in narrowed for n in windows[h["id"]]]
+
+
+def _context(h: dict) -> set[str]:
+    """A retained hypothesis's levers narrowed for a tight cap: searched as context, uncounted by it."""
+    return set(h.get("context", [])) & set(_group(h)) if h["status"] == "retained" else set()
 
 
 def _upcoming(st: dict) -> int:
@@ -2455,8 +2483,11 @@ def _narrative_missing(st: dict) -> list[int]:
 
 
 def _schedule_status(st: dict) -> dict:
-    selected = _selected(st)
+    selected, narrowing = _selection(st)
     return {"selected": [h["id"] for h in selected], "queue": [h["id"] for h in _queue(st)],
+            # retained levers the next round start narrows for the cap, and those searched as context
+            "narrowing": narrowing, "context": sorted({h["id"] for h in selected if _context(h)}
+                                                      | {n["id"] for n in narrowing}),
             "dimension_cap": _dimension_cap(st), "dimensions": len(_space(selected)),
             "expected_missing": _expected_missing(st), "agent_trials": _agent_trials(st),
             # flagged to the user, never starved silently

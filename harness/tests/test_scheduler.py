@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -327,6 +328,61 @@ def test_a_hypothesis_left_unselected_for_3_rounds_is_flagged(tmp_path, project_
         starved.append(schedule(repo)["starved"])
     assert starved == [[], [], [{"id": "H2.v1", "rounds": 3}]]
     assert all(s["hypotheses"] == ["H1.v1"] for s in of_type(run_dir, "round_started") if s["round"] >= 1)
+
+
+def tight_cap_run(d, python, seed):
+    """R0, then R1 searching H1 (a useful one-lever bowl, a no-op at its baseline 0.4, best at 0.7),
+    then H2 (two do-nothing levers) queued behind it, and baseline smokes spending the budget until the
+    dimension cap is 2: H1's lever and H2's two don't fit together. -> (repo, run_dir)"""
+    d.mkdir(exist_ok=True)
+    repo = make_repo(d)
+    run_dir = init(repo, python, BASE.replace("budget_s: 3600", "budget_s: 150") + f"delta: 0.1\nseed: {seed}\n")
+    env = toy_env(sigma=0.05, sleep=0.5)  # trials of ~0.6 s: R1 leaves a cap of ~4
+    assert round_run(repo, "--rationale", "calibrate", env=env)[0] == 0
+    code_hypothesis(repo, run_dir, d, 1, spec({"x": lever(0.4)}),
+                    '    term += 4 * ((lever("H1.x") - 0.7) ** 2 - 0.09)', env)
+    code, out = round_run(repo, "--rationale", "R1", env=env)
+    assert code == 0, out
+    assert out["schedule"]["narrowing"] == []  # nothing queued is crowded out: no narrowing
+    code_hypothesis(repo, run_dir, d, 2, spec({"x": lever(), "y": lever()}),
+                    '    term += 0 * (lever("H2.x") + lever("H2.y"))', env)
+    # a 3 s smoke moves the cap's affordable trials by ~10%, under the 10 a step of the cap takes
+    while (cap := schedule(repo)["dimension_cap"]) > 2:
+        assert bo(repo, "smoke", "--rationale", "spend", env=toy_env(sigma=0.05, sleep=3))[0] == 0
+    assert cap == 2
+    return repo, run_dir
+
+
+def test_a_tight_dimension_cap_narrows_the_oldest_concentrated_retained_hypothesis_so_the_queue_joins(
+        tmp_path, project_python):
+    seeds = range(4)
+    with ThreadPoolExecutor(len(seeds)) as pool:
+        runs = list(pool.map(lambda s: tight_cap_run(tmp_path / f"s{s}", project_python, s), seeds))
+    joined = 0
+    for repo, run_dir in runs:
+        _, status = bo(repo, "status")
+        s, h1 = status["schedule"], status["hypotheses"][0]
+        if not s["narrowing"]:  # nothing to narrow: H2 waits behind H1, which keeps its full range
+            assert s["selected"] == ["H1.v1"]
+            continue
+        # H1, retained with its best trials and baseline in a window of at most half its range, is
+        # narrowed to that window (never frozen), and stops counting against the cap: H2 joins
+        [n] = s["narrowing"]
+        assert h1["status"] == "retained" and (n["id"], n["lever"]) == ("H1.v1", "H1.x")
+        lo, hi = n["after"]["low"], n["after"]["high"]
+        assert 0 <= lo <= 0.4 < hi <= 1 and hi - lo <= 0.5 and lo <= 0.7 <= hi
+        assert s["selected"] == ["H1.v1", "H2.v1"] and s["context"] == ["H1.v1"]
+        pause_after(repo, run_dir, 2, 1)
+        [e] = [e for e in events(run_dir) if e["type"] == "narrowed"]
+        assert e["actor"] == "harness" and e["payload"]["after"] == n["after"] and e["payload"]["cap"]
+        [r2] = [r for r in of_type(run_dir, "round_started") if r["round"] == 2]
+        assert r2["hypotheses"] == ["H1.v1", "H2.v1"]
+        assert {k: r2["search_space"]["H1.x"][k] for k in ("low", "high")} == n["after"]
+        assert schedule(repo)["narrowing"] == []  # done once
+        joined += 1
+    # measured 5 of range(6) (H1 retained with a concentrated posterior in R1): at 5/6, fewer than 2
+    # of 4 happens about 2% of the time
+    assert joined >= 2, joined
 
 
 def test_queued_agent_chosen_trials_an_interrupted_round_never_started_run_in_the_resuming_round(

@@ -743,3 +743,14 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   `skipped`). They run first in r, oldest first, and count against r's agent-trial cap (so `used` may exceed it once; they
   were admitted under their own round's cap). A started one (abandoned in flight, or finished) is never run again. Kept:
   R1's run.yaml seeds are not carried past an interrupted R1 (ponytail in `_run_round`).
+- #29 limit (tight cap; #10 resolution 14: "the oldest retained hypotheses whose posterior is concentrated are narrowed,
+  never frozen"): `cli._selection(st)` -> (selection, narrowings). When the next queued unit doesn't fit, the harness
+  takes retained hypotheses oldest first (registration seq) that have a window in the last round's suggested narrowings
+  (`reports.narrowings`, the summary's rule: best 5 sampler trials + baseline span ≤ half the range, last record of the
+  round passed every gate), as few as let the unit fit; none if even all of them wouldn't. The round start logs each
+  window as `narrowed` {id, lever, before, after, verdict, round, cap: true} (actor harness; the usual narrowing fold, so
+  its checks restart), and the fold keeps `context` [levers]: while retained, those levers are searched but uncounted by
+  the cap (what "stay in the search as context" buys; like a revived version riding uncounted). A lever narrowed at
+  this boundary already (by `narrow`) is not narrowed again. status.schedule gains `narrowing` (pending) and `context`
+  (ids). Kept: in-search dims can still exceed the cap when nothing retained is concentrated (unconcentrated retained
+  and active hypotheses are never narrowed or frozen for the cap).

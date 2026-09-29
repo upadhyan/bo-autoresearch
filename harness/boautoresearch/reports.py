@@ -229,9 +229,24 @@ def _sign(st: dict) -> int:
 
 
 def _narrowings(st: dict, r: int) -> list[str]:
+    """The suggested narrowings of round r: lines, each with the command."""
+    out = []
+    for n in narrowings(st, r):
+        hid, lv, (b, a) = n["id"], n["lever"], (n["before"], n["after"])
+        if "low" in a:
+            out.append(f"- {hid} {lv}: the best {TOP} sampler trials and the baseline lie in [{_num(a['low'])}, "
+                       f"{_num(a['high'])}] of [{b['low']}, {b['high']}]: "
+                       f"`narrow {hid} --lever {lv} --low {a['low']!r} --high {a['high']!r}`")
+        else:
+            out.append(f"- {hid} {lv}: the best {TOP} sampler trials and the baseline use {a['options']} of "
+                       f"{b['options']}: `narrow {hid} --lever {lv} --options '{json.dumps(a['options'])}'`")
+    return out
+
+
+def narrowings(st: dict, r: int) -> list[dict]:
     """Levers whose posterior mass looks concentrated: the round's best TOP sampler trials (the
     baseline with them) fill at most half the searched range, on a hypothesis whose last record of
-    the round passed every gate (what `narrow` needs). -> lines, each with the command."""
+    the round passed every gate (what `narrow` needs). -> [{id, lever, before, after, verdict}]"""
     # ponytail: the top trials stand in for the posterior's mass (other hypotheses vary under them);
     # read the verdict GP's posterior over each lever if suggestions misfire
     rnd, hyps, sign = st["rounds"][r], st["hypotheses"], _sign(st)
@@ -249,17 +264,15 @@ def _narrowings(st: dict, r: int) -> list[str]:
             vals = [{**t["levers"], **t.get("sampled", {})}[n] for t in top if n in t["levers"]]
             if lv is None or len(vals) < TOP:
                 continue
+            at = {"id": hid, "lever": n, "verdict": past[-1]["id"]}
             if lv["kind"] in ("float", "int"):
                 lo, hi = min(vals + [lv["baseline"]]), max(vals + [lv["baseline"]])
                 if lo < hi and hi - lo <= NARROW * (lv["high"] - lv["low"]):
-                    out.append(f"- {hid} {n}: the best {TOP} sampler trials and the baseline lie in [{_num(lo)}, "
-                               f"{_num(hi)}] of [{lv['low']}, {lv['high']}]: "
-                               f"`narrow {hid} --lever {n} --low {lo!r} --high {hi!r}`")
+                    out.append({**at, "before": {"low": lv["low"], "high": lv["high"]}, "after": {"low": lo, "high": hi}})
             elif lv["kind"] == "categorical":
                 opts = [o for o in lv["options"] if o in vals or o == lv["baseline"]]
                 if 2 <= len(opts) < len(lv["options"]):
-                    out.append(f"- {hid} {n}: the best {TOP} sampler trials and the baseline use {opts} of "
-                               f"{lv['options']}: `narrow {hid} --lever {n} --options '{json.dumps(opts)}'`")
+                    out.append({**at, "before": {"options": lv["options"]}, "after": {"options": opts}})
     return out
 
 

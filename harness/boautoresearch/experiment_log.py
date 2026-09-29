@@ -208,6 +208,8 @@ def state(events: list[dict]) -> dict:
         elif e["type"] == "narrowed":  # the new range, from the next round on (its checks restart)
             h = hyps[p["id"]]
             h["narrowed_round"] = p["round"]
+            if p.get("cap"):  # narrowed for a tight dimension cap: searched as context
+                h["context"] = [*h.get("context", []), p["lever"]]
             levers = h["spec"]["levers"]
             h["spec"] = {**h["spec"], "levers": {**levers, p["lever"]: {**levers[p["lever"]], **p["after"]}}}
         elif e["type"] == "lever_frozen":
