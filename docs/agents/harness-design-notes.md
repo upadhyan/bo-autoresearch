@@ -692,3 +692,12 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   reject as undecided. `sensitivity` adds m_u. `_kernel` accumulates per lever (no (n, m, D) array). Measured: 1 flat lever,
   σ = δ/2: reject at 30 fresh 6/6 before and after; 3 flat levers, σ = δ: before 6/6 at 45, after 4/6 at 45, 1 at 75, 1 still
   active at 70 (the sup statistics' power cost).
+- #34 follow-up (orchestrator raw reads by name): `check bash` refuses the orchestrator any command that isn't only
+  `boautoresearch` calls (and `cd`; a backtick anywhere counts as not-only) whose text names `log.db` or
+  `artifacts/trial-`, or holds a glob whose LAST path part could match `log.db`, `log.db-wal` or `artifacts` (braces,
+  `${..}`, `$(..)`, backticks and a var glued to other text count as `*`; a lone `$VAR` doesn't: Bash calls share no
+  variables). Scanned: the raw text (so inline code and a heredoc body fed to a non-harness program count) and the
+  shlex words (quote tricks like `l''og.db` undone). Chosen over parsing `python -c`/`xargs`/`find`: names are the
+  one thing every route must carry. False positives accepted for the orchestrator only (whose lane is `BO`):
+  `ls *`, `cat *.db`, a user file named log.db. Residual: names built at run time inside code (`'lo'+'g.db'`), a
+  script file outside the repo, recursive reads from above the run dir that name nothing (`grep -r x .`).

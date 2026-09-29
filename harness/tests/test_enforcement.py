@@ -143,6 +143,19 @@ BASH_CASES = [
     ("boautoresearch:lever-coder", "WT", "eval git commit -m x", False, "through the harness"),
     ("orchestrator", "REPO", "boautoresearch record review --file r.json --agent-id rr --actor registration-reviewer",
      False, "another agent's name"),
+    # the orchestrator's raw reads through forms no parser follows: named, globbed or fed as stdin
+    ("orchestrator", "REPO", "python -c \"import sqlite3; sqlite3.connect('.bo-research/r/log.db')\"", False, "probes"),
+    ("orchestrator", "REPO", "cat $(find . -name log.db)", False, "probes"),
+    ("orchestrator", "REPO", "cat **/log*", False, "probes"),
+    ("orchestrator", "REPO", "find . -name '*.db' | xargs cat", False, "probes"),
+    ("orchestrator", "REPO", "cat .bo-research/*/{log,x}.db", False, "probes"),
+    ("orchestrator", "REPO", "f=RUN/lo; cat ${f}g.db", False, "probes"),
+    ("orchestrator", "REPO", "cat RUN/l''og.db", False, "probes"),
+    ("orchestrator", "REPO", "python - <<'EOF'\nimport sqlite3\nsqlite3.connect('RUN/log.db')\nEOF", False, "probes"),
+    ("orchestrator", "REPO", "boautoresearch record expected --file - <<'EOF'\n{\"reason\": \"not from log.db\"}\nEOF",
+     True, None),
+    ("orchestrator", "REPO", "git log -3 -- '*.py' && git status", True, None),
+    ("boautoresearch:lever-coder", "WT", "python -c \"print('log.db')\" && ls *", True, None),
 ]
 
 
