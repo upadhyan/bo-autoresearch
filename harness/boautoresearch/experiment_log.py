@@ -157,7 +157,8 @@ def state(events: list[dict]) -> dict:
         elif e["type"] == "noise_estimate" and "epoch" in p:  # σ re-estimated in a new epoch
             baselines.append({"epoch": p["epoch"], "fidelity": p["fidelity"], "mean": p["mean"]})
             if noise and p["sigma"] is not None:
-                rungs = [{**x, "sigma": p["sigma"], "mean": p["mean"]} if x["fidelity"] == p["fidelity"]
+                rungs = [{**x, "sigma": p["sigma"], "mean": p["mean"], "epoch": p["epoch"]}
+                         if x["fidelity"] == p["fidelity"]
                          else x for x in noise["rungs"]]
                 noise = {**noise, "rungs": rungs, "sigma": rungs[0]["sigma"],
                          "replication": any(x["sigma"] > 0 for x in rungs)}

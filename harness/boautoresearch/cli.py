@@ -1462,25 +1462,51 @@ def _new_epoch(run_dir: Path, con, sha: str, change: str, breaking: bool) -> dic
     """Earlier trials become telemetry; σ is re-estimated from baseline replicates in the new epoch
     (burn-in restarts, since only this epoch's trials are eligible)."""
     st = elog.load(con)
-    run, fidelity, baseline = st["run"], st["fidelity"]["fidelity"], _baseline(run_dir)
+    fidelity = st["fidelity"]["fidelity"]
     payload = {"epoch": st["epoch"]["epoch"] + 1, "round": max(st["rounds"]) + 1, "commit": sha,
                "change": change, "breaking": breaking}
     elog.append(con, "epoch_started", "harness", payload)
-    # ponytail: re-measures σ at the current fidelity only; other rungs (and the ladder calibration)
-    # keep the earlier epoch's until a code change's effect on them needs re-measuring too
-    done = []
+    # σ at once only at the fidelity the run searches; every other rung when it is next used
+    # (_remeasure_stale), and the ladder calibration is stale (_ladder_stale)
+    try:
+        _measure_sigma(run_dir, con, fidelity)
+    except TrialRefused:
+        pass  # σ stays unmeasured in this epoch (None); the budget ends the run
+    return payload
+
+
+def _measure_sigma(run_dir: Path, con, fidelity: dict) -> None:
+    """σ at this fidelity in the current epoch, from k baseline replicates (1 for a deterministic
+    objective: the epoch's baseline mean). Logged even when the budget refuses a replicate, then
+    the refusal is raised."""
+    st = elog.load(con)
+    run, done, refused = st["run"], [], None
     try:
         for _ in range(1 if run["deterministic"] else run["replicates_k"]):
-            done.append(_trial(run_dir, con, None, "baseline", baseline, fidelity))
-    except TrialRefused:
-        pass  # σ stays unmeasured in this epoch (None below); the budget ends the run
+            done.append(_trial(run_dir, con, None, "baseline", _baseline(run_dir), fidelity))
+    except TrialRefused as e:
+        refused = e
     ys = [t["objective"] for t in done if t["status"] == "finished"]
     sigma = 0.0 if run["deterministic"] else calibration.sigma(ys) if len(ys) >= 2 else None
     elog.append(con, "noise_estimate", "harness", {
-        "epoch": payload["epoch"], "fidelity": fidelity, "sigma": sigma, "n": len(ys),
+        "epoch": st["epoch"]["epoch"], "fidelity": fidelity, "sigma": sigma, "n": len(ys),
         "trials": [t["trial"] for t in done], "mean": statistics.fmean(ys) if ys else None,
         "previous_sigma": _sigma(st, fidelity)})
-    return payload
+    if refused:
+        raise refused
+
+
+def _remeasure_stale(run_dir: Path, con, fidelities: list[dict]) -> None:
+    """σ at each of these fidelities that the current epoch has not measured yet."""
+    st = elog.load(con)
+    for x in st["noise"]["rungs"]:
+        if x["fidelity"] in fidelities and x.get("epoch", 0) != st["epoch"]["epoch"]:
+            _measure_sigma(run_dir, con, x["fidelity"])
+
+
+def _ladder_stale(st: dict) -> bool:
+    """The ladder was calibrated in an earlier epoch: its rung validations no longer count."""
+    return (st["calibration"] or {}).get("epoch", 0) != st["epoch"]["epoch"]
 
 
 def _workspace(run_dir: Path, st: dict) -> dict[str, str]:
@@ -1571,7 +1597,7 @@ def cmd_round_run(a) -> dict:
     waits = {"calibration"} | ({"delta", "expected"} if st["delta"] is None else set())
     if "calibration" in failing and set(failing) <= waits:
         try:
-            _calibrate_ladder(run_dir, con, st["noise"], _space(_selected(st)))
+            _calibrate_ladder(run_dir, con, _space(_selected(st)))
         except TrialRefused as e:
             # R0 itself has ended: only the run ends
             return _end_run(run_dir, con, {"round": 0, "trigger": e.reason}, log_round=False)
@@ -1581,7 +1607,14 @@ def cmd_round_run(a) -> dict:
         failing = _gate(run_dir, st)  # the chosen rung's cost moves the dimension cap, so the selection too
     if failing:
         _refuse(_upcoming(st), failing)
-    return _run_round(run_dir, con, a, st)
+    # a rung the round uses (its fidelity, and the reference for a proxy's drift check) that the
+    # current epoch hasn't measured σ at gets its baseline replicates now, before the round starts
+    fid, ref = st["fidelity"]["fidelity"], st["run"]["reference_fidelity"]
+    try:
+        _remeasure_stale(run_dir, con, [fid, ref])
+    except TrialRefused as e:
+        return _end_run(run_dir, con, {"round": _upcoming(st), "trigger": e.reason}, log_round=False)
+    return _run_round(run_dir, con, a, elog.load(con))
 
 
 def _run_r0(run_dir: Path, con, a, st: dict) -> dict:
@@ -2062,13 +2095,16 @@ def _escalate(con, st: dict, r: int) -> None:
         elif up is not None:
             elog.append(con, "hypothesis_escalated", "harness", {
                 "id": h["id"], "round": r, "step": "rung", "fidelity": up,
-                "proxy": "reference" if up == ref else "validated"})
+                "proxy": "reference" if up == ref else "validated", "stale_ladder": _ladder_stale(st)})
 
 
 def _next_rung(st: dict) -> dict:
-    """The cheapest validated rung dearer than the current fidelity, else the reference."""
+    """The cheapest validated rung dearer than the current fidelity, else the reference. A ladder
+    calibrated in an earlier epoch validates nothing: the reference."""
+    # ponytail: a stale ladder escalates straight to the reference (no re-calibration: ~5 configs at
+    # every rung); re-calibrate here if reference-only escalation after a new epoch proves too dear
     fid, ref = st["fidelity"]["fidelity"], st["run"]["reference_fidelity"]
-    rungs = (st["calibration"] or {}).get("rungs", [])
+    rungs = [] if _ladder_stale(st) else (st["calibration"] or {}).get("rungs", [])
     cost = [(x["fidelity"], x["cost_s"]) for x in st["noise"]["rungs"]]
     here = next(c for f, c in cost if f == fid)
     passed = [x["fidelity"] for x in rungs if x.get("passed")]
@@ -2194,9 +2230,13 @@ def _estimate_noise(run_dir: Path, con, baseline: dict) -> None:
         "replication": any(r["sigma"] > 0 for r in rows), "rungs": rows})
 
 
-def _calibrate_ladder(run_dir: Path, con, noise: dict, space: dict) -> dict:
-    """Ladder calibration: ~5 diverse configs over the selected hypotheses' levers at every rung."""
+def _calibrate_ladder(run_dir: Path, con, space: dict) -> dict:
+    """Ladder calibration: ~5 diverse configs over the selected hypotheses' levers at every rung
+    (its spread test needs each rung's σ in the current epoch: an epoch started since R0 re-measures it)."""
     run = elog.load(con)["run"]
+    _remeasure_stale(run_dir, con, [run["reference_fidelity"], *run["ladder"]])
+    st = elog.load(con)
+    noise = st["noise"]
     # a quasi-random point can fall in a hole of a region that isn't box-shaped: it never runs
     cfgs = [c for c in calibration.configs(space, _baseline(run_dir), _rng(run, "calibration"))
             if not _prohibited(c, elog.load(con))]
@@ -2212,7 +2252,7 @@ def _calibrate_ladder(run_dir: Path, con, noise: dict, space: dict) -> dict:
         r["cost_s"] = _cost(trials, r["fidelity"])
     chosen, fallback = calibration.choose(rows[0], rows[1:])
     elog.append(con, "fidelity_calibration", "harness", {
-        "round": 0, "configs": cfgs, "reference": rows[0], "rungs": rows[1:],
+        "round": 0, "epoch": st["epoch"]["epoch"], "configs": cfgs, "reference": rows[0], "rungs": rows[1:],
         "chosen": chosen, "fallback": fallback})
     return elog.load(con)["calibration"]
 

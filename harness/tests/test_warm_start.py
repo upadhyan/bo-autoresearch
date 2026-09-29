@@ -1,6 +1,8 @@
 """Warm start, epochs and code changes (#28): the mapping rules, narrowing, commit-change,
 add-dependency and the equivalence check, against the toy_bo trainer with lever code of our own."""
 import json
+import os
+import statistics
 import subprocess
 import sys
 import time
@@ -8,8 +10,8 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 
 from conftest import bo, expect_all, git, round_run, register
-from test_rounds import BASE, BOWL, coded, init, make_repo, of_type, toy_env
-from test_verdicts import lever as vlever, spec as vspec, verdict_run
+from test_rounds import BASE, BOWL, FLAT, coded, init, make_repo, of_type, toy_env
+from test_verdicts import code_hypothesis, lever as vlever, spec as vspec, verdict_run
 
 SIGMA = 0.05
 
@@ -100,11 +102,11 @@ def calibrated(tmp_path, python, extra=""):
     return repo, run_dir
 
 
-def change(repo, run_dir, old, new, *flags):
+def change(repo, run_dir, old, new, *flags, env=None):
     train = run_dir / "worktree" / "train.py"
     train.write_text(train.read_text().replace(old, new))
     return bo(repo, "commit-change", "--reason", "the change under test", *flags,
-              "--rationale", "a code change", env=toy_env(sigma=SIGMA))
+              "--rationale", "a code change", env=env or toy_env(sigma=SIGMA))
 
 
 def test_a_changed_objective_fails_the_equivalence_check_and_starts_a_new_epoch(tmp_path, project_python):
@@ -166,6 +168,77 @@ def test_a_breaking_change_skips_the_check_and_restarts_burn_in(tmp_path, projec
     [r2] = [p for p in of_type(run_dir, "round_started") if p["round"] == 2]
     assert r2["epoch"] == 1 and set(r2["seeded"]) == fresh
     assert all(v["burn_in"]["fresh"] >= 20 for v in out["verdicts"])  # judged on this epoch alone
+
+
+def epoch_noise(run_dir, epoch):
+    return [p for p in of_type(run_dir, "noise_estimate") if p.get("epoch") == epoch]
+
+
+def test_a_new_epoch_at_a_proxy_re_measures_the_reference_sigma_before_the_next_round(
+        tmp_path, project_python):
+    repo = make_repo(tmp_path)
+    run_dir = init(repo, project_python, BASE + "ladder: [{epochs: 1}]\nseed: 1\n")
+    env = toy_env(sigma=SIGMA, cheap_below=2)
+    coded(repo, run_dir, tmp_path, code=FLAT, env=env)  # rejected soon: a short round
+    code, out = round_run(repo, "--rationale", "calibrate the ladder", env=env)
+    assert code == 0, out
+    if out["fidelity_calibration"]["chosen"] != {"epochs": 1}:
+        assert bo(repo, "accept-proxy", "--fidelity", '{"epochs": 1}', "--rationale", "cheap")[0] == 0
+    assert bo(repo, "set-delta", "0.1", "--rationale", "the user's effect")[0] == 0
+    r0_ref = bo(repo, "status")[1]["sigma"]  # σ at the reference
+
+    # a breaking change after which the reference is 20x noisier: σ there must be measured afresh
+    noisy = toy_env(sigma=SIGMA, cheap_below=2, ref_sigma=1.0)
+    code, out = change(repo, run_dir, "loss = 1.0 +", "loss = 1.5 +", "--breaking", env=noisy)
+    assert code == 0, out
+    epoch = out["epoch"]
+    # the new epoch measures σ at once only where the run searches (the proxy)
+    assert [p["fidelity"] for p in epoch_noise(run_dir, epoch)] == [{"epochs": 1}]
+
+    code, out = round_run(repo, "--rationale", "search the new epoch", env=noisy)
+    assert code == 0, out
+    # the round's drift check runs at the reference: σ there is re-measured before the round starts
+    [_, ref] = epoch_noise(run_dir, epoch)
+    assert ref["fidelity"] == {"epochs": 4} and ref["n"] == 3
+    started = {p["trial"]: p for p in of_type(run_dir, "trial_started")}
+    objective = {p["trial"]: p["objective"] for p in of_type(run_dir, "trial_finished")}
+    reps = [started[t] for t in ref["trials"]]
+    assert all(t["kind"] == "baseline" and t["fidelity"] == {"epochs": 4} and t["epoch"] == epoch
+               and "round" not in t for t in reps)
+    assert ref["sigma"] == statistics.stdev(objective[t] for t in ref["trials"])
+    status = bo(repo, "status")[1]
+    assert status["sigma"] == ref["sigma"] != r0_ref
+    assert max(ref["trials"]) < min(t for t, p in started.items() if p.get("round") == out["round"])
+
+
+def test_after_a_new_epoch_a_stalled_proxy_escalates_to_the_reference_not_a_stale_rung(
+        tmp_path, project_python):
+    repo = make_repo(tmp_path)
+    run_dir = init(repo, project_python, BASE + "ladder: [{epochs: 1}, {epochs: 2}]\ndeterministic: true\n")
+    # no noise, so no chance: 1 epoch is the cheap rung, where the fidelity-sensitive lever is flat
+    # (it fails calibration); 2 epochs rank exactly like the reference (4) and cost less (it passes)
+    env = toy_env(cheap_below=2, sleep_per_epoch=0.05)
+    assert round_run(repo, "--rationale", "calibrate", env=env)[0] == 0
+    late = vspec({"x": vlever()}, fidelity_sensitive=True, fidelity_reason="pays off late")
+    code_hypothesis(repo, run_dir, tmp_path, 1, late, '    term += 0 * lever("H1.x") if cheap else -lever("H1.x")', env)
+    code, out = round_run(repo, "--rationale", "calibrate the ladder", env=env)
+    assert code == 0, out
+    [one, two] = out["fidelity_calibration"]["rungs"]
+    assert two["passed"], two  # a validated rung the escalation would move up to in epoch 0
+    if out["fidelity_calibration"]["chosen"] != {"epochs": 1}:
+        assert bo(repo, "accept-proxy", "--fidelity", '{"epochs": 1}', "--rationale", "cheap")[0] == 0
+    assert bo(repo, "set-delta", "0.1", "--rationale", "the user's effect")[0] == 0
+    code, out = change(repo, run_dir, "loss = 1.0 +", "loss = 1.5 +", "--breaking", env=env)
+    assert code == 0, out
+
+    for _ in range(4):  # stalled at the proxy: more replicates, then a rung up
+        code, out = round_run(repo, "--rationale", "search", env=env)
+        assert code == 0, out
+        if any(e["step"] == "rung" for e in of_type(run_dir, "hypothesis_escalated")):
+            break
+    rung = [e for e in of_type(run_dir, "hypothesis_escalated") if e["step"] == "rung"]
+    assert rung and rung[0]["fidelity"] == {"epochs": 4} and rung[0]["stale_ladder"] is True, rung
+    assert bo(repo, "status")[1]["fidelity"]["fidelity"] == {"epochs": 4}
 
 
 def test_code_changes_are_refused_mid_round_on_protected_paths_and_with_nothing_to_commit(
