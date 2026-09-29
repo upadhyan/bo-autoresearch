@@ -846,7 +846,7 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   aside: trials a freeze or narrowing filtered out still count). The cap is max(40·d, 80) on the DECLARED levers (a
   freeze shrinks the group, not the allowance); burn-in, spacing and `burn_in.fresh` stay per fidelity/group as before,
   and inconclusive still fires only at a verdict check, so a hypothesis escalated a rung always gets its burn-in there
-  (measured: the stuck lever at a faithful proxy, seeds 0..19, is capped at the reference's first or second check, at
+  (measured: the stuck lever at a faithful proxy fidelity, seeds 0..19, is capped at the reference's first or second check, at
   20–40 fresh and 80–88 sampler trials, 20/20). Record `burn_in` gains `evidence`; reason "no verdict after N sampler
   trials" (reports' evidence-cap section keys on the prefix; the testing line shows "evidence cap N of cap"). A new
   epoch still restarts it (its trials are stale evidence, and epochs come only from code changes). Freezes are a lever's
@@ -856,18 +856,20 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   the fold pops `h["frozen"][lever]`, so the lever is searched again and `_latest` finds the group's pre-freeze record
   (schedule resumes). Only the round's own freezes (the spec downgrades "that round's rejects"). `_finalise_rejects`
   and the drift check's proxy σ̂ now read the round's fidelity (`st["rounds"][r]["fidelity"]`), not the run's.
-  Residual: at a proxy that stays undecidable a freeze can recur and be undone every round (ending each round early);
-  the evidence cap, which a freeze no longer restarts, now bounds that churn.
+  Residual (ponytail in `_finalise_rejects`): at a proxy fidelity that stays undecidable a freeze can recur and be
+  undone every round (ending each round early); the evidence cap, which a freeze no longer restarts, bounds that churn.
+  Review fixes: the proxy-noun wording above; the round is parsed from verdict ids by split in the test.
 - #38 limit (held hypothesis at its cap; supersedes "#38 (dogfood findings, harness): … exempt from the evidence cap"):
   #38 exempted a fidelity-sensitive hypothesis at a proxy fidelity from the cap because its proxy trials say nothing
-  about it (a proxy inconclusive would remove the planted late-payoff lever before the reference ever saw it); that left
-  it unbounded until a stall or the budget. Now its cap still counts, but only at the current fidelity (`_evidence`: a
-  proxy's trials are no evidence about it at a dearer rung), and reaching it at a proxy is a rung escalation instead of
+  about it (an inconclusive at a proxy fidelity would remove the planted late-payoff lever before the reference ever saw
+  it); that left it unbounded until a stall or the budget. Now its cap still counts, but only at the current fidelity
+  (`_evidence`: a proxy fidelity's trials are no evidence about it at a dearer rung), and reaching it at a proxy fidelity
+  is a rung escalation instead of
   an inconclusive (spec escalation order: replicates, a higher rung, then inconclusive; replicates can't show an effect
   the fidelity hides, so it goes straight to the rung): the check's record stays `active` + held, and
   `hypothesis_escalated` {id, round, step rung, fidelity (`_next_rung`), proxy, stale_ladder, verdict, reason "evidence
   cap"} is logged; the fold moves the run up a rung, and the round loop ends the round on it, trigger `fidelity` (spec's
-  round-end "a fidelity change"; checked before `search_space`). Bounded: cap × (rungs above the proxy + 1) before the
+  round-end "a fidelity change"; checked before `search_space`). Bounded: cap × (rungs above the proxy fidelity + 1) before the
   reference's cap makes it inconclusive. Also: no check freezes a lever of a fidelity-sensitive hypothesis at a proxy
-  fidelity (a freeze is a lever's reject; spec "can't be rejected at a proxy"); before, a flat-at-the-proxy 2-lever tail
-  was frozen there.
+  fidelity (a freeze is a lever's reject; spec "can't be rejected at a proxy"); before, a 2-lever tail flat at the proxy
+  fidelity was frozen there.

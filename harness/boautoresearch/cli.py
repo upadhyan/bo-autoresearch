@@ -2175,11 +2175,14 @@ def _finalise_rejects(con, r: int, drift: dict | None) -> None:
     why = None if not at_proxy or (drift and drift["broken"] is False) else (
         "undecidable proxy fidelity" if drift and drift.get("undecidable") else
         "broken proxy fidelity" if drift and drift["broken"] else "proxy fidelity unchecked")
-    for h in _in_search(st):
-        for v in h["verdicts"]:
-            for n in v["frozen"] if why and v["round"] == r else []:
-                elog.append(con, "lever_unfrozen", "harness", {"id": h["id"], "lever": n, "verdict": v["id"],
-                                                               "reason": why})
+    # ponytail: at a proxy fidelity that stays undecidable a freeze can recur and be undone every round (each round
+    # ending early) until the evidence cap ends it; hold the freeze pending across rounds if that proves costly
+    if why:
+        for h in _in_search(st):
+            for v in (v for v in h["verdicts"] if v["round"] == r):
+                for n in v["frozen"]:
+                    elog.append(con, "lever_unfrozen", "harness", {"id": h["id"], "lever": n, "verdict": v["id"],
+                                                                   "reason": why})
     last = [(h, h["verdicts"][-1]) for h in _in_search(st) if h["verdicts"]]
     confirmed = [(h, v) for h, v in last if v["round"] == r and v["outcome"] == "reject"]
     # substitutes (two levers doing the same thing) each show Δ ≈ 0, the other optimised in both terms:

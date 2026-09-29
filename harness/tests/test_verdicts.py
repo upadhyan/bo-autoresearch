@@ -430,9 +430,9 @@ def test_a_freeze_made_at_a_broken_proxy_fidelity_is_undone(tmp_path, project_py
     # every freeze stands only when its round's drift check passed (R2's may be undecidable: deferred likewise)
     reasons = {o["round"]: None if o["drift"]["broken"] is False else "undecidable proxy fidelity"
                if o["drift"]["undecidable"] else "broken proxy fidelity" for o in outs}
+    in_round = [(f, reasons[int(f["verdict"].split("-")[1][1:])]) for f in frozen]  # V-R<r>-H<n>.v<k>-<check>
     assert of_type(run_dir, "lever_unfrozen") == [
-        {"id": "H1.v1", "lever": f["lever"], "verdict": f["verdict"], "reason": reasons[int(f["verdict"][3])]}
-        for f in frozen if reasons[int(f["verdict"][3])]]
+        {"id": "H1.v1", "lever": f["lever"], "verdict": f["verdict"], "reason": why} for f, why in in_round if why]
     assert of_type(run_dir, "lever_unfrozen")[0]["reason"] == "broken proxy fidelity"
     assert not of_type(run_dir, "hypothesis_rejected") and not of_type(run_dir, "hypothesis_inconclusive")
 
