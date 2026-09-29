@@ -7,7 +7,7 @@ import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 
-from conftest import bo, git
+from conftest import bo, expect_all, git, round_run
 from test_rounds import BASE, BOWL, coded, init, make_repo, of_type, toy_env
 from test_verdicts import lever as vlever, spec as vspec, verdict_run
 
@@ -88,7 +88,7 @@ def calibrated(tmp_path, python, extra=""):
     """toy_bo after R0 (3 baseline replicates, σ = 0.05)."""
     repo = make_repo(tmp_path)
     run_dir = init(repo, python, BASE + "delta: 0.1\nseed: 1\n" + extra)
-    assert bo(repo, "round-run", "--rationale", "calibrate", env=toy_env(sigma=SIGMA))[0] == 0
+    assert round_run(repo, "--rationale", "calibrate", env=toy_env(sigma=SIGMA))[0] == 0
     return repo, run_dir
 
 
@@ -136,7 +136,7 @@ def test_a_changed_objective_fails_the_equivalence_check_and_starts_a_new_epoch(
 def test_a_breaking_change_skips_the_check_and_restarts_burn_in(tmp_path, project_python):
     repo, run_dir = calibrated(tmp_path, project_python)
     coded(repo, run_dir, tmp_path, code=NOOP_BOWL, env=toy_env(sigma=SIGMA))
-    code, out = bo(repo, "round-run", "--rationale", "search", env=toy_env(sigma=SIGMA))
+    code, out = round_run(repo, "--rationale", "search", env=toy_env(sigma=SIGMA))
     assert code == 0, out
     assert bo(repo, "verdict", "H1")[1]["burn_in"]["fresh"] >= 20
     checks = len(of_type(run_dir, "equivalence_check"))
@@ -153,7 +153,7 @@ def test_a_breaking_change_skips_the_check_and_restarts_burn_in(tmp_path, projec
     probe = bo(repo, "verdict", "H1")[1]
     assert probe["verdict"] == "burn-in" and probe["burn_in"]["fresh"] == 0  # burn-in restarts
 
-    code, out = bo(repo, "round-run", "--rationale", "search the new epoch", env=toy_env(sigma=SIGMA))
+    code, out = round_run(repo, "--rationale", "search the new epoch", env=toy_env(sigma=SIGMA))
     assert code == 0, out
     [r2] = [p for p in of_type(run_dir, "round_started") if p["round"] == 2]
     assert r2["epoch"] == 1 and set(r2["seeded"]) == fresh
@@ -175,6 +175,7 @@ def test_code_changes_are_refused_mid_round_on_protected_paths_and_with_nothing_
     code, out = narrow(repo, "H1", "H1.x", 0.2, 0.8)
     assert code == 1 and "registered" in out["reason"]  # not in the search yet: no verdict to rest on
     env = {**toy_env(sigma=SIGMA, sleep=60), "TOY_SLEEP_KIND": "sampler"}
+    expect_all(repo)
     p = subprocess.Popen([sys.executable, "-m", "boautoresearch", "round-run", "--rationale", "go"],
                          cwd=repo, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
@@ -227,7 +228,7 @@ def test_narrowing_drops_out_of_range_trials_and_never_clips(tmp_path, project_p
     assert set(seen) == inside
     assert all(seen[n]["H1.x"] == trials[n]["levers"].get("H1.x", 0.2) for n in seen)  # never clipped
 
-    code, out = bo(repo, "round-run", "--rationale", "search the narrowed box", env=toy_env(sigma=SIGMA))
+    code, out = round_run(repo, "--rationale", "search the narrowed box", env=toy_env(sigma=SIGMA))
     assert code == 0, out
     [r2] = [p for p in of_type(run_dir, "round_started") if p["round"] == 2]
     assert r2["search_space"]["H1.x"]["low"] == 0.15 and r2["search_space"]["H1.x"]["high"] == 0.85

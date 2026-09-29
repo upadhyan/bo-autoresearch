@@ -7,7 +7,7 @@ import statistics
 
 import pytest
 
-from conftest import bo, events, write_run_yaml
+from conftest import bo, events, round_run, write_run_yaml
 
 SHIFT = {  # a hypothesis shifting the toy's scale: its box is what the ladder is calibrated over
     "title": "Shift the scale", "rationale": "r", "mechanism": "m", "provenance": "novel",
@@ -33,7 +33,7 @@ def trials_of(run_dir, kind):
 
 def calibrate(repo, run_dir, env=None):
     """R0, then H2 (the shift) coded, then the round-run that calibrates the ladder over its box."""
-    code, out = bo(repo, "round-run", "--rationale", "calibrate", env=env)
+    code, out = round_run(repo, "--rationale", "calibrate", env=env)
     assert code == 0, out
     f = run_dir / "shift.json"
     f.write_text(json.dumps(SHIFT))
@@ -44,12 +44,12 @@ def calibrate(repo, run_dir, env=None):
     train.write_text(train.read_text().replace(anchor, anchor + '    scale += lever("H2.shift")\n'))
     assert bo(repo, "smoke", "H2", "--rationale", "try", env=env)[1]["passed"]
     assert bo(repo, "commit-lever", "H2", "--rationale", "passed", env=env)[0] == 0
-    return bo(repo, "round-run", "--rationale", "calibrate the ladder", env=env)
+    return round_run(repo, "--rationale", "calibrate the ladder", env=env)
 
 
 def test_r0_estimates_the_planted_noise_from_baseline_replicates(repo, init_run):
     run_dir = init_run("budget_s: 3600\nreference_fidelity: {epochs: 4}\nreplicates_k: 30\n")
-    code, out = bo(repo, "round-run", "--rationale", "calibrate", env=toy_env(sigma=0.5))
+    code, out = round_run(repo, "--rationale", "calibrate", env=toy_env(sigma=0.5))
     assert code == 0, out
 
     assert len(trials_of(run_dir, "smoke")) == 1
@@ -162,7 +162,7 @@ def test_accept_proxy_is_refused_for_the_reference_a_passing_rung_or_before_r0(r
 
 def test_a_deterministic_declaration_turns_off_replicates(repo, init_run):
     run_dir = init_run(LADDER + "deterministic: true\n")
-    code, out = bo(repo, "round-run", "--rationale", "calibrate", env=toy_env(sigma=0.5))
+    code, out = round_run(repo, "--rationale", "calibrate", env=toy_env(sigma=0.5))
     assert code == 0, out
 
     assert trials_of(run_dir, "baseline") == []
@@ -175,7 +175,7 @@ def test_a_deterministic_declaration_turns_off_replicates(repo, init_run):
 
 def test_agreeing_replicates_give_zero_sigma_and_turn_off_replication(repo, init_run):
     run_dir = init_run("budget_s: 3600\nreference_fidelity: {epochs: 4}\n")
-    assert bo(repo, "round-run", "--rationale", "calibrate")[0] == 0
+    assert round_run(repo, "--rationale", "calibrate")[0] == 0
     assert len(trials_of(run_dir, "baseline")) == 5  # the default k
     noise = only(run_dir, "noise_estimate")["payload"]
     assert noise["sigma"] == 0 and noise["replication"] is False and noise["deterministic"] is False
@@ -183,9 +183,9 @@ def test_agreeing_replicates_give_zero_sigma_and_turn_off_replication(repo, init
 
 def test_round_run_after_r0_is_refused_until_a_hypothesis_is_registered(repo, init_run):
     run_dir = init_run("budget_s: 3600\nreference_fidelity: {epochs: 4}\n")
-    assert bo(repo, "round-run", "--rationale", "calibrate")[0] == 0
+    assert round_run(repo, "--rationale", "calibrate")[0] == 0
     before = events(run_dir)
-    code, out = bo(repo, "round-run", "--rationale", "again")
+    code, out = round_run(repo, "--rationale", "again")
     assert code != 0 and out["refused"] and "hypothesis" in out["reason"]
     assert events(run_dir) == before
 
@@ -209,7 +209,7 @@ def test_a_trial_costing_more_than_the_remaining_budget_is_refused_and_logged(re
 
 def test_r0_stops_when_the_budget_runs_out(repo, init_run):
     run_dir = init_run("budget_s: 2.0\nreference_fidelity: {epochs: 4}\n")
-    code, out = bo(repo, "round-run", "--rationale", "calibrate", env=toy_env(sleep_per_epoch=0.3))
+    code, out = round_run(repo, "--rationale", "calibrate", env=toy_env(sleep_per_epoch=0.3))
     assert code != 0 and out["refused"] and "budget" in out["reason"]
     assert only(run_dir, "trial_refused")["payload"]["kind"] == "baseline"
     assert only(run_dir, "round_ended")["payload"] == {"round": 0, "trigger": "budget_spent"}
@@ -245,6 +245,6 @@ def test_a_budget_stop_in_the_ladder_calibration_ends_the_run_and_keeps_r0(repo,
     assert [e["payload"] for e in events(run_dir) if e["type"] == "round_ended"] == [
         {"round": 0, "trigger": "calibrated"}]
     assert out["r0_complete"] is True and len(trials_of(run_dir, "baseline")) == 4
-    code, out = bo(repo, "round-run", "--rationale", "again", env=env)
+    code, out = round_run(repo, "--rationale", "again", env=env)
     assert code != 0 and "ended" in out["reason"]
     assert len([e for e in events(run_dir) if e["type"] == "noise_estimate"]) == 1

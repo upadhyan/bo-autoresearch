@@ -30,6 +30,26 @@ def bo(cwd, *args, env=None):
         raise AssertionError(f"non-JSON output:\n{p.stdout}\n{p.stderr}")
 
 
+def expect_all(cwd):
+    """Record an `undecided` expected verdict for each hypothesis the next round still lacks one for."""
+    for h in bo(cwd, "status")[1]["schedule"]["expected_missing"]:
+        f = Path(cwd).parent / f"expected-{h}.json"
+        f.write_text(json.dumps({"hypothesis": h, "verdict": "undecided", "reason": "no view yet"}))
+        code, out = bo(cwd, "record", "expected", "--file", str(f), "--rationale", "before the round")
+        assert code == 0, out
+
+
+def round_run(cwd, *args, env=None):
+    """`round-run`, its expected verdicts recorded first."""
+    expect_all(cwd)
+    return bo(cwd, "round-run", *args, env=env)
+
+
+def ready(out):
+    """Nothing but the next round's expected verdicts stands before round-run."""
+    return out["next"] == ["round-run"] or all(d.startswith("record expected") for d in out["next"])
+
+
 def events(run_dir):
     con = sqlite3.connect(run_dir / "log.db")
     rows = con.execute("SELECT seq, type, actor, payload FROM events ORDER BY seq").fetchall()

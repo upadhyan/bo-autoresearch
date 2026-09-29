@@ -8,7 +8,7 @@ import re
 from collections import Counter
 
 SPEC_KEYS = {"title", "rationale", "mechanism", "provenance", "source", "lens", "directives",
-             "fidelity_sensitive", "fidelity_reason", "levers", "merges"}
+             "fidelity_sensitive", "fidelity_reason", "levers", "merges", "exclusive_with"}
 LEVER_KEYS = {"float": {"low", "high", "log", "predicted"}, "int": {"low", "high", "log", "predicted"},
               "categorical": {"options"}, "bool": {"why_not_graded"}}
 GRADED = ("float", "int")
@@ -55,6 +55,11 @@ def validate(spec) -> None:
         _validate_lever(name, lv)
     if "merges" in spec:
         _validate_merges(spec["merges"], levers)
+    ex = spec.get("exclusive_with", [])
+    if not isinstance(ex, list) or not all(isinstance(i, str) and re.fullmatch(r"H\d+(\.v\d+)?", i)
+                                           for i in ex):
+        raise ValueError("exclusive_with must list the hypotheses never to share a round with, "
+                         "e.g. [\"H2\"]")
 
 
 def _validate_merges(m, levers: dict) -> None:

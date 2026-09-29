@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import bo, events, git, write_run_yaml
+from conftest import bo, events, expect_all, git, ready, round_run, write_run_yaml
 
 TOY = Path(__file__).parent / "toy_bo"
 OPT = {"H1.x": 0.7, "H1.y": 0.3}  # the planted optimum
@@ -74,7 +74,7 @@ def bo_run(bo_repo, project_python):
 def coded(repo, run_dir, tmp_path, code=BOWL, env=None, spec=SPEC):
     """R0 done, then H1 proposed, registered, its lever code smoked and committed."""
     if not any(e["type"] == "round_ended" for e in events(run_dir)):
-        assert bo(repo, "round-run", "--rationale", "calibrate", env=env)[0] == 0
+        assert round_run(repo, "--rationale", "calibrate", env=env)[0] == 0
     f = tmp_path / "spec.json"
     f.write_text(json.dumps(spec))
     assert bo(repo, "propose", "--file", str(f), "--rationale", "idea")[0] == 0
@@ -97,7 +97,7 @@ def test_set_delta_is_set_once_after_r0(bo_repo, bo_run, tmp_path):
     code, out = bo(bo_repo, "set-delta", "0.1", "--rationale", "too early")
     assert code != 0 and "round-run" in out["reason"]
     coded(bo_repo, run_dir, tmp_path, env=toy_env(sigma=0.05))
-    code, out = bo(bo_repo, "round-run", "--rationale", "no delta yet")
+    code, out = round_run(bo_repo, "--rationale", "no delta yet")
     assert code != 0 and "set-delta" in out["reason"]
     # the toy's noise draws at R0's baseline replicates: σ is their sd, the suggestion 2σ
     planted = [0.05 * random.Random(t["seed"]).gauss(0, 1) for t in of_type(run_dir, "trial_started")
@@ -128,9 +128,9 @@ def test_a_deterministic_objective_suggests_no_delta_set_delta_would_refuse(bo_r
     coded(bo_repo, run_dir, tmp_path)
     _, status = bo(bo_repo, "status")
     assert status["sigma"] == 0 and status["suggested_delta"] is None
-    [duty] = status["next"]
+    duty, _expected = status["next"]  # and H1's expected verdict
     assert duty.startswith("set-delta <value>") and "= 0)" not in duty and "σ = 0" in duty
-    code, out = bo(bo_repo, "round-run", "--rationale", "no delta yet")
+    code, out = round_run(bo_repo, "--rationale", "no delta yet")
     assert code != 0 and "set-delta" in out["reason"] and "= 0)" not in out["reason"]
 
 
@@ -149,7 +149,7 @@ def search_once(d, python, sigma=0.01, seed=0):
     run_dir = init(repo, python, BASE + f"delta: 0.02\nseed: {seed}\n")
     env = toy_env(sigma=sigma)
     coded(repo, run_dir, d, env=env)
-    code, out = bo(repo, "round-run", "--rationale", "search H1", env=env)
+    code, out = round_run(repo, "--rationale", "search H1", env=env)
     assert code == 0, out
     return run_dir, out
 
@@ -190,7 +190,7 @@ def test_bo_beats_random_search_at_equal_trial_count(tmp_path, project_python):
     assert len({t["seed"] for t in trials}) == len(trials)
     # the stall: at least max(5·d, 20) fresh sampler trials, the run goes on
     assert sum(t["kind"] == "sampler" for t in trials) >= 20
-    assert out["run_ended"] is None and out["next"] == ["round-run"]
+    assert out["run_ended"] is None and ready(out)
     assert of_type(run_dir, "round_ended")[-1] == {"round": 1, "trigger": "stall",
                                                     "incumbent": out["incumbent"]}
     assert not of_type(run_dir, "run_ended")
@@ -233,7 +233,7 @@ def test_replicates_are_their_own_trials_and_every_new_incumbent_is_confirmed(tm
 def test_a_noise_shift_of_more_than_2x_is_flagged(bo_repo, bo_run, tmp_path):
     run_dir = bo_run(BASE + "delta: 0.02\nseed: 5\n")
     coded(bo_repo, run_dir, tmp_path, env=toy_env(sigma=0.01))
-    code, out = bo(bo_repo, "round-run", "--rationale", "search", env=toy_env(sigma=0.05))
+    code, out = round_run(bo_repo, "--rationale", "search", env=toy_env(sigma=0.05))
     assert code == 0, out
     [noise] = [p for p in of_type(run_dir, "noise_estimate") if p.get("round") == 1]
     assert noise["sigma"] == pytest.approx(0.05, rel=0.5) and noise["shift_flagged"] is True
@@ -273,6 +273,7 @@ def test_a_killed_round_is_resumed_from_the_log(bo_repo, bo_run, tmp_path):
     n = len(of_type(run_dir, "trial_started"))
     # the first confirmation from the round's 12th trial on hangs
     env = {**toy_env(sigma=0.01, sleep=120, sleep_from=n + 12), "TOY_SLEEP_KIND": "confirmation"}
+    expect_all(bo_repo)
     p = subprocess.Popen([sys.executable, "-m", "boautoresearch", "round-run", "--rationale", "go"],
                          cwd=bo_repo, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     deadline = time.monotonic() + 90
@@ -292,7 +293,7 @@ def test_a_killed_round_is_resumed_from_the_log(bo_repo, bo_run, tmp_path):
     spent = bo(bo_repo, "status")[1]["budget"]["spent_s"]
     expected = eligible_now(run_dir)
 
-    code, out = bo(bo_repo, "round-run", "--rationale", "resume", env=toy_env(sigma=0.01))
+    code, out = round_run(bo_repo, "--rationale", "resume", env=toy_env(sigma=0.01))
     assert code == 0, out
     assert gone(runner_pid)  # the orphaned runner is killed, not left running uncharged
     [abandoned] = of_type(run_dir, "trial_abandoned")
@@ -327,7 +328,7 @@ def test_the_round_cap_ends_a_round_at_a_quarter_of_the_remaining_budget(bo_repo
     env = toy_env(sigma=0.01, sleep=0.3)
     coded(bo_repo, run_dir, tmp_path, env=env)
     remaining = bo(bo_repo, "status")[1]["budget"]["remaining_s"]
-    code, out = bo(bo_repo, "round-run", "--rationale", "search", env=env)
+    code, out = round_run(bo_repo, "--rationale", "search", env=env)
     assert code == 0, out
     assert out["trigger"] == "cap" and out["run_ended"] is None
     [started] = [s for s in of_type(run_dir, "round_started") if s["round"] == 1]
@@ -342,13 +343,13 @@ def test_a_spent_budget_ends_the_round_and_the_run(bo_repo, bo_run, tmp_path):
                      "delta: 0.02\n")
     env = toy_env(sleep=1.0)  # smoke, then smoke H1's 2 trials: ~3.2 s; no third trial fits
     coded(bo_repo, run_dir, tmp_path, env=env)
-    code, out = bo(bo_repo, "round-run", "--rationale", "search", env=env)
+    code, out = round_run(bo_repo, "--rationale", "search", env=env)
     assert code == 0, out
     assert out["trigger"] == "budget_spent" and out["run_ended"] == "budget_spent"
     assert out["next"] == []
     assert of_type(run_dir, "trial_refused")[-1]["kind"] == "sampler"
     assert of_type(run_dir, "run_ended") == [{"reason": "budget_spent"}]
-    code, out = bo(bo_repo, "round-run", "--rationale", "again", env=env)
+    code, out = round_run(bo_repo, "--rationale", "again", env=env)
     assert code != 0 and "ended" in out["reason"]
 
 
@@ -357,11 +358,11 @@ def test_a_proxy_that_ranks_backwards_is_flagged_broken_by_the_drift_check(bo_re
                      "deterministic: true\nseed: 2\n")  # unseeded, ~1 in 6 runs flaked
     env = toy_env(cheap_below=2, scramble=1)
     coded(bo_repo, run_dir, tmp_path, env=env)
-    code, out = bo(bo_repo, "round-run", "--rationale", "calibrate the ladder", env=env)
+    code, out = round_run(bo_repo, "--rationale", "calibrate the ladder", env=env)
     assert code == 0 and out["fidelity_calibration"]["fallback"] is True, out
     assert bo(bo_repo, "accept-proxy", "--fidelity", '{"epochs": 1}', "--rationale", "cheap")[0] == 0
     assert bo(bo_repo, "set-delta", "0.02", "--rationale", "the user's effect")[0] == 0
-    code, out = bo(bo_repo, "round-run", "--rationale", "search at the proxy", env=env)
+    code, out = round_run(bo_repo, "--rationale", "search at the proxy", env=env)
     assert code == 0, out
     trials = {t["trial"]: t for t in started_in(run_dir, 1)}
     [drift] = of_type(run_dir, "drift_check")
@@ -382,7 +383,7 @@ def test_no_stall_before_every_hypothesis_is_burned_in(bo_repo, bo_run, tmp_path
     spec = {**SPEC, "levers": {**SPEC["levers"], "z": SPEC["levers"]["x"]}}
     code3 = BOWL.rstrip("\n") + " + 0 * lever(\"H1.z\")\n"
     coded(bo_repo, run_dir, tmp_path, code=code3, env=toy_env(sigma=0.01), spec=spec)
-    code, out = bo(bo_repo, "round-run", "--rationale", "search", env=toy_env(sigma=0.01))
+    code, out = round_run(bo_repo, "--rationale", "search", env=toy_env(sigma=0.01))
     assert code == 0, out
     # the stall window is complete long before 30; at burn-in the first verdict check finds the bowl
     # `irrelevant` next to δ = 10, and that pending reject holds the round open to its confirmation
@@ -400,12 +401,12 @@ def drift_run(d, python, seed):
                    f"ladder: [{{epochs: 1}}]\nreplicates_k: 3\nseed: {seed}\n")
     env = toy_env(cheap_below=2, sigma=0.01, ref_sigma=1.0, sleep_per_epoch=0.02)
     coded(repo, run_dir, d, env=env)
-    code, out = bo(repo, "round-run", "--rationale", "calibrate the ladder", env=env)
+    code, out = round_run(repo, "--rationale", "calibrate the ladder", env=env)
     assert code == 0, out
     if out["fidelity_calibration"]["fallback"]:  # noise at the reference can fail the rung's ρ
         assert bo(repo, "accept-proxy", "--fidelity", '{"epochs": 1}', "--rationale", "cheap")[0] == 0
     assert bo(repo, "set-delta", "0.02", "--rationale", "the user's effect")[0] == 0
-    code, out = bo(repo, "round-run", "--rationale", "search at the rung", env=env)
+    code, out = round_run(repo, "--rationale", "search at the rung", env=env)
     assert code == 0, out
     assert bo(repo, "status")[1]["fidelity"]["fidelity"] == {"epochs": 1}
     return run_dir, out
@@ -430,10 +431,10 @@ def test_the_round_cap_covers_the_drift_check(bo_repo, bo_run, tmp_path):
                      "deterministic: true\n")
     env = toy_env(cheap_below=2, scramble=1, sleep_per_epoch=0.1)
     coded(bo_repo, run_dir, tmp_path, env=env)
-    assert bo(bo_repo, "round-run", "--rationale", "calibrate the ladder", env=env)[0] == 0
+    assert round_run(bo_repo, "--rationale", "calibrate the ladder", env=env)[0] == 0
     assert bo(bo_repo, "accept-proxy", "--fidelity", '{"epochs": 1}', "--rationale", "cheap")[0] == 0
     assert bo(bo_repo, "set-delta", "0.02", "--rationale", "the user's effect")[0] == 0
-    code, out = bo(bo_repo, "round-run", "--rationale", "search", env=env)
+    code, out = round_run(bo_repo, "--rationale", "search", env=env)
     assert code == 0 and out["trigger"] == "cap", out
     [started] = [s for s in of_type(run_dir, "round_started") if s["round"] == 1]
     trials = started_in(run_dir, 1)
@@ -445,7 +446,7 @@ def test_the_round_cap_covers_the_drift_check(bo_repo, bo_run, tmp_path):
 def test_round_run_is_refused_until_the_selected_hypotheses_have_committed_code(bo_repo, bo_run,
                                                                                  tmp_path):
     run_dir = bo_run(BASE + "delta: 0.02\n")
-    assert bo(bo_repo, "round-run", "--rationale", "calibrate")[0] == 0
+    assert round_run(bo_repo, "--rationale", "calibrate")[0] == 0
     f = tmp_path / "spec.json"
     f.write_text(json.dumps(SPEC))
     assert bo(bo_repo, "propose", "--file", str(f), "--rationale", "idea")[0] == 0
@@ -455,4 +456,4 @@ def test_round_run_is_refused_until_the_selected_hypotheses_have_committed_code(
     assert code != 0 and "H1.v1" in out["reason"] and "commit-lever" in out["reason"]
     assert events(run_dir) == before
     _, status = bo(bo_repo, "status")
-    assert status["next"] == ["write H1.v1's lever code, then smoke H1.v1 and commit-lever H1.v1"]
+    assert status["next"][0] == "write H1.v1's lever code, then smoke H1.v1 and commit-lever H1.v1"

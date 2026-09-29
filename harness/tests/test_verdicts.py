@@ -6,7 +6,7 @@ effect on the loss is the planted truth. δ = 0.1 and the toy's noise σ = 0.05 
 import json
 from concurrent.futures import ThreadPoolExecutor
 
-from conftest import bo
+from conftest import bo, ready, round_run
 from test_rounds import BASE, init, make_repo, of_type, started_in, toy_env
 
 DELTA, SIGMA = 0.1, 0.05
@@ -49,21 +49,21 @@ def verdict_run(d, python, seed, hyps, rounds=1, sigma=SIGMA, extra="", proxy=Fa
     extra += f"seed: {seed}\n" + ("ladder: [{epochs: 1}]\n" if proxy else f"delta: {DELTA}\n")
     run_dir = init(repo, python, BASE.replace("budget_s: 3600", f"budget_s: {budget}") + extra)
     env = toy_env(sigma=sigma, cheap_below=2, **planted)
-    assert bo(repo, "round-run", "--rationale", "calibrate", env=env)[0] == 0
+    assert round_run(repo, "--rationale", "calibrate", env=env)[0] == 0
     for n, (s, line) in enumerate(hyps, 1):
         code_hypothesis(repo, run_dir, d, n, s, line, env)
     if proxy:
-        code, out = bo(repo, "round-run", "--rationale", "calibrate the ladder", env=env)
+        code, out = round_run(repo, "--rationale", "calibrate the ladder", env=env)
         assert code == 0, out
         if out["fidelity_calibration"]["chosen"] != {"epochs": 1}:
             assert bo(repo, "accept-proxy", "--fidelity", '{"epochs": 1}', "--rationale", "cheap")[0] == 0
         assert bo(repo, "set-delta", str(DELTA), "--rationale", "the user's effect")[0] == 0
     outs = []
     for _ in range(rounds):
-        code, out = bo(repo, "round-run", "--rationale", "search", env=env)
+        code, out = round_run(repo, "--rationale", "search", env=env)
         assert code == 0, out
         outs.append(out)
-        if out["next"] != ["round-run"]:
+        if not ready(out):
             break
     return run_dir, outs
 

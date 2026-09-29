@@ -11,7 +11,9 @@ EVENT_TYPES = {"run_started", "trial_started", "trial_finished", "trial_failed",
                "lever_smoke", "lever_committed", "delta_set", "hypothesis_activated",
                "trial_heartbeat", "trial_abandoned", "drift_check", "run_ended", "verdict",
                "hypothesis_rejected", "hypothesis_inconclusive", "hypothesis_escalated", "lever_frozen", "record",
-               "commit_change", "dependency_added", "equivalence_check", "epoch_started", "narrowed"}
+               "commit_change", "dependency_added", "equivalence_check", "epoch_started", "narrowed",
+               "hypothesis_prioritized", "hypothesis_parked", "hypothesis_unparked", "trial_enqueued",
+               "agent_trial_dropped", "checkpoint", "user_pause", "user_resume"}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -66,7 +68,8 @@ def state(events: list[dict]) -> dict:
     rounds: dict[int, dict] = {}
     hyps: dict[str, dict] = {}
     records: list[dict] = []
-    noise = calib = proxy = delta = ended = escalated = None
+    queue: list[dict] = []  # agent-chosen trials, each for one round
+    noise = calib = proxy = delta = ended = escalated = paused = None
     epoch = {"epoch": 0, "round": 0}  # the first round whose trials the epoch's evidence counts
     for e in events:
         p = {k: v for k, v in e["payload"].items() if k != "rationale"}
@@ -80,6 +83,9 @@ def state(events: list[dict]) -> dict:
             trials[p["trial"]].update(p, status=e["type"][len("trial_"):])
         elif e["type"] == "round_started":
             rounds[p["round"]] = {**p, "ended": None}
+            for h in hyps.values():  # a BO round the queued hypothesis waited through
+                if p["round"] >= 1 and h["status"] == "registered" and h["id"] not in p["hypotheses"]:
+                    h["unselected"] += 1
         elif e["type"] == "round_ended":
             rounds[p["round"]]["ended"] = p["trigger"]
         elif e["type"] == "drift_check":
@@ -88,6 +94,14 @@ def state(events: list[dict]) -> dict:
             delta = p["delta"]
         elif e["type"] == "run_ended":
             ended = p["reason"]
+        elif e["type"] == "trial_enqueued":
+            queue.append(p)
+        elif e["type"] == "checkpoint":  # checkpoint mode, at a round boundary
+            paused = {"by": "checkpoint", "round": p["round"]}
+        elif e["type"] == "user_pause":
+            paused = {"by": "user"}
+        elif e["type"] == "user_resume":
+            paused = None
         elif e["type"] == "hypothesis_activated":
             hyps[p["id"]].update(status="active", activated_round=p["round"])
         elif e["type"] == "epoch_started":
@@ -108,9 +122,17 @@ def state(events: list[dict]) -> dict:
             proxy, escalated = p, None
         elif e["type"] == "hypothesis_proposed":
             hyps[p["id"]] = {**p, "status": "proposed", "smoke": None, "commit": None,
-                             "verdicts": [], "frozen": [], "escalations": []}
-        elif e["type"] == "hypothesis_registered":
-            hyps[p["id"]]["status"] = "registered"
+                             "verdicts": [], "frozen": [], "escalations": [], "priority": 0,
+                             "unselected": 0}
+        elif e["type"] == "hypothesis_registered":  # the queue's tie-break: registration order
+            hyps[p["id"]].update(status="registered", registered=e["seq"])
+        elif e["type"] == "hypothesis_prioritized":
+            hyps[p["id"]]["priority"] = p["priority"]
+        elif e["type"] == "hypothesis_parked":  # no verdict: it returns as the same version
+            hyps[p["id"]].update(status="parked", parked_from=p["from"], park_reason=p["reason"])
+        elif e["type"] == "hypothesis_unparked":  # back to the queue (a proposal to its review)
+            h = hyps[p["id"]]
+            h.update(status="proposed" if h["parked_from"] == "proposed" else "registered", unselected=0)
         elif e["type"] == "lever_smoke":
             hyps[p["id"]]["smoke"] = p
         elif e["type"] == "lever_committed":
@@ -132,7 +154,8 @@ def state(events: list[dict]) -> dict:
         elif e["type"] == "lever_frozen":
             hyps[p["id"]]["frozen"].append(p["lever"])
         elif e["type"] == "record":
-            records.append({**p, "actor": e["actor"], "seq": e["seq"]})
+            # `round`: the next round to start, the one an expected verdict is for
+            records.append({**p, "actor": e["actor"], "seq": e["seq"], "round": max(rounds, default=-1) + 1})
         elif e["type"] == "hypothesis_escalated":
             hyps[p["id"]]["escalations"].append(p)
             if p["step"] == "rung":
@@ -149,4 +172,4 @@ def state(events: list[dict]) -> dict:
     return {"run": run, "trials": [trials[n] for n in sorted(trials)], "rounds": rounds,
             "noise": noise, "calibration": calib, "hypotheses": hyps, "r0_complete": r0_complete,
             "fidelity": fidelity, "delta": delta, "run_ended": ended, "epoch": epoch,
-            "records": records}
+            "records": records, "paused": paused, "queue": queue}

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import bo, events, git, write_run_yaml
+from conftest import bo, events, git, round_run, write_run_yaml
 
 TOY = Path(__file__).parent / "toy_lever"
 BEFORE = 3.0 * (1 + 1 / 4)  # the toy's planted loss at the reference fidelity, before any lever
@@ -151,7 +151,7 @@ def test_register_freezes_the_spec_once(lever_repo, lever_run, tmp_path):
     assert reg["payload"]["id"] == "H1.v1"
     _, status = bo(lever_repo, "status")
     assert status["hypotheses"] == [{"id": "H1.v1", "title": SPEC["title"], "status": "registered",
-                                     "commit": None}]
+                                     "commit": None, "priority": 0}]
 
 
 def test_lever_code_is_smoked_then_committed_and_the_baseline_is_a_no_op(lever_repo, lever_run,
@@ -177,7 +177,7 @@ def test_lever_code_is_smoked_then_committed_and_the_baseline_is_a_no_op(lever_r
     assert base["commit"] == base_head  # uncommitted code: HEAD plus the hashed worktree
     assert base["tree"] == rand["tree"]
 
-    code, out = bo(lever_repo, "round-run", "--rationale", "dirty")
+    code, out = round_run(lever_repo, "--rationale", "dirty")
     assert code != 0 and "uncommitted" in out["reason"]
 
     code, out = bo(lever_repo, "commit-lever", hid, "--rationale", "smoke passed",
@@ -195,7 +195,7 @@ def test_lever_code_is_smoked_then_committed_and_the_baseline_is_a_no_op(lever_r
     assert code != 0 and "already committed" in out["reason"]
 
     # Committed baselines: the next trial runs on the new commit, and outside the harness too.
-    code, out = bo(lever_repo, "round-run", "--rationale", "calibrate")
+    code, out = round_run(lever_repo, "--rationale", "calibrate")
     assert code == 0, out
     [started] = [e["payload"] for e in events(run_dir) if e["type"] == "round_started"]
     assert started["commit"] == sha
@@ -267,7 +267,7 @@ def test_smoke_of_a_hypothesis_runs_at_the_cheapest_rung_once_r0_measured_it(lev
     assert code != 0 and "round-run" in out["reason"]
 
     git(run_dir / "worktree", "stash", "-q")
-    assert bo(lever_repo, "round-run", "--rationale", "calibrate", env=env)[0] == 0
+    assert round_run(lever_repo, "--rationale", "calibrate", env=env)[0] == 0
     git(run_dir / "worktree", "stash", "pop", "-q")
     code, out = bo(lever_repo, "smoke", hid, "--rationale", "now", env=env)
     assert code == 0 and out["passed"], out
