@@ -1,0 +1,5 @@
+{
+  "name": "boautoresearch",
+  "description": "BO Autoresearch: falsifiable hypotheses expose levers that Bayesian optimisation searches, with a deterministic harness enforcing the budget, verdicts and directives.",
+  "version": "0.1.0"
+}

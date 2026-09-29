@@ -17,7 +17,8 @@ EVENT_TYPES = {"run_started", "trial_started", "trial_finished", "trial_failed",
                "hypothesis_prioritized", "hypothesis_parked", "hypothesis_unparked", "trial_enqueued",
                "agent_trial_skipped", "checkpoint", "user_pause", "user_resume", "removal",
                "hypothesis_revived", "generation_pass", "registry_revised", "hypothesis_pruned",
-               "hypothesis_unpruned", "prohibited_check_refused", "hypothesis_merged", "round_summary"}
+               "hypothesis_unpruned", "prohibited_check_refused", "hypothesis_merged", "round_summary",
+               "hook_blocked", "wrapup_finished"}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -81,6 +82,7 @@ def state(events: list[dict]) -> dict:
     removals: list[dict] = []  # rejects, inconclusives and parks, each owed an interplay review
     passes: list[dict] = []  # generation passes; a proposal belongs to the latest one
     noise = calib = proxy = delta = ended = escalated = paused = None
+    wrapped_up = False  # wrap-up (#37) logs wrapup_finished: the hooks go inert
     baselines: list[dict] = []  # each epoch's baseline mean per fidelity (the replicates' mean)
     epoch = {"epoch": 0, "round": 0}  # the first round whose trials the epoch's evidence counts
     commits: list[dict] = []  # the harness-made commits of the worktree
@@ -123,6 +125,8 @@ def state(events: list[dict]) -> dict:
             delta = p["delta"]
         elif e["type"] == "run_ended":
             ended = p["reason"]
+        elif e["type"] == "wrapup_finished":
+            wrapped_up = True
         elif e["type"] == "trial_enqueued":
             queue.append(p)
         elif e["type"] == "checkpoint":  # checkpoint mode, at a round boundary
@@ -228,7 +232,7 @@ def state(events: list[dict]) -> dict:
             "fidelity": fidelity, "delta": delta, "run_ended": ended, "epoch": epoch,
             "records": records, "paused": paused, "queue": queue, "removals": removals,
             "passes": passes, "registry": registry, "manifest": manifest,
-            "commits": commits, "baselines": baselines}
+            "commits": commits, "baselines": baselines, "wrapup_finished": wrapped_up}
 
 
 def lever_paths(hyps: dict) -> dict:

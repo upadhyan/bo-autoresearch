@@ -22,14 +22,14 @@ from pathlib import Path
 
 import yaml
 
-from . import calibration, directives, hypotheses, records, reports, verdict
+from . import calibration, checks, directives, hypotheses, records, reports
 from . import study as bo_study
 from . import experiment_log as elog
 
 HARNESS_SRC = Path(__file__).resolve().parents[1]  # holds pyproject.toml when run from the plugin
 RUN_KEYS = {"objective", "direction", "budget_s", "runner", "reference_fidelity", "python",
             "ladder", "deterministic", "replicates_k", "delta", "seed", "checkpoint", "target",
-            "max_trials", "seeds", "generation", "fixtures", "brief", "directives", "protected_paths"}
+            "max_trials", "seeds", "generation", "fixtures", "brief", "directives", "protected_paths", "go"}
 CONFIRMATIONS = 2  # replicates of every new incumbent before it counts as the best
 ROUND_CAP = 0.25  # a round may spend this share of the budget remaining at its start
 REPLICATE_SHARE, ESCALATED_SHARE = 0.1, 0.3  # the replicate floor, raised for a stuck hypothesis
@@ -150,6 +150,8 @@ def _load_run_yaml(path: Path) -> dict:
     seed = cfg.setdefault("seed", None)
     if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
         raise Refused("run.yaml: seed must be an integer")
+    if not isinstance(cfg.setdefault("go", False), bool):
+        raise Refused("run.yaml: go must be true (headless: no interviews, straight into the loop) or false")
     if not isinstance(cfg.setdefault("checkpoint", False), bool):
         raise Refused("run.yaml: checkpoint must be true (pause at each round boundary) or false")
     target = cfg.setdefault("target", None)
@@ -257,7 +259,7 @@ def cmd_init(a) -> dict:
         "deterministic": cfg["deterministic"], "replicates_k": cfg["replicates_k"],
         "delta": cfg["delta"], "seed": cfg["seed"], "checkpoint": cfg["checkpoint"],
         "target": cfg["target"], "max_trials": cfg["max_trials"], "seeds": cfg["seeds"],
-        "generation": cfg["generation"], "fixtures": cfg["fixtures"],
+        "generation": cfg["generation"], "fixtures": cfg["fixtures"], "go": cfg["go"],
     })
     # the directive registry, protected paths and brief, owned by the harness from here on
     elog.append(con, "registry_revised", "harness", {
@@ -453,7 +455,7 @@ def _check_manifest(run_dir: Path, st: dict) -> None:
 
 def _read_json(path: str, what: str, validate) -> dict:
     try:
-        body = json.loads(Path(path).read_text())
+        body = json.loads(sys.stdin.read() if path == "-" else Path(path).read_text())
         validate(body)
     except OSError as e:
         raise Refused(f"cannot read {path}: {e}")
@@ -504,10 +506,109 @@ def cmd_record(a) -> dict:
     return {"recorded": a.kind, "agent_id": a.agent_id, **({"hypotheses": ids} if ids else {})}
 
 
+def _check_run() -> tuple[Path, sqlite3.Connection, dict] | None:
+    """The run the hooks enforce: the latest, until its wrap-up has finished (then, as with no run,
+    nothing is enforced)."""
+    try:
+        run_dir, con = _open_run(recover=False)
+    except Refused:
+        return None
+    st = elog.load(con)  # paths compare resolved (macOS's /var is /private/var)
+    return None if st["wrapup_finished"] else (Path(os.path.realpath(run_dir)), con, st)
+
+
+def _decide(con, check: str, agent: str, subject: str, reason: str | None, **extra) -> dict:
+    """A check's answer; every block is logged as `hook_blocked`."""
+    if reason is None:
+        return {"allow": True, **extra}
+    elog.append(con, "hook_blocked", "harness", {"check": check, "agent": agent, "subject": subject,
+                                                 "reason": reason})
+    return {"allow": False, "reason": reason, **extra}
+
+
+def _live(st: dict) -> bool:
+    """A harness process (a background round-run) is running a round or a trial."""
+    return (any(r["ended"] is None and _alive(r.get("pid")) for r in st["rounds"].values())
+            or any(t["status"] == "running" and _alive(t.get("pid")) for t in st["trials"]))
+
+
+def _write_refusal(run_dir: Path, st: dict, path: Path) -> str | None:
+    # the worktree freeze is the research loop's: wrap-up (after the run ended) writes the distilled one
+    return checks.write_refusal(path, run_dir.parents[1], st["run"]["runner"], st["registry"]["protected_paths"],
+                                _live(st) and not st["run_ended"])
+
+
+def cmd_check_write(a) -> dict:
+    """For PreToolUse on Edit, Write and NotebookEdit."""
+    if not (run := _check_run()):
+        return {"allow": True}
+    run_dir, con, st = run
+    p = checks.resolve(Path.cwd(), a.path)
+    return _decide(con, "write", a.agent, str(p), _write_refusal(run_dir, st, p))
+
+
+PROBES = {"status", "summary", "trials", "verdict", "next"}  # what read-only agents may run
+
+
+def cmd_check_bash(a) -> dict:
+    """For PreToolUse on Bash; a subagent's `record` comes back as `updated_command` carrying its
+    agent id, so SubagentStop's `check recorded` finds it."""
+    if not (run := _check_run()):
+        return {"allow": True}
+    run_dir, con, st = run
+    why = checks.bash_refusal(a.command, Path.cwd(), a.agent, run_dir.parent, PROBES,
+                              lambda p: _write_refusal(run_dir, st, p))
+    new = checks.with_agent_id(a.command, a.agent_id, a.agent) if a.agent_id and not why else None
+    return _decide(con, "bash", a.agent, a.command, why, **({"updated_command": new} if new else {}))
+
+
+def cmd_check_read(a) -> dict:
+    """For PreToolUse on Read, Grep and Glob: the orchestrator reads probes, not raw logs."""
+    if not (run := _check_run()):
+        return {"allow": True}
+    run_dir, con, st = run
+    p = checks.resolve(Path.cwd(), a.path)
+    raw = checks.role(a.agent) == "orchestrator" and checks.raw_read(p, run_dir.parent)
+    return _decide(con, "read", a.agent, str(p), checks.RAW_READ if raw else None)
+
+
+def cmd_check_stop(a) -> dict:
+    """For Stop: allowed with no run, while waiting on the user (before the loop starts, at a
+    checkpoint or a user pause), while a background round-run is live, and once wrap-up finished."""
+    if not (run := _check_run()):
+        return {"allow": True}
+    run_dir, con, st = run
+    if _live(st):
+        why = None  # the background round-run wakes the orchestrator when it returns
+    elif st["run_ended"]:
+        why = (f"the run has ended ({st['run_ended']}) but wrap-up hasn't finished: `boautoresearch wrapup` "
+               "(distillation, verification and the report) comes first")
+    elif st["paused"] or (not st["run"].get("go") and not any(r >= 1 for r in st["rounds"])):
+        why = None  # a checkpoint, a user pause, or the pre-loop interviews: the user answers
+    else:
+        why = ("the research loop is autonomous: it ends only on the budget, the user, the target or "
+               f"exhaustion. Next: {'; '.join(_next(st))}")
+    return _decide(con, "stop", "orchestrator", "stop", why)
+
+
 def cmd_check_recorded(a) -> dict:
-    """For the SubagentStop hook: has this agent left a valid record?"""
+    """For SubagentStop (and SubagentHandback in auto mode): has this agent left a valid record?
+    Only the roles that record are held; --agent left out holds it."""
+    if not (run := _check_run()):
+        return {"allow": True, "recorded": False}
+    _, con, st = run
+    done = any(r["agent_id"] == a.agent_id for r in st["records"])
+    held = a.agent is None or checks.role(a.agent) in checks.RECORDING
+    why = None if done or not held else (
+        f"no valid record from this agent yet: finish with `boautoresearch record <kind> --file -` (the "
+        "harness checks the schema and quotes; fix what it refuses and record again)")
+    return _decide(con, "recorded", a.agent or "subagent", a.agent_id, why, recorded=done)
+
+
+def cmd_next(a) -> dict:
+    """The duties outstanding before the next round-run (re-injected after every harness command)."""
     _, con = _open_run(recover=False)
-    return {"recorded": any(r["agent_id"] == a.agent_id for r in elog.load(con)["records"])}
+    return {"next": _next(elog.load(con))}
 
 
 def _apply_review(con, r: dict) -> None:
@@ -1428,6 +1529,7 @@ def _verdict_checks(con, st: dict, r: int, space: dict, baseline: dict, eligible
             continue
         check = sum(v["round"] == r for v in h["verdicts"]) + 1
         vid = f"V-R{r}-{h['id']}-{check}"
+        from . import verdict  # numpy/scipy: imported here so the hooks' checks start fast
         stats = verdict.judge(space, baseline, group, trials, sign, sigma, fresh,
                               _rng(run, "verdict", vid).getrandbits(32))
         gates = {"trials": {"sampler": len(fresh), "agent": sum(t["kind"] in ("agent", "seed")
@@ -2240,7 +2342,18 @@ def _parser() -> argparse.ArgumentParser:
     check = sub.add_parser("check").add_subparsers(dest="check", required=True, parser_class=_Parser)
     c = check.add_parser("recorded")
     c.add_argument("agent_id")
+    c.add_argument("--agent")  # the hook's agent_type
     c.set_defaults(fn=cmd_check_recorded, action=False)
+    for name, fn, arg in (("write", cmd_check_write, "path"), ("read", cmd_check_read, "path"),
+                          ("bash", cmd_check_bash, "command")):
+        c = check.add_parser(name)
+        c.add_argument(arg)  # after `--`: it may start with a dash
+        c.add_argument("--agent", default="orchestrator")  # the hook's agent_type; none: the main session
+        if name == "bash":
+            c.add_argument("--agent-id")
+        c.set_defaults(fn=fn, action=False)
+    check.add_parser("stop").set_defaults(fn=cmd_check_stop, action=False)
+    sub.add_parser("next").set_defaults(fn=cmd_next, action=False)
     sub.add_parser("status").set_defaults(fn=cmd_status, action=False)
     sub.add_parser("summary").set_defaults(fn=cmd_summary, action=False)
     sub.add_parser("rebuild").set_defaults(fn=cmd_rebuild, action=False)
