@@ -4,8 +4,6 @@ Probes (status, trials) are free and never logged. Actions (init, smoke) need a
 --rationale and log their actor.
 """
 import argparse
-import csv
-import io
 import json
 import math
 import os
@@ -24,7 +22,7 @@ from pathlib import Path
 
 import yaml
 
-from . import calibration, directives, hypotheses, records, verdict
+from . import calibration, directives, hypotheses, records, reports, verdict
 from . import study as bo_study
 from . import experiment_log as elog
 
@@ -1275,6 +1273,8 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
                 trigger = "target"
                 break
             checked = _verdict_checks(con, st, r, space, baseline, eligible, sign)
+            if checked:  # SUMMARY.md changes after every verdict
+                _regenerate(run_dir, con)
             if any(v["frozen"] or v["outcome"] in ("reject", "inconclusive") for v in checked):
                 trigger = "search_space"  # a confirmed reject, a freeze or an inconclusive
                 break
@@ -2135,6 +2135,18 @@ def cmd_verdict(a) -> dict:
     return out
 
 
+def cmd_summary(a) -> dict:
+    """The research summary (SUMMARY.md) as the log stands now."""
+    _, con = _open_run(recover=False)
+    return {"summary": _render(elog.load(con))["SUMMARY.md"]}
+
+
+def cmd_rebuild(a) -> dict:
+    """Rewrite every generated file from the log (nothing is logged: they are derived)."""
+    run_dir, con = _open_run(recover=False)
+    return {"rebuilt": _regenerate(run_dir, con)}
+
+
 def _next_eligibility(run_dir: Path, st: dict):
     """The next round's warm start: its selected hypotheses' levers at the run's fidelity."""
     return _eligibility(st, _space(_selected(st)), _baseline(run_dir), st["fidelity"]["fidelity"])
@@ -2147,24 +2159,25 @@ def cmd_trials(a) -> dict:
     return {"trials": _next_eligibility(run_dir, st)(st["trials"]) if a.eligible else st["trials"]}
 
 
-def _regenerate(run_dir: Path, con) -> None:
-    """Rewrite every generated file from the events."""
-    trials = elog.load(con)["trials"]
-    groups = {"L:": "levers", "sampled:": "sampled", "c:": "constraints", "t:": "telemetry",
-              "compat:": "compat"}
-    cols = sorted({(p + k, g, k) for t in trials for p, g in groups.items() for k in t.get(g, {})})
-    extra = [c for c, _, _ in cols]
-    meta = ["trial", "kind", "status", "objective", "seed", "fidelity", "commit", "wall_clock_s",
-            "peak_mem_mb", "exit_code", "artifact_dir"]
-    buf = io.StringIO()
-    w = csv.writer(buf, lineterminator="\n")
-    w.writerow(meta + extra)
-    for t in trials:
-        row = [json.dumps(t["fidelity"], sort_keys=True) if k == "fidelity" else t.get(k, "")
-               for k in meta]
-        w.writerow(row + [t.get(g, {}).get(k, "") for _, g, k in cols])
-    (run_dir / "exports").mkdir(exist_ok=True)
-    (run_dir / "exports" / "trials.csv").write_text(buf.getvalue())
+def _render(st: dict) -> dict[str, str]:
+    return reports.render(st, _status(st), {old["id"]: p for old, p in _pending_links(st)})
+
+
+def _regenerate(run_dir: Path, con) -> list[str]:
+    """Rewrite every generated file from the events (after every state change); -> their paths."""
+    st = elog.load(con)
+    if ended := [n for n, r in st["rounds"].items() if r["ended"] and not r.get("summarised")]:
+        for n in ended:  # its round summary is written (the analyst's narrative fills it later)
+            elog.append(con, "round_summary", "harness", {"round": n, "path": f"rounds/{n:03d}.md"})
+        st = elog.load(con)
+    files = _render(st)
+    for rel, text in files.items():
+        path = run_dir / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{os.getpid()}")  # a concurrent reader never sees half
+        tmp.write_text(text)
+        os.replace(tmp, path)
+    return sorted(files)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -2220,6 +2233,8 @@ def _parser() -> argparse.ArgumentParser:
     c.add_argument("agent_id")
     c.set_defaults(fn=cmd_check_recorded, action=False)
     sub.add_parser("status").set_defaults(fn=cmd_status, action=False)
+    sub.add_parser("summary").set_defaults(fn=cmd_summary, action=False)
+    sub.add_parser("rebuild").set_defaults(fn=cmd_rebuild, action=False)
     t = sub.add_parser("trials")
     t.add_argument("--eligible", action="store_true")
     t.set_defaults(fn=cmd_trials, action=False)

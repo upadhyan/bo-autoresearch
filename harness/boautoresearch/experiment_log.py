@@ -17,7 +17,7 @@ EVENT_TYPES = {"run_started", "trial_started", "trial_finished", "trial_failed",
                "hypothesis_prioritized", "hypothesis_parked", "hypothesis_unparked", "trial_enqueued",
                "agent_trial_skipped", "checkpoint", "user_pause", "user_resume", "removal",
                "hypothesis_revived", "generation_pass", "registry_revised", "hypothesis_pruned",
-               "hypothesis_unpruned", "prohibited_check_refused", "hypothesis_merged"}
+               "hypothesis_unpruned", "prohibited_check_refused", "hypothesis_merged", "round_summary"}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -93,7 +93,7 @@ def state(events: list[dict]) -> dict:
             registry = {**p, "seq": e["seq"]}
             manifest = p["manifest"]
         elif e["type"] == "hypothesis_pruned":  # never tested
-            hyps[p["id"]].update(status="pruned", pruned_by=p["directive"])
+            hyps[p["id"]].update(status="pruned", pruned_by=p["directive"], prune_reason=p["reason"])
         elif e["type"] == "hypothesis_merged":  # carried on by the merged hypothesis
             hyps[p["id"]].update(status="merged", merged_into=p["into"])
         elif e["type"] == "hypothesis_unpruned":  # its directive was relaxed: back to its review
@@ -110,7 +110,12 @@ def state(events: list[dict]) -> dict:
                 if p["round"] >= 1 and h["status"] == "registered" and h["id"] not in p["hypotheses"]:
                     h["unselected"] += 1
         elif e["type"] == "round_ended":
-            rounds[p["round"]]["ended"] = p["trigger"]
+            # the budget spent by the round's end, for its round summary
+            spent = sum(t["wall_clock_s"] for t in trials.values() if t["status"] != "running")
+            rounds[p["round"]].update(ended=p["trigger"], incumbent=p.get("incumbent"), ended_seq=e["seq"],
+                                      spent_s=spent)
+        elif e["type"] == "round_summary":
+            rounds[p["round"]]["summarised"] = True
         elif e["type"] == "drift_check":
             rounds[p["round"]]["drift"] = p
         elif e["type"] == "delta_set":
