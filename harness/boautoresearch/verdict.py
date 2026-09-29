@@ -23,6 +23,14 @@ N_SOBOL, N_CANDIDATES, N_SAMPLES, RESTARTS = 128, 128, 256, 3
 N_GRID = 16
 N_GRID_POINTS = (N_GRID + 2) * (N_GRID + 1)
 FIT_MAX_Z2, HOMOGENEITY_MAX, HOMOGENEITY_MIN_TRIALS = 2.0, 3.0, 8
+# The GP's prior must admit the effect under test along every lever: with the signal sd free to shrink
+# to ~0, or a lengthscale to grow far past the box, maximum likelihood fits a flat function to low
+# signal-to-noise data and its posterior is certain the lever is flat (a gain of exactly δ, σ = 1.5δ:
+# rejected in 10 of 20 runs). So the signal sd is at least SIGNAL_DELTAS·δ and each lengthscale at
+# most the box's width (1) times signal sd / (SIGNAL_DELTAS·δ): the prior's slope along a lever never
+# drops below the floor's, however large the other levers make the signal. A lengthscale below LS_MIN
+# turns noise into wiggles whose max inflates Δ.
+SIGNAL_DELTAS, LS_MIN = 1.5, 0.1
 
 
 def encode(lv: dict, value) -> float:
@@ -66,14 +74,17 @@ def _kernel(A, B, ls, var):
 
 class GP:
     """Matern-5/2 ARD GP, hyperparameters by maximising the log marginal likelihood (L-BFGS-B, a few
-    seeded restarts), the noise variance floored at `noise_floor` (standardised units)."""
+    seeded restarts), the noise variance floored at `noise_floor` and the signal variance at
+    `signal_floor` (standardised units), each lengthscale in [LS_MIN, √(signal var / signal_floor)]."""
 
-    def __init__(self, X: np.ndarray, y: np.ndarray, noise_floor: float, rng: np.random.Generator):
+    def __init__(self, X: np.ndarray, y: np.ndarray, noise_floor: float, signal_floor: float,
+                 rng: np.random.Generator):
         self.X, self.y = X, y
         n, D = X.shape
-        floor = max(noise_floor, 1e-6)
-        lo = np.r_[np.full(D, math.log(1e-2)), math.log(1e-3), math.log(floor)]
-        hi = np.r_[np.full(D, math.log(1e2)), math.log(1e2), math.log(max(10.0, 2 * floor))]
+        floor, self.sfloor = max(noise_floor, 1e-6), max(signal_floor, 1e-3)
+        lo = np.r_[np.full(D, math.log(LS_MIN)), math.log(self.sfloor), math.log(floor)]
+        hi = np.r_[np.full(D, math.log(1e2)), math.log(max(1e2, 10 * self.sfloor)),
+                   math.log(max(10.0, 2 * floor))]
 
         def nll(theta):
             try:
@@ -83,7 +94,7 @@ class GP:
             a = cho_solve(L, y)
             return 0.5 * y @ a + np.log(np.diag(L[0])).sum() + 0.5 * n * math.log(2 * math.pi)
 
-        starts = [np.r_[np.zeros(D), 0.0, max(math.log(0.1), lo[-1])]]
+        starts = [np.clip(np.r_[np.zeros(D), 0.0, math.log(0.1)], lo, hi)]
         starts += [rng.uniform(lo, hi) for _ in range(RESTARTS - 1)]
         best = min((minimize(nll, s, method="L-BFGS-B", bounds=list(zip(lo, hi))) for s in starts),
                    key=lambda r: r.fun)
@@ -93,7 +104,9 @@ class GP:
 
     def _parts(self, theta):
         D = self.X.shape[1]
-        return np.exp(theta[:D]), math.exp(theta[D]), math.exp(theta[D + 1])
+        var = math.exp(theta[D])
+        # the cap as a clamp, not a bound: L-BFGS-B takes box bounds only
+        return np.minimum(np.exp(theta[:D]), math.sqrt(var / self.sfloor)), var, math.exp(theta[D + 1])
 
     def _chol(self, theta):
         ls, var, noise = self._parts(theta)
@@ -130,7 +143,7 @@ def _bounds(xs: np.ndarray) -> dict:
 
 
 def judge(space: dict, baseline: dict, group: list[str], trials: list[dict], sign: int,
-          sigma: float, fresh_sampler: list[int], seed: int) -> dict:
+          sigma: float, delta: float, fresh_sampler: list[int], seed: int) -> dict:
     """The statistics and gates of one verdict check. `trials` are the eligible trials. Δ, M_u and
     √V_T (telemetry), for the group and (d ≥ 2) each lever, come back in objective units, larger =
     better, all from the same latent posterior sample paths."""
@@ -141,7 +154,7 @@ def judge(space: dict, baseline: dict, group: list[str], trials: list[dict], sig
     obj = -sign * np.array([t["objective"] for t in trials])
     mu, sd = obj.mean(), obj.std()
     sd = sd if sd > 0 else 1.0
-    gp = GP(X, (obj - mu) / sd, sigma**2 / sd**2, rng)
+    gp = GP(X, (obj - mu) / sd, sigma**2 / sd**2, (SIGNAL_DELTAS * delta / sd) ** 2, rng)
     base = np.array([encode(space[n], baseline[n]) for n in names])
 
     ls, var, _ = gp._parts(gp.theta)
@@ -193,9 +206,10 @@ def judge(space: dict, baseline: dict, group: list[str], trials: list[dict], sig
         **stats[0], "levers": {group[i]: x for i, x in enumerate(stats[1:])},
         "sobol_index": float(np.median(vts[0] ** 2 / np.maximum(total, 1e-300))),
         "best_point": best_point, "gates": gates,
-        "gp": {"lengthscales": [float(x) for x in np.exp(gp.theta[:len(names)])],
+        "gp": {"lengthscales": [float(x) for x in ls],
                "signal_var": float(var), "noise_var": float(math.exp(gp.theta[-1])),
-               "noise_floor": float(sigma**2 / sd**2)},
+               "noise_floor": float(sigma**2 / sd**2),
+               "signal_floor": float((SIGNAL_DELTAS * delta / sd) ** 2)},
     }
 
 

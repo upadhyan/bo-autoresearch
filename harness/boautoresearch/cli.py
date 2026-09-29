@@ -1839,7 +1839,7 @@ def _verdict_checks(con, st: dict, r: int, space: dict, baseline: dict, eligible
         check = sum(v["round"] == r for v in h["verdicts"]) + 1
         vid = f"V-R{r}-{h['id']}-{check}"
         from . import verdict  # numpy/scipy: imported here so the hooks' checks start fast
-        stats = verdict.judge(space, baseline, group, trials, sign, sigma, fresh,
+        stats = verdict.judge(space, baseline, group, trials, sign, sigma, delta, fresh,
                               _rng(run, "verdict", vid).getrandbits(32))
         gates = {"trials": {"sampler": len(fresh), "agent": sum(t["kind"] in ("agent", "seed")
                                                                  for t in trials),

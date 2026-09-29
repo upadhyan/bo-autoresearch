@@ -696,3 +696,15 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   threshold; its comment gives the rate measured over a wider sweep (seeds 0..19 or 0..9) and the chance the threshold fails at
   that rate (aim ≤ ~10%). A single fixed seed is only a replay seed for a mechanics test whose premise holds on (nearly) every
   seed, never a seed kept because it passes. Eligibility oracles in tests are epoch-aware.
+- verdict calibration: the verdict GP's hyperparameters had no floor on the signal (var ≥ 1e-3 standardised, lengthscale
+  ≤ 100), so at low signal-to-noise ML fit a flat function and the posterior was certain the lever was flat (a gain of
+  exactly δ, σ = 1.5δ: rejected in 10 of 20 runs, Δ's 5/95% bounds held δ in 5 of 32 checks). Now signal sd ≥
+  `SIGNAL_DELTAS`·δ = 1.5δ (`judge` takes δ) and each lengthscale ∈ [0.1, √(signal var / signal floor)] (a clamp in
+  `_parts`: the prior's slope along every lever stays at least the floor's, however large the other levers make the
+  signal); the record's `gp` gains `signal_floor`, `lengthscales` are the clamped ones. Measured over seeds 0..19: gain of
+  δ (σ = 1.5δ) rejected 0/20 (bounds held δ in 22/24 checks); gain of 2δ 0/20 (3/20 before); 1 flat lever σ = δ/2 19/20 at
+  30 fresh (20/20 before); 3 flat levers σ = δ 20/20 within 6 rounds, at 49–110 sampler trials after two single-lever
+  `no-improvement` freezes (12/20 at 45 before). Cost: `irrelevant` needs M_u's bound below δ at every setting of the other
+  levers, and BO leaves settings unexplored, so next to a curved co-active lever (a bowl) a flat lever is labelled
+  `no-improvement`, not `irrelevant` (0/10, even at σ = δ/20; before, the flat fit supplied the label); a smooth partner
+  (linear) still allows it at σ = δ/10 (20/20). Rejects are unaffected; the label and the warm start's key drop are.
