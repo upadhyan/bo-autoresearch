@@ -801,3 +801,9 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   proxy broke 2 of 20 before, 1 of 20 after; an exactly reversed proxy was caught 19 of 20 before, 20 of 20 after, and 7
   → 20 of 20 with a useless co-active lever (test_a_broken_proxy_downgrades…, noise off). Tests that declare
   `deterministic: true` must turn the toy's noise off (σ̂ = 0 lets noise pass for a proxy order).
+- #36/#38 (park after a rung escalation): `park` is refused while H's latest rung escalation has no verdict at that
+  fidelity: the escalation ladder is the harness's, and the claude-caller smoke parked the fidelity-sensitive case the
+  moment it was escalated (on the analyst's stale advice), losing +0.80 of the optimum.
+- #36 (empty passes): `record proposal` accepts `{"hypotheses": []}` (a generator whose lane holds nothing new), and an
+  llm pass counts toward `final_pass_empty` once any proposal record follows its `generation_pass`. Before, a free run
+  couldn't exhaust (the condition wanted a hypothesis from the final pass) and empty-handed generators were held forever.
