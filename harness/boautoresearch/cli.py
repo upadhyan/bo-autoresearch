@@ -29,7 +29,8 @@ from . import experiment_log as elog
 HARNESS_SRC = Path(__file__).resolve().parents[1]  # holds pyproject.toml when run from the plugin
 RUN_KEYS = {"objective", "direction", "budget_s", "runner", "reference_fidelity", "python",
             "ladder", "deterministic", "replicates_k", "delta", "seed", "checkpoint", "target",
-            "max_trials", "seeds", "generation", "fixtures", "brief", "directives", "protected_paths", "go"}
+            "max_trials", "seeds", "generation", "fixtures", "brief", "directives", "protected_paths", "go",
+            "lenses", "proposals_per_lens", "workers"}
 CONFIRMATIONS = 2  # replicates of every new incumbent before it counts as the best
 ROUND_CAP = 0.25  # a round may spend this share of the budget remaining at its start
 REPLICATE_SHARE, ESCALATED_SHARE = 0.1, 0.3  # the replicate floor, raised for a stuck hypothesis
@@ -37,7 +38,10 @@ STARVED_AFTER = 3  # BO rounds a registered hypothesis waits unselected before t
 
 
 class Refused(Exception):
-    pass
+    """A refused action: {"refused": true, "reason": ...} plus any `extra` fields."""
+    def __init__(self, message: str, **extra):
+        super().__init__(message)
+        self.extra = extra
 
 
 class TrialRefused(Refused):
@@ -175,6 +179,24 @@ def _load_run_yaml(path: Path) -> dict:
         cfg["fixtures"] = str((path.parent / fixtures).resolve())
     elif fixtures is not None:
         raise Refused("run.yaml: fixtures are served only with generation: scripted")
+    lenses = cfg.setdefault("lenses", None)
+    names = lenses if isinstance(lenses, list) and all(isinstance(x, str) and x.strip() for x in lenses) else []
+    if lenses is not None and (not names or len(set(names)) < len(names)):
+        raise Refused("run.yaml: lenses must list distinct lens names, e.g. [data, optimisation] "
+                      "(the wildcard lens is always added)")
+    per = cfg.setdefault("proposals_per_lens", 3)
+    if isinstance(per, bool) or not isinstance(per, int) or per < 2:
+        raise Refused("run.yaml: proposals_per_lens must be a whole number of at least 2 (each generator "
+                      "covers at least 2 mechanisms)")
+    workers = cfg.setdefault("workers", 1)
+    if isinstance(workers, bool) or not isinstance(workers, int) or workers < 1:
+        raise Refused("run.yaml: workers must be a positive whole number")
+    if workers > 1:  # ponytail: one trial at a time (see _run_round); parallel asks need a constant liar
+        raise Refused("run.yaml: workers > 1 is not supported yet: trials run one at a time (workers: 1)")
+    missing = ([] if delta is not None else ["delta"]) + (
+        [] if lenses is not None or generation == "scripted" else ["lenses (or generation: scripted)"])
+    if cfg["go"] and missing:
+        raise Refused(f"run.yaml: go: true starts headless, with no interviews, so it needs {' and '.join(missing)}")
     try:
         cfg["registry"] = directives.validate({k: cfg.pop(k, None) for k in directives.REGISTRY_KEYS})
     except ValueError as e:
@@ -209,7 +231,9 @@ def cmd_init(a) -> dict:
     cfg = _load_run_yaml(Path(a.run_yaml))
     root = _repo_root()
     runs = root / ".bo-research"
-    if _git(root, "status", "--porcelain", "--", ".", ":!.bo-research"):
+    draft = Path(a.run_yaml).resolve()  # the run.yaml being started may be an uncommitted draft
+    skip = [f":!{draft.relative_to(root)}"] if root in draft.parents else []
+    if _git(root, "status", "--porcelain", "--", ".", ":!.bo-research", *skip):
         raise Refused("the working tree has uncommitted changes; commit or stash them first")
     if not (root / cfg["runner"]).is_file():
         raise Refused(f"runner {cfg['runner']} is not in the repository")
@@ -260,6 +284,7 @@ def cmd_init(a) -> dict:
         "delta": cfg["delta"], "seed": cfg["seed"], "checkpoint": cfg["checkpoint"],
         "target": cfg["target"], "max_trials": cfg["max_trials"], "seeds": cfg["seeds"],
         "generation": cfg["generation"], "fixtures": cfg["fixtures"], "go": cfg["go"],
+        "lenses": cfg["lenses"], "proposals_per_lens": cfg["proposals_per_lens"], "workers": cfg["workers"],
     })
     # the directive registry, protected paths and brief, owned by the harness from here on
     elog.append(con, "registry_revised", "harness", {
@@ -547,7 +572,7 @@ def cmd_check_write(a) -> dict:
     return _decide(con, "write", a.agent, str(p), _write_refusal(run_dir, st, p))
 
 
-PROBES = {"status", "summary", "trials", "verdict", "next"}  # what read-only agents may run
+PROBES = {"status", "summary", "trials", "verdict", "next", "show", "untested", "sensitivity"}  # what read-only agents may run
 
 
 def cmd_check_bash(a) -> dict:
@@ -1200,63 +1225,101 @@ def _new_epoch(run_dir: Path, con, sha: str, change: str, breaking: bool) -> dic
     return payload
 
 
+def _workspace(run_dir: Path, st: dict) -> dict[str, str]:
+    """What a round (R0 included) needs of the run's files, by condition: the worktree and venv
+    exist, the protected paths are as recorded, HEAD is the harness's, the tree is clean."""
+    worktree, failing = run_dir / "worktree", {}
+    if not (run_dir / "venv" / "bin" / "python").exists():
+        failing["venv"] = f"the run venv {run_dir / 'venv'} is missing (trials run in it)"
+    if not worktree.is_dir():
+        failing["worktree"] = f"the run worktree {worktree} is missing (trials run in it)"
+        return failing
+    try:
+        _check_manifest(run_dir, st)
+    except Refused as e:
+        failing["protected_paths"] = str(e)
+    made = {st["run"]["base_commit"], *(e["commit"] for e in st["commits"])}
+    if (head := _git(worktree, "rev-parse", "HEAD")) not in made:
+        failing["head"] = (f"the worktree's HEAD {head[:12]} was not committed by the harness: commits go "
+                           "through commit-lever, commit-change or add-dependency (their diffs are checked)")
+    if _git(worktree, "status", "--porcelain"):
+        failing["clean"] = ("the worktree has uncommitted changes: a round runs on one commit, so commit "
+                            "lever code with `commit-lever <H>` first")
+    return failing
+
+
+def _gate(run_dir: Path, st: dict) -> dict[str, str]:
+    """Every unmet condition of the next BO round, by condition; for R1 this is the R1 gate (#15).
+    R0's own conditions (smoke passed, σ estimated) hold here: round-run reruns R0 until they do."""
+    failing = _workspace(run_dir, st)
+    reg = st["registry"]
+    if not reg["version"] or reg["brief"] is None:
+        failing["registry"] = ("the research brief is missing from the directive registry: state it "
+                               "(purpose, contribution, complexity, provenance) with `checkpoint` then "
+                               "`checkpoint --revise <yaml>`")
+    if unreviewed := _review_missing(st):
+        failing["review"] = (f"record review {', '.join(unreviewed)} first: the registration reviewer reviews "
+                             "every hypothesis at registration, at revival, and after a registry revision")
+    if missing := _interplay_missing(st):
+        failing["interplay"] = (f"record interplay for {', '.join(_who(m) for m in missing)} first: every "
+                                "removal is weighed against the untested list, and every newcomer against past removals")
+    if due := _generation_due(st):
+        failing["generation"] = f"`generate` first: a generation pass is due ({'; '.join(due)})"
+    selected = _selected(st)
+    if not selected:
+        failing["hypothesis"] = "no hypothesis is registered: propose and register one first"
+    if uncoded := [h["id"] for h in selected if not h["commit"]]:
+        failing["code"] = (f"the round selects {uncoded}, whose lever code is not committed: "
+                           "write it, then `smoke <H>` and `commit-lever <H>`")
+    if st["run"]["ladder"] and not st["calibration"]:
+        failing["calibration"] = ("the ladder is not calibrated yet: round-run calibrates it once the "
+                                  "selected hypotheses' lever code is committed")
+    if unexpected := _expected_missing(st):
+        failing["expected"] = (f"record expected {', '.join(unexpected)} first: before each round, an expected "
+                               "verdict (retain, reject or undecided, one-line reason) for every hypothesis it tests")
+    if st["delta"] is None:
+        failing["delta"] = f"set δ first: `{_delta_duty(st)}`"
+    return failing
+
+
+def _refuse(r: int, failing: dict[str, str]):
+    raise Refused(f"round-run R{r} is refused until every condition holds: " + " | ".join(failing.values()),
+                  failing=list(failing))
+
+
 def cmd_round_run(a) -> dict:
     run_dir, con = _open_run()
     st = elog.load(con)
-    _check_manifest(run_dir, st)  # before every round, R0 included
-    made = {st["run"]["base_commit"], *(e["commit"] for e in st["commits"])}
-    if (head := _git(run_dir / "worktree", "rev-parse", "HEAD")) not in made:
-        raise Refused(f"the worktree's HEAD {head[:12]} was not committed by the harness: commits go "
-                      "through commit-lever, commit-change or add-dependency (their diffs are checked)")
-    if _git(run_dir / "worktree", "status", "--porcelain"):
-        raise Refused("the worktree has uncommitted changes: a round runs on one commit, so commit "
-                      "lever code with `commit-lever <H>` first")
     _not_ended(st)
     if st["paused"]:
         raise Refused(f"the run is paused at a checkpoint: {RESUME_HINT}")
     if not st["r0_complete"]:
+        if failing := _workspace(run_dir, st):
+            _refuse(0, failing)
         return _run_r0(run_dir, con, a, st)
-    def ready_selection(st: dict) -> list[dict]:
-        """The selection, refused while its code or (once δ is set) its expected verdicts are missing."""
-        selected = _selected(st)
-        if not selected:
-            raise Refused("no hypothesis is registered: propose and register one first")
-        if uncoded := [h["id"] for h in selected if not h["commit"]]:
-            raise Refused(f"the round selects {uncoded}, whose lever code is not committed: "
-                          "write it, then `smoke <H>` and `commit-lever <H>`")
-        if st["delta"] is not None and (missing := _expected_missing(st)):
-            raise Refused(f"record expected {', '.join(missing)} first: before each round, an expected "
-                          "verdict (retain, reject or undecided, one-line reason) for every hypothesis it tests")
-        return selected
-
-    if unreviewed := _review_missing(st):
-        raise Refused(f"record review {', '.join(unreviewed)} first: the registration reviewer reviews every "
-                      "hypothesis at registration, at revival, and after a registry revision")
-    if missing := _interplay_missing(st):
-        raise Refused(f"record interplay for {', '.join(_who(m) for m in missing)} first: every removal "
-                      "is weighed against the untested list, and every newcomer against past removals")
-    if due := _generation_due(st):
-        raise Refused(f"`generate` first: a generation pass is due ({'; '.join(due)})")
     if all((conditions := _exhaustion(st)).values()):  # judged at the boundary, once a pass is in
         elog.append(con, "run_ended", "harness", {"reason": "exhausted", "exhaustion": conditions})
         _regenerate(run_dir, con)
         return _status(elog.load(con))
-    if revived := _revive(run_dir, con, st):  # into the round the partner joins, shown before it runs
-        _regenerate(run_dir, con)
+    failing = _gate(run_dir, st)
+    if not {"review", "interplay", "generation"} & set(failing) and (revived := _revive(run_dir, con, st)):
+        _regenerate(run_dir, con)  # into the round the partner joins, shown before it runs
         return {"revived": revived, **_status(elog.load(con))}
-    selected = ready_selection(st)
-    if st["run"]["ladder"] and not st["calibration"]:  # still part of R0; needs the lever boxes
+    # the ladder is calibrated (still R0) at the first call it can be: it needs the lever boxes; before
+    # δ, whose choice it informs, nothing else need hold; with δ set, everything (no trials wasted)
+    waits = {"calibration"} | ({"delta", "expected"} if st["delta"] is None else set())
+    if "calibration" in failing and set(failing) <= waits:
         try:
-            _calibrate_ladder(run_dir, con, st["noise"], _space(selected))
+            _calibrate_ladder(run_dir, con, st["noise"], _space(_selected(st)))
         except TrialRefused as e:
             # R0 itself has ended: only the run ends
             return _end_run(run_dir, con, {"round": 0, "trigger": e.reason}, log_round=False)
         st = elog.load(con)
         if st["delta"] is None:  # shown before δ is set
             return {"round": 0, "fidelity_calibration": st["calibration"], **_status(st)}
-        ready_selection(st)  # the chosen rung's cost moves the dimension cap, so the selection too
-    if st["delta"] is None:
-        raise Refused(f"set δ first: `{_delta_duty(st)}`")
+        failing = _gate(run_dir, st)  # the chosen rung's cost moves the dimension cap, so the selection too
+    if failing:
+        _refuse(_upcoming(st), failing)
     return _run_round(run_dir, con, a, st)
 
 
@@ -1507,9 +1570,14 @@ def _fresh(st: dict, h: dict, eligible) -> list[int]:
             and t["round"] >= h["activated_round"] and h["id"] not in t.get("masked", [])]
 
 
+def _burn_in(d: int) -> int:
+    """Fresh sampler trials a d-lever group needs before its first verdict check."""
+    return max(10 * d, 20)
+
+
 def _schedule(h: dict) -> dict:
     d = len(_group(h))
-    return {"needed": max(10 * d, 20), "spacing": max(5 * d, 10), "cap": max(40 * d, 80)}
+    return {"needed": _burn_in(d), "spacing": max(5 * d, 10), "cap": max(40 * d, 80)}
 
 
 def _verdict_checks(con, st: dict, r: int, space: dict, baseline: dict, eligible,
@@ -1860,6 +1928,7 @@ def _status(st: dict) -> dict:
             "sigma": st["noise"]["sigma"] if st["noise"] else None,
             "replication": st["noise"]["replication"] if st["noise"] else None,
             "delta": st["delta"], "suggested_delta": _suggested_delta(st), "run_ended": st["run_ended"],
+            "delta_guide": _delta_guide(st, d) if (d := _suggested_delta(st)) else None,
             "epoch": st["epoch"]["epoch"],
             "hypotheses": [{"id": h["id"], "title": h["spec"]["title"], "status": h["status"],
                             "commit": h["commit"], "priority": _priority(st, h)}
@@ -1867,7 +1936,8 @@ def _status(st: dict) -> dict:
             "schedule": _schedule_status(st), "paused": st["paused"],
             "interplay_missing": _interplay_missing(st), "review_missing": _review_missing(st),
             "generation": {"mode": run["generation"], "passes": len(st["passes"]),
-                           "due": _generation_due(st)},
+                           "due": _generation_due(st), "lenses": run.get("lenses"),
+                           "proposals_per_lens": run.get("proposals_per_lens")},
             "exhaustion": _exhaustion(st), "next": _next(st),
             "conflicts": {"rivals": _rivals(st), "masking": _masking(st),
                           "merged": [{"id": h["id"], "into": h["merged_into"]}
@@ -1877,6 +1947,15 @@ def _status(st: dict) -> dict:
 def _suggested_delta(st: dict) -> float | None:
     """2σ; none for a noiseless objective (set-delta refuses 0)."""
     return 2 * st["noise"]["sigma"] if st["noise"] and st["noise"]["sigma"] > 0 else None
+
+
+def _delta_guide(st: dict, delta: float) -> dict:
+    """What a verdict at δ roughly costs: the fresh trials a one-lever hypothesis needs (burn-in, or
+    the noise's two-sample count if larger) at the run's fidelity, and whether the budget left holds them."""
+    fid = st["fidelity"]["fidelity"]
+    trials = max(_burn_in(1), math.ceil(calibration.trials_needed(_sigma(st, fid), delta)))
+    cost = trials * _cost(st["trials"], fid)
+    return {"delta": delta, "trials": trials, "cost_s": cost, "feasible": cost <= _remaining(st)}
 
 
 def _delta_duty(st: dict) -> str:
@@ -2212,8 +2291,13 @@ def cmd_set_delta(a) -> dict:
         raise Refused("δ is set from the calibration round's σ: run `round-run` first")
     if not _positive(a.value):
         raise Refused(f"δ must be a positive number in objective units, not {a.value}")
+    guide = _delta_guide(st, a.value)
+    if not guide["feasible"] and not a.infeasible_ok:
+        raise Refused(f"δ = {a.value:.3g} needs ~{guide['trials']} trials per verdict (~{guide['cost_s']:.3g} s), "
+                      f"more than the {_remaining(st):.3g} s of budget left: pick a larger δ, or pass "
+                      "--infeasible-ok if the user accepts that verdicts may never come", guide=guide)
     elog.append(con, "delta_set", a.actor, {"rationale": a.rationale, "delta": a.value,
-                                            "suggested": _suggested_delta(st)})
+                                            "suggested": _suggested_delta(st), "guide": guide})
     _regenerate(run_dir, con)
     return _status(elog.load(con))
 
@@ -2235,6 +2319,37 @@ def cmd_verdict(a) -> dict:
         out["verdict"] = last["outcome"] if last else "burn-in"
         out["burn_in"] = {"fresh": len(fresh), **_schedule(h)}
     return out
+
+
+def cmd_show(a) -> dict:
+    """A hypothesis: its spec, state, effective priority, current review and verdict history."""
+    _, con = _open_run(recover=False)
+    st = elog.load(con)
+    h = _hypothesis(st, a.hypothesis)
+    return {**h, "priority": _priority(st, h), "review": _review(st, h)}
+
+
+def cmd_untested(a) -> dict:
+    """The hypotheses not yet tested: proposed, and registered (the queue) but never activated."""
+    _, con = _open_run(recover=False)
+    st = elog.load(con)
+    return {"untested": [{"id": h["id"], "status": h["status"], "title": h["spec"]["title"],
+                          "mechanism": h["spec"]["mechanism"], "lens": h["spec"]["lens"],
+                          "priority": _priority(st, h)}
+                         for h in st["hypotheses"].values() if h["status"] in records.UNTESTED]}
+
+
+def cmd_sensitivity(a) -> dict:
+    """Telemetry from the verdict GP, per verdict record: the group's and each lever's √V_T, the
+    normalised Sobol index, Δ and the best point. Never a verdict."""
+    # ponytail: read from the verdict records; partial-dependence curves need a GP refit, add when
+    # the round analyst asks for them
+    _, con = _open_run(recover=False)
+    h = _hypothesis(elog.load(con), a.hypothesis)
+    return {"hypothesis": h["id"], "telemetry": True,
+            "records": [{k: r.get(k) for k in ("id", "round", "check", "group", "sqrt_vt", "levers",
+                                                "sobol_index", "delta_stat", "best_point")}
+                        for r in h["verdicts"]]}
 
 
 def cmd_summary(a) -> dict:
@@ -2334,7 +2449,9 @@ def _parser() -> argparse.ArgumentParser:
     n.add_argument("--high", type=float)
     n.add_argument("--options")
     action("accept-proxy", cmd_accept_proxy).add_argument("--fidelity", required=True)
-    action("set-delta", cmd_set_delta).add_argument("value", type=float)
+    sd = action("set-delta", cmd_set_delta)
+    sd.add_argument("value", type=float)
+    sd.add_argument("--infeasible-ok", action="store_true")  # the user accepts a δ the budget can't resolve
     r = action("record", cmd_record)
     r.add_argument("kind", choices=sorted(records.KINDS))
     r.add_argument("--file", required=True)
@@ -2360,9 +2477,11 @@ def _parser() -> argparse.ArgumentParser:
     t = sub.add_parser("trials")
     t.add_argument("--eligible", action="store_true")
     t.set_defaults(fn=cmd_trials, action=False)
-    v = sub.add_parser("verdict")
-    v.add_argument("hypothesis")
-    v.set_defaults(fn=cmd_verdict, action=False)
+    for name, fn in (("verdict", cmd_verdict), ("show", cmd_show), ("sensitivity", cmd_sensitivity)):
+        v = sub.add_parser(name)
+        v.add_argument("hypothesis")
+        v.set_defaults(fn=fn, action=False)
+    sub.add_parser("untested").set_defaults(fn=cmd_untested, action=False)
     return p
 
 
@@ -2375,7 +2494,7 @@ def main(argv=None) -> int:
             raise Refused("--actor must name the caller; 'harness' is reserved for the harness")
         out = a.fn(a)
     except Refused as e:
-        print(json.dumps({"refused": True, "reason": str(e)}))
+        print(json.dumps({"refused": True, "reason": str(e), **e.extra}))
         return 1
     print(json.dumps(out, indent=2, sort_keys=True))
     return 0

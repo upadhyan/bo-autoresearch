@@ -234,7 +234,7 @@ def stop_blocked(run_dir, cwd, words):
 
 
 def test_check_stop_blocks_mid_run_and_allows_a_pause_a_background_round_and_a_finished_wrap_up(init_run):
-    run_dir = init_run("budget_s: 3600\nreference_fidelity: {epochs: 4}\ngo: true\n")
+    run_dir = init_run("budget_s: 3600\nreference_fidelity: {epochs: 4}\ngo: true\ndelta: 0.1\nlenses: [data]\n")
     repo = run_dir.parents[1]
     stop_blocked(run_dir, repo, "round-run (the calibration round)")  # headless: no interview to wait on
 
@@ -306,7 +306,7 @@ def hook(cwd, event, **fields):
 
 
 def test_the_adapter_maps_allow_to_exit_0_and_block_to_exit_2_with_the_reason(init_run):
-    run_dir = init_run("budget_s: 3600\nreference_fidelity: {epochs: 4}\ngo: true\n")
+    run_dir = init_run("budget_s: 3600\nreference_fidelity: {epochs: 4}\ngo: true\ndelta: 0.1\nlenses: [data]\n")
     repo, wt = run_dir.parents[1], run_dir / "worktree"
     code, out, err = hook(wt, "PreToolUse", tool_name="Write", tool_input={"file_path": str(wt / "train.py"), "content": ""})
     assert (code, out, err) == (0, "", "")

@@ -63,7 +63,8 @@ def _spread(objectives: list) -> float:
     return max(done) - min(done) if done else 0.0
 
 
-def _trials_needed(sd: float, effect: float) -> float:
+def trials_needed(sd: float, effect: float) -> float:
+    """Trials to resolve `effect` against noise `sd` (a rough two-sample count; 1 without noise)."""
     if sd == 0:
         return 1.0
     return max(1.0, N_FACTOR * sd**2 / effect**2) if effect > 0 else math.inf
@@ -79,7 +80,7 @@ def choose(reference: dict, rungs: list[dict]) -> tuple[dict, bool]:
     """
     delta = 2 * reference["sigma"]
     reference["spread"] = _spread(reference["objectives"])
-    candidates = [(reference["cost_s"] * _trials_needed(reference["sigma"], delta), 0, reference)]
+    candidates = [(reference["cost_s"] * trials_needed(reference["sigma"], delta), 0, reference)]
     for i, r in enumerate(rungs, 1):
         r["spread"] = _spread(r["objectives"])
         r["rho"] = spearman(r["objectives"], reference["objectives"])
@@ -87,7 +88,7 @@ def choose(reference: dict, rungs: list[dict]) -> tuple[dict, bool]:
                        and r["spread"] >= SPREAD_SIGMAS * r["sigma"])
         if r["passed"]:
             effect = delta * r["spread"] / reference["spread"]
-            candidates.append((r["cost_s"] * _trials_needed(r["sigma"], effect), i, r))
+            candidates.append((r["cost_s"] * trials_needed(r["sigma"], effect), i, r))
     for cost, _, row in candidates:
         row["expected_cost_s"] = cost if math.isfinite(cost) else None
     chosen = min(candidates, key=lambda c: c[:2])[2]

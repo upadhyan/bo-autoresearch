@@ -119,12 +119,17 @@ def repo(tmp_path):
     return r
 
 
+BRIEF = ("brief: {purpose: find what limits the toy's loss, contribution: a lower loss, "
+         "complexity: small changes, provenance: any}\n")
+
+
 def write_run_yaml(path, python, extra=""):
     extra = extra or "budget_s: 3600\nreference_fidelity: {epochs: 4}\n"
     # a fixed seed unless the test sets its own: runs (and their equivalence checks, which fail by
     # chance at 2σ) replay the same way every time
+    # and a research brief unless the test states its own (R1 needs one, #35)
     path.write_text("objective: loss\ndirection: minimize\n" f"python: {python}\n" + extra
-                    + ("" if "seed:" in extra else "seed: 0\n"))
+                    + ("" if "seed:" in extra else "seed: 0\n") + ("" if "brief:" in extra else BRIEF))
     return path
 
 

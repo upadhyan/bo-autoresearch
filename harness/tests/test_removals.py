@@ -185,7 +185,8 @@ def test_generation_is_due_at_run_start_when_the_queue_runs_low_and_on_an_analys
     first, second = [titled("first", "a"), titled("second", "b")], [titled("third", "c")]
     repo, run_dir = setup(tmp_path, project_python, scripted(tmp_path, first, second))
     _, status = bo(repo, "status")
-    assert status["generation"] == {"mode": "scripted", "passes": 0, "due": ["run start"]}
+    assert status["generation"] == {"mode": "scripted", "passes": 0, "due": ["run start"],
+                                    "lenses": None, "proposals_per_lens": 3}
     assert "generate (run start)" in status["next"]
     code_, out = bo(repo, "round-run", "--rationale", "go", env=ENV)
     assert code_ != 0 and "generate" in out["reason"] and "run start" in out["reason"]
