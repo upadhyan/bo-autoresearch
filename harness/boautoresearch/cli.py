@@ -18,6 +18,7 @@ import sys
 import tempfile
 import threading
 import time
+from concurrent import futures
 from pathlib import Path
 
 import yaml
@@ -193,8 +194,6 @@ def _load_run_yaml(path: Path) -> dict:
     workers = cfg.setdefault("workers", 1)
     if isinstance(workers, bool) or not isinstance(workers, int) or workers < 1:
         raise Refused("run.yaml: workers must be a positive whole number")
-    if workers > 1:  # ponytail: one trial at a time (see _run_round); parallel asks need a constant liar
-        raise Refused("run.yaml: workers > 1 is not supported yet: trials run one at a time (workers: 1)")
     missing = ([] if delta is not None else ["delta"]) + (
         [] if lenses is not None or generation == "scripted" else ["lenses (or generation: scripted)"])
     if cfg["go"] and missing:
@@ -313,6 +312,15 @@ def _trial(run_dir: Path, con, a, kind: str, levers: dict, fidelity: dict, workt
     `a` is the caller's action; None for a trial the harness schedules itself. A wrap-up trial (kind
     `wrapup`, in `worktree`: the research one unless given) is outside the budget and the trial ceiling.
     """
+    trial = _start(run_dir, con, a, kind, levers, fidelity, worktree, **extra)
+    return _outcome(run_dir, con, trial, _run_trial(run_dir, elog.load(con)["run"]["runner"], trial,
+                                                    worktree or run_dir / "worktree"))
+
+
+def _start(run_dir: Path, con, a, kind: str, levers: dict, fidelity: dict, worktree: Path | None = None,
+           **extra) -> dict:
+    """The gates, then `trial_started`: -> the trial to run. Trials still running (in flight beside
+    this one) are charged their estimated cost up front, so parallel trials never overdraw the budget."""
     st = elog.load(con)
     run, n = st["run"], len(st["trials"]) + 1
     levers, masking = _mask(st, levers)
@@ -323,7 +331,7 @@ def _trial(run_dir: Path, con, a, kind: str, levers: dict, fidelity: dict, workt
             _regenerate(run_dir, con)
             raise ProhibitedRefused(f"a {kind} trial at {json.dumps(levers, sort_keys=True)} breaks prohibited "
                                     f"directive {d['id']} ({d['predicate']}): it never runs")
-        remaining = _remaining(st)
+        remaining = _remaining(st) - _in_flight(st)
         estimate = _cost(st["trials"], fidelity)
         if run["max_trials"] is not None and n > run["max_trials"]:
             elog.append(con, "trial_refused", "harness", {"kind": kind, "fidelity": fidelity,
@@ -347,10 +355,19 @@ def _trial(run_dir: Path, con, a, kind: str, levers: dict, fidelity: dict, workt
         elog.append(con, "trial_started", a.actor, {"rationale": a.rationale, **started})
     else:
         elog.append(con, "trial_started", "harness", started)
-    outcome = _run_trial(run_dir, run["runner"], trial, worktree)
-    elog.append(con, "trial_" + outcome.pop("status"), "harness", {"trial": n, **outcome})
+    return trial
+
+
+def _outcome(run_dir: Path, con, trial: dict, outcome: dict) -> dict:
+    """Log the trial's outcome: -> the trial as the log now folds it."""
+    elog.append(con, "trial_" + outcome.pop("status"), "harness", {"trial": trial["trial"], **outcome})
     _regenerate(run_dir, con)
-    return elog.load(con)["trials"][-1]
+    return next(t for t in elog.load(con)["trials"] if t["trial"] == trial["trial"])
+
+
+def _in_flight(st: dict) -> float:
+    """The estimated cost of the trials still running (0 when trials run one at a time)."""
+    return sum(_cost(st["trials"], t["fidelity"]) for t in st["trials"] if t["status"] == "running")
 
 
 def _mask(st: dict, sampled: dict) -> tuple[dict, dict]:
@@ -1636,7 +1653,30 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
         "pid": os.getpid(), "cap_s": cap, "seeded": [t["trial"] for t in seeds]})
     rng = _rng(run, f"R{r}")
     study = bo_study.Study(run_dir / "studies.db", run["direction"], space, seeds, rng.getrandbits(31))
-    # ponytail: one trial at a time; run.yaml `workers` needs asks with pending trials (constant liar)
+    # up to `workers` trials at once, each subprocess waited on in a worker thread; the log and the
+    # study are touched from this thread only. An ask not yet told stays RUNNING in the study, and
+    # GPSampler conditions its next asks on those pending points (qLogEI), so no constant liar is needed
+    workers, pool = run["workers"], futures.ThreadPoolExecutor(run["workers"])
+    flight: dict = {}  # future -> (the started trial, its sampler ask or None)
+    runners: dict = {}  # trial -> runner pid: a failing round kills the runners still in flight
+
+    def launch(kind: str, levers: dict, asked=None, **extra) -> None:
+        """Start a trial (its gates may refuse it) in a worker; with every worker busy, land one."""
+        trial = _start(run_dir, con, None, kind, levers, fidelity, round=r, **extra)
+        flight[pool.submit(_run_trial, run_dir, run["runner"], trial, run_dir / "worktree", runners)] = (trial, asked)
+        if len(flight) >= workers:
+            land()
+
+    def land(every: bool = False) -> None:
+        """Log the in-flight trials that finished (in trial order): at least one, or every one."""
+        done, _ = futures.wait(flight, return_when=futures.ALL_COMPLETED if every else futures.FIRST_COMPLETED)
+        for f in sorted(done, key=lambda f: flight[f][0]["trial"]):
+            trial, asked = flight.pop(f)
+            t = _outcome(run_dir, con, trial, f.result())
+            if asked is not None:
+                study.tell(asked, t)
+            elif t["status"] == "finished":
+                study.add(t)
 
     def best(trials):
         return bo_study.incumbent(eligible(trials), sign, confirmations)
@@ -1663,9 +1703,7 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
                 elog.append(con, "agent_trial_skipped", "harness",
                             {"round": r, "kind": kind, "config": cfg, "reason": why, **extra})
                 continue
-            t = _trial(run_dir, con, None, kind, {**baseline, **cfg}, fidelity, round=r, **extra)
-            if t["status"] == "finished":
-                study.add(t)
+            launch(kind, {**baseline, **cfg}, **extra)
         while trigger is None:
             st = elog.load(con)
             inc = best(st["trials"])
@@ -1691,13 +1729,17 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
                           for h in _in_search(st))  # a pending reject holds the round open
             this = [t for t in st["trials"] if t.get("round") == r]
             spent = sum(t["wall_clock_s"] for t in this if t["status"] != "running")
-            # the drift check's two reference trials come out of the cap too; the first trial always
-            # runs (only the budget refuses it), so a round never ends empty
+            # the drift check's two reference trials come out of the cap too, and so do the trials in
+            # flight (at their estimated cost); the first trial always runs (only the budget refuses
+            # it), so a round never ends empty
             reserve = 2 * _cost(st["trials"], ref) if fidelity != ref else 0.0
-            if spent > 0 and spent + _cost(st["trials"], fidelity) + reserve > cap:
+            if (spent > 0 or flight) and spent + _in_flight(st) + _cost(st["trials"], fidelity) + reserve > cap:
                 trigger = "cap"
             elif (since >= stall_after and not pending and not holding
                   and _burned_in(st, selected, eligible)):
+                if flight:  # judged with nothing in flight: a trial still running may be a new incumbent
+                    land()
+                    continue
                 trigger = "stall"
             elif pending or (confirmations
                              and sum("replicate_of" in t for t in this) < share * len(this)):
@@ -1707,36 +1749,53 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
                     # ponytail: the least-replicated of the top 3 configs (escalation raises only the
                     # share); pick by posterior overlap if replicates are wasted on settled configs
                     top = bo_study.ranked(eligible(st["trials"]), sign)[:3]
-                    root, kind = min(top, key=lambda c: c["replicates"])["trial"], "replicate"
+                    running = [tr.get("replicate_of") for tr, _ in flight.values()]
+                    root = min(top, key=lambda c: c["replicates"] + running.count(c["trial"]))["trial"]
+                    kind = "replicate"
                 levers = next(t["levers"] for t in eligible(st["trials"]) if t["trial"] == root)
-                t = _trial(run_dir, con, None, kind, {**baseline, **levers}, fidelity, round=r,
-                           replicate_of=root)
-                if t["status"] == "finished":
-                    study.add(t)
+                launch(kind, {**baseline, **levers}, replicate_of=root)
             else:
                 asked = study.ask()
+                if any(q is not None and q.params == asked.params for _, q in flight.values()):
+                    study.tell(asked, {"status": "refused"})  # never the same point twice in flight
+                    land()
+                    continue
                 try:
-                    t = _trial(run_dir, con, None, "sampler", {**baseline, **asked.params}, fidelity, round=r)
+                    launch("sampler", {**baseline, **asked.params}, asked=asked)
                 except ProhibitedRefused:  # a point between the grid registration checked
-                    t, refusals = {"status": "refused"}, refusals + 1
+                    refusals += 1
                     # ponytail: ends the round after 10 refused asks (the sampler learns nothing from
                     # a FAIL); reparameterise the region into a box if a hypothesis keeps hitting it
                     if refusals >= 10:
                         trigger = "prohibited"
-                study.tell(asked, t)
+                    study.tell(asked, {"status": "refused"})
+        land(every=True)  # any other trigger: the trials in flight finish and are recorded in this round
         st = elog.load(con)
         inc = best(st["trials"])
         noise = _reestimate_noise(con, st, r, eligible, fidelity) if confirmations else None
         if fidelity != ref and inc and not st["run_ended"]:  # a stopped run runs no more trials
             drift = _drift_check(run_dir, con, r, inc, eligible, sign)
     except TrialRefused as e:
+        if flight:  # the trials already running finish and are recorded
+            land(every=True)
+            inc = best(elog.load(con)["trials"])
         _finalise_rejects(con, r, None)
         return {**_end_run(run_dir, con, {"round": r, "trigger": e.reason, "incumbent": inc}),
                 "verdicts": _round_verdicts(elog.load(con), r)}
     except BaseException:
+        # ponytail: a runner spawned in the instant between its submit and its pid landing in
+        # `runners` escapes the kill; this process then waits for it at exit, and recovery abandons it
+        for tr, _ in flight.values():
+            if tr["trial"] in runners:
+                try:
+                    os.killpg(runners[tr["trial"]], signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
         elog.append(con, "round_ended", "harness", {"round": r, "trigger": "failed", "incumbent": inc})
         _regenerate(run_dir, con)
         raise
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
     _finalise_rejects(con, r, drift)
     if trigger == "stall":
         _escalate(con, elog.load(con), r)
@@ -2128,7 +2187,9 @@ def _calibrate_ladder(run_dir: Path, con, noise: dict, space: dict) -> dict:
     return elog.load(con)["calibration"]
 
 
-def _run_trial(run_dir: Path, runner: str, trial: dict, worktree: Path) -> dict:
+def _run_trial(run_dir: Path, runner: str, trial: dict, worktree: Path, runners: dict | None = None) -> dict:
+    """Run the trial's subprocess and measure it; logs only heartbeats (on its own connection), so it
+    may run in a worker thread. `runners` (trial -> runner pid) lets the round kill parallel runners."""
     art = run_dir / trial["artifact_dir"]
     art.mkdir(parents=True)
     (art / "trial.json").write_text(json.dumps({**trial, "artifact_dir": str(art)}, indent=2))
@@ -2153,7 +2214,9 @@ def _run_trial(run_dir: Path, runner: str, trial: dict, worktree: Path) -> dict:
         # its own process group: recovery, or this process failing, kills the runner and its children
         p = subprocess.Popen([run_dir / "venv" / "bin" / "python", runner], start_new_session=True,
                              cwd=worktree, env=env, stdout=out, stderr=err)
-        beat = threading.Thread(target=heartbeat, args=(p.pid,), daemon=True)
+        if runners is not None:
+            runners[trial["trial"]] = p.pid
+        beat =threading.Thread(target=heartbeat, args=(p.pid,), daemon=True)
         beat.start()
         try:
             _, status, usage = os.wait4(p.pid, 0)  # per-child rusage gives this trial's peak memory

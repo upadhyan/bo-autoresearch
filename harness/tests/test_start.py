@@ -157,7 +157,7 @@ def test_a_complete_run_yaml_starts_headless(tmp_path, project_python):
 
 
 @pytest.mark.parametrize("extra", ["lenses: []\n", "lenses: [data, data]\n", "lenses: [3]\n",
-                                   "proposals_per_lens: 1\n", "workers: 0\n", "workers: 2\n"])
+                                   "proposals_per_lens: 1\n", "workers: 0\n", "workers: 1.5\n"])
 def test_bad_generation_and_worker_settings_are_refused(tmp_path, project_python, extra):
     _, (code, out) = headless(tmp_path, project_python, extra)
     assert code != 0 and out["refused"], out
