@@ -399,7 +399,7 @@ def _read_json(path: str, what: str, validate) -> dict:
     return body
 
 
-def _propose(run_dir: Path, con, spec: dict, a) -> str:
+def _propose(run_dir: Path, con, spec: dict, actor: str, rationale: str) -> str:
     """Log a validated spec as the next hypothesis number's v1."""
     st = elog.load(con)
     # past every number in use, the project's own levers.json included (e.g. an existing H1.scale)
@@ -411,14 +411,14 @@ def _propose(run_dir: Path, con, spec: dict, a) -> str:
         spec["merges"] = {**spec["merges"],
                           "mapping": {f"H{n}.{k}": r for k, r in spec["merges"]["mapping"].items()}}
     hid = f"H{n}.v1"
-    elog.append(con, "hypothesis_proposed", a.actor, {
-        "rationale": a.rationale, "id": hid, "number": n, "version": 1, "spec": spec})
+    elog.append(con, "hypothesis_proposed", actor, {
+        "rationale": rationale, "id": hid, "number": n, "version": 1, "spec": spec})
     return hid
 
 
 def cmd_propose(a) -> dict:
     run_dir, con = _open_run()
-    hid = _propose(run_dir, con, _read_json(a.file, "spec", hypotheses.validate), a)
+    hid = _propose(run_dir, con, _read_json(a.file, "spec", hypotheses.validate), a.actor, a.rationale)
     _regenerate(run_dir, con)
     return {"hypothesis": elog.load(con)["hypotheses"][hid]}
 
@@ -428,7 +428,8 @@ def cmd_record(a) -> dict:
     run_dir, con = _open_run()
     st = elog.load(con)
     body = _read_json(a.file, a.kind, lambda r: records.validate(a.kind, r, st))
-    ids = [_propose(run_dir, con, s, a) for s in body["hypotheses"]] if a.kind == "proposal" else []
+    ids = ([_propose(run_dir, con, s, a.actor, a.rationale) for s in body["hypotheses"]]
+           if a.kind == "proposal" else [])
     elog.append(con, "record", a.actor, {"rationale": a.rationale, "kind": a.kind,
                                          "agent_id": a.agent_id, "record": body,
                                          **({"hypotheses": ids} if ids else {})})
@@ -1471,19 +1472,20 @@ def _selected(st: dict) -> list[dict]:
     empty round). A hypothesis exclusive with one already chosen is skipped."""
     # ponytail: retained hypotheses keep their full ranges when the cap is tight; narrow the oldest
     # concentrated ones (spec: "narrowed, not frozen") if they crowd the queue out
-    # ponytail: a pair flagged as interacting joins together or not at all, so a revived version can
-    # push its partner past the cap; both then wait for a round with room
+    # ponytail: queued hypotheses flagged as interacting join together or not at all; a revived
+    # version rides with its partner uncounted (spec: the same round), so it can take a round past the cap
     chosen, queue, hyps = _in_search(st), _queue(st), st["hypotheses"]
     linked = {frozenset((hyps[x]["number"], hyps[p]["number"])) for x, p in _links(st)}
     cap, dims = _dimension_cap(st), sum(len(_group(h)) for h in chosen)
     for h in queue:
-        if h in chosen:
+        if h in chosen or any(_exclusive(h, x) for x in chosen):
             continue
-        unit = [h] + [x for x in queue if x is not h and x not in chosen
-                      and frozenset((h["number"], x["number"])) in linked]
-        if any(_exclusive(u, x) for u in unit for x in chosen + unit if x is not u):
-            continue
-        d = sum(len(_group(u)) for u in unit)
+        unit = [h]
+        for x in queue:
+            if (x is not h and x not in chosen and frozenset((h["number"], x["number"])) in linked
+                    and not any(_exclusive(x, y) for y in chosen + unit)):
+                unit.append(x)
+        d = sum(len(_group(u)) for u in unit if "revived_from" not in u or u is h)
         if chosen and cap is not None and dims + d > cap:
             break
         chosen += unit
@@ -1669,7 +1671,8 @@ def _generation_due(st: dict) -> list[str]:
         return []
     last = st["passes"][-1]["seq"] if st["passes"] else 0
     due = ["run start"] if not st["passes"] and not st["hypotheses"] else []
-    queue, slots = len(_queue(st)), max(1, len(_selected(st)))
+    queue = len(_queue(st))
+    slots = max(1, sum(h["status"] == "registered" for h in _selected(st)))  # a round's newcomers
     if queue < 2 * slots and any(n >= 1 and r["seq"] > last for n, r in st["rounds"].items()):
         due.append(f"the queue holds {queue}, below 2x the {slots} slot(s) per round")
     if any(x["kind"] == "narrative" and x["record"]["generation"] and x["seq"] > last
@@ -1689,9 +1692,11 @@ def _exhaustion(st: dict) -> dict:
         "removals_reviewed": not _interplay_missing(st),
         "revivals_run": not _pending_links(st) and not any(
             "revived_from" in h and h["status"] == "registered" for h in hyps),
-        # the latest pass, with no trigger since, left nothing registered (nor undecided)
+        # the latest pass, with no trigger since, left nothing registered (nor undecided); an llm
+        # pass counts once its generators recorded proposals (each proposes at least 2)
         "final_pass_empty": final is not None and not _generation_due(st) and not any(
-            h["status"] == "proposed" or (h["pass"] == final and "registered" in h) for h in hyps),
+            h["status"] == "proposed" or (h["pass"] == final and "registered" in h) for h in hyps)
+        and (st["run"]["generation"] == "scripted" or any(h["pass"] == final for h in hyps)),
     }
 
 
@@ -1719,8 +1724,7 @@ def cmd_generate(a) -> dict:
             raise Refused(f"fixture {fixture}: {e}")
     elog.append(con, "generation_pass", a.actor, {"rationale": a.rationale, "pass": n, "mode": run["generation"],
                                                   "triggers": _generation_due(st)})
-    served = argparse.Namespace(actor="harness", rationale=f"scripted generation pass {n}")
-    ids = [_propose(run_dir, con, s, served) for s in specs]
+    ids = [_propose(run_dir, con, s, "harness", f"scripted generation pass {n}") for s in specs]
     _regenerate(run_dir, con)
     return {**_status(elog.load(con)), "pass": n, "mode": run["generation"], "proposed": ids}
 

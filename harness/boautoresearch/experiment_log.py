@@ -61,6 +61,11 @@ def load(con: sqlite3.Connection) -> dict:
     return state(read(con))
 
 
+def _fresh() -> dict:
+    """What a new hypothesis version starts with: no smoke, verdicts, freezes or escalations."""
+    return {"smoke": None, "verdicts": [], "frozen": [], "escalations": [], "priority": 0, "unselected": 0}
+
+
 def state(events: list[dict]) -> dict:
     """Fold the events into the run's state. Everything the CLI reports comes from here."""
     # ponytail: refolds the whole log per command; materialise state tables if logs get large
@@ -124,15 +129,11 @@ def state(events: list[dict]) -> dict:
         elif e["type"] == "proxy_accepted_unvalidated":
             proxy, escalated = p, None
         elif e["type"] == "hypothesis_proposed":
-            hyps[p["id"]] = {**p, "status": "proposed", "smoke": None, "commit": None,
-                             "verdicts": [], "frozen": [], "escalations": [], "priority": 0,
-                             "unselected": 0, "origin": p["spec"],
+            hyps[p["id"]] = {**p, **_fresh(), "status": "proposed", "commit": None, "origin": p["spec"],
                              "pass": passes[-1]["pass"] if passes else None}
         elif e["type"] == "hypothesis_revived":  # a new version, queued with its code in place
-            hyps[p["id"]] = {"id": p["id"], "number": p["number"], "version": p["version"],
-                             "spec": p["spec"], "origin": p["spec"], "status": "registered",
-                             "smoke": None, "commit": p["commit"], "verdicts": [], "frozen": [],
-                             "escalations": [], "priority": 0, "unselected": 0, "pass": None,
+            hyps[p["id"]] = {**{k: p[k] for k in ("id", "number", "version", "spec", "commit")},
+                             **_fresh(), "origin": p["spec"], "status": "registered", "pass": None,
                              "registered": e["seq"], "queued": e["seq"], "revived_from": p["from"],
                              "partner": p["partner"]}
         elif e["type"] == "hypothesis_registered":  # the queue's tie-break: registration order

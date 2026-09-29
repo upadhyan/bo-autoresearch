@@ -43,10 +43,6 @@ def expect_all(cwd):
     if bo(cwd, "status")[1]["generation"]["due"]:
         code, out = bo(cwd, "generate", "--rationale", "a pass is due")
         assert code == 0, out
-        if all(out["exhaustion"].values()):  # keep a test running past where a real run is exhausted
-            f = Path(cwd).parent / f"spare-{out['pass']}.json"
-            f.write_text(json.dumps(SPARE))
-            assert bo(cwd, "propose", "--file", str(f), "--rationale", "left undecided")[0] == 0
     for h in bo(cwd, "status")[1]["schedule"]["expected_missing"]:
         f = Path(cwd).parent / f"expected-{h}.json"
         f.write_text(json.dumps({"hypothesis": h, "verdict": "undecided", "reason": "no view yet"}))
@@ -60,7 +56,7 @@ def round_run(cwd, *args, env=None):
     return bo(cwd, "round-run", *args, env=env)
 
 
-SPARE = {"title": "A spare proposal, never registered", "rationale": "Keeps the list open.",
+SPARE = {"title": "A spare proposal", "rationale": "Any valid spec will do.",
          "mechanism": "None.", "provenance": "novel", "lens": "optimisation", "directives": [],
          "fidelity_sensitive": False,
          "levers": {"s": {"kind": "float", "low": 0.0, "high": 1.0, "baseline": 0.0, "predicted": "higher"}}}

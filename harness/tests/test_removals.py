@@ -23,7 +23,7 @@ def flat(n, name="a"):
 def propose(repo, d, s, register=False):
     f = d / f"spec-{len(list(d.glob('spec-*')))}.json"
     f.write_text(json.dumps(s))
-    code, out = bo(repo, "propose", "--file", str(f), "--rationale", "idea")
+    code, out = bo(repo, "propose", "--file", str(f), "--rationale", "a new mechanism")
     assert code == 0, out
     if register:
         assert bo(repo, "register", out["hypothesis"]["id"], "--rationale", "reviewed")[0] == 0
@@ -103,7 +103,7 @@ def test_every_removal_is_logged_with_its_evidence_and_round_run_waits_for_its_r
     assert bo(repo, "status")[1]["interplay_missing"] == []
 
 
-def code(repo, run_dir, hid, line):
+def write_code(repo, run_dir, hid, line):
     """Lever code for an already registered hypothesis: written, smoked and committed."""
     train = run_dir / "worktree" / "train.py"
     src = train.read_text().replace("import fidelity, seed", "import fidelity, lever, seed")
@@ -123,7 +123,7 @@ def test_a_flagged_removal_is_revived_into_its_partners_round_once_per_pair(tmp_
     cite = [of_type(run_dir, "verdict")[-1]["id"]]
     interplay(repo, tmp_path, [flag(h2, cite)], removed="H1.v1")
     assert bo(repo, "register", h2, "--rationale", "reviewed")[0] == 0
-    code(repo, run_dir, h2, '    term += 0 * lever("H2.a")')
+    write_code(repo, run_dir, h2, '    term += 0 * lever("H2.a")')
     assert bo(repo, "generate", "--rationale", "the queue is low")[0] == 0
 
     # the partner is selected: H1 comes back as a new linked version, before the round runs
@@ -137,6 +137,7 @@ def test_a_flagged_removal_is_revived_into_its_partners_round_once_per_pair(tmp_
     assert 2 not in [s["round"] for s in of_type(run_dir, "round_started")]
     assert out["schedule"]["selected"] == [h2, "H1.v2"]  # placed with its partner
     assert not [d for d in out["next"] if "lever code" in d]  # its code is still in place
+    assert out["exhaustion"]["revivals_run"] is False  # it hasn't run yet
     if of_type(run_dir, "hypothesis_parked"):
         code_, refused = bo(repo, "unpark", "H1.v1", "--reason", "back", "--rationale", "return")
         assert code_ != 0 and "H1.v2" in refused["reason"]
@@ -150,7 +151,7 @@ def test_a_flagged_removal_is_revived_into_its_partners_round_once_per_pair(tmp_
     assert r2["hypotheses"] == [h2] and len(of_type(run_dir, "hypothesis_revived")) == 1
 
     assert bo(repo, "register", h3, "--rationale", "reviewed")[0] == 0
-    code(repo, run_dir, h3, '    term += 0 * lever("H3.a")')
+    write_code(repo, run_dir, h3, '    term += 0 * lever("H3.a")')
     assert bo(repo, "generate", "--rationale", "the queue is low")[0] == 0
     code_, out = bo(repo, "round-run", "--rationale", "R3", env=ENV)
     assert code_ == 0 and [(r["id"], r["from"], r["partner"]) for r in out["revived"]] == [
@@ -195,7 +196,7 @@ def test_generation_is_due_at_run_start_when_the_queue_runs_low_and_on_an_analys
     assert served[-1]["generation"]["due"] == []
 
     assert bo(repo, "register", "H1", "--rationale", "reviewed")[0] == 0
-    code(repo, run_dir, "H1.v1", '    term += 0 * lever("H1.a")')
+    write_code(repo, run_dir, "H1.v1", '    term += 0 * lever("H1.a")')
     pause_after(repo, run_dir, 1, 3)
     [due] = bo(repo, "status")[1]["generation"]["due"]
     assert due == "the queue holds 0, below 2x the 1 slot(s) per round"
@@ -236,7 +237,7 @@ def test_exhaustion_waits_for_every_condition_then_ends_the_run(tmp_path, projec
     assert exhaustion()["final_pass_empty"] is False  # H1 is still undecided
     assert bo(repo, "register", "H1", "--rationale", "reviewed")[0] == 0
     assert exhaustion()["queue_empty"] is False
-    code(repo, run_dir, "H1.v1", '    term += 0 * lever("H1.a")')
+    write_code(repo, run_dir, "H1.v1", '    term += 0 * lever("H1.a")')
     pause_after(repo, run_dir, 1, 3)
     assert exhaustion()["none_undecided"] is False  # H1 is active
     assert bo(repo, "park", "H1", "--reason", "the user wants it out", "--rationale", "park")[0] == 0
@@ -316,7 +317,7 @@ def registration_toy(d, python, seed):
     repo, run_dir, env = toy(d, python, seed, [[a], [b]])
     assert bo(repo, "generate", "--rationale", "run start")[1]["proposed"] == ["H1.v1"]
     assert bo(repo, "register", "H1", "--rationale", "reviewed")[0] == 0
-    code(repo, run_dir, "H1.v1", ALONE)
+    write_code(repo, run_dir, "H1.v1", ALONE)
     assert round_run(repo, "--rationale", "R1", env=env)[0] == 0
     if statuses(repo)["H1.v1"] != "rejected":
         return False
@@ -336,7 +337,7 @@ def review_toy(d, python, seed):
     repo, run_dir, env = toy(d, python, seed, [[c, dd]])
     assert bo(repo, "generate", "--rationale", "run start")[1]["proposed"] == ["H1.v1", "H2.v1"]
     assert bo(repo, "register", "H1", "--rationale", "reviewed")[0] == 0
-    code(repo, run_dir, "H1.v1", ALONE)
+    write_code(repo, run_dir, "H1.v1", ALONE)
     p = in_background(repo, run_dir, env, lambda r: round_trials(r, 1))
     assert bo(repo, "register", "H2", "--rationale", "reviewed")[0] == 0  # queued while C is tested
     assert p.communicate(timeout=600)[0]

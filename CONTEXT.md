@@ -14,6 +14,14 @@ _Avoid_: Idea, experiment, feature
 One angle from which hypotheses are generated, such as data or optimisation for a model, or memory for a speed-up. Several lenses run side by side, plus a wildcard, so the hypothesis list doesn't collapse onto one idea.
 _Avoid_: Category, theme, perspective
 
+**Generation pass**:
+One round of proposing new hypotheses, one generator per lens (or, in scripted mode, one fixture file). It is requested at run start, when the queue runs low, or when the round analyst flags new ground.
+_Avoid_: Brainstorm, generation (alone, which reads as a round)
+
+**Exhaustion**:
+The run end reached when nothing is left to try: the queue is empty, no active hypothesis is undecided, every removal has its interplay review, every revival has run, and the final generation pass produced nothing that survived review.
+_Avoid_: Convergence, done
+
 **Lever**:
 A searchable parameter exposed by a hypothesis. It is a continuous or integer range or a categorical. A boolean is allowed only for a mechanism that cannot be graded.
 _Avoid_: Knob, flag, toggle, switch
