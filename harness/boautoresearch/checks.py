@@ -168,11 +168,12 @@ def raw_glob(word: str, cwd: Path, raw: list[str]) -> bool:
     return any(fnmatch.fnmatchcase(p, os.path.normpath(pat)) for p in raw)
 
 
-def names_raw(text: str, cwd: Path, raw: list[str]) -> bool:
-    """Text naming a run's raw logs, or holding a glob that could match them: shell and inline code
-    alike, so no parser has to follow what runs it."""
-    return bool(re.search(r"log\.db|artifacts/trial-", text)) or any(
-        raw_glob(w, cwd, raw) for w in re.split(r"[\s'\"<>|&;()=:]+", text) if w)
+def raw_word(text: str, cwd: Path, raw: list[str]) -> str | None:
+    """The word of `text` naming a run's raw logs, or holding a glob that could match them: shell and
+    inline code alike, so no parser has to follow what runs it."""
+    if m := re.search(r"log\.db|artifacts/trial-", text):
+        return m.group()
+    return next((w for w in re.split(r"[\s'\"<>|&;()=:]+", text) if w and raw_glob(w, cwd, raw)), None)
 
 
 COMPUTED = ("the orchestrator's Bash computes no words at run time (no $(..), backticks, $'..' or <(..)): "
@@ -182,6 +183,11 @@ COMPUTED = ("the orchestrator's Bash computes no words at run time (no $(..), ba
 RAW_READ = ("the orchestrator reads the run through probes (`boautoresearch status|summary|trials|verdict`) "
             "or asks the round analyst, never the raw log.db or artifacts: a long-lived context doesn't "
             "fill up with raw logs")
+VARIABLE = ("`{}` names the program with a shell variable, so the hook can't tell this is a harness call and "
+            "checks the whole command, a heredoc body included, as one that could read the raw log: `{}` "
+            "could match log.db or artifacts (braces, brackets, `*`, `?` and `$VAR`s count as globs). Call "
+            "the run's boautoresearch by its full path; several expected verdicts go in one `record expected` "
+            "body ({{\"expected\": [...]}})")
 
 
 def bash_refusal(cmd: str, cwd: Path, agent: str, bo: Path, probes: set[str], write_check) -> str | None:
@@ -201,8 +207,9 @@ def bash_refusal(cmd: str, cwd: Path, agent: str, bo: Path, probes: set[str], wr
     # fail closed: a command that isn't only harness calls (and `cd`) names no raw log anywhere (its
     # words with the quoting undone, inline code, a heredoc it's fed), nor a glob that could match one
     if r == "orchestrator" and any(_program(w)[0] not in ("boautoresearch", "cd") for w, _ in segs) and (
-            names_raw(cmd, cwd, raw) or any(names_raw(t, cwd, raw) for t in toks)):
-        return RAW_READ
+            word := raw_word(cmd, cwd, raw) or next(filter(None, (raw_word(t, cwd, raw) for t in toks)), None)):
+        var = next((w[0] for w, _ in segs if w and w[0].startswith("$")), None)
+        return VARIABLE.format(var, word) if var else RAW_READ
     for words, targets in segs:
         prog, args = _program(words)
         if r != "orchestrator" and args[:1] == ["record"] and prog != "boautoresearch":

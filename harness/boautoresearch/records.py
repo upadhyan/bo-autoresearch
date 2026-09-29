@@ -270,8 +270,36 @@ def _matches(text: str, value) -> bool:
     return abs(Decimal(repr(value)) - t) <= Decimal(5).scaleb(int(t.as_tuple().exponent) - 1)
 
 
+def batch(kind: str, r) -> bool:
+    """A batch of expected verdicts, `{"expected": [item, ...]}`: each item is a record of its own."""
+    return kind == "expected" and isinstance(r, dict) and "expected" in r
+
+
+def items(kind: str, r) -> list:
+    """The records a validated body logs: a batch's items, else the body."""
+    return r["expected"] if batch(kind, r) else [r]
+
+
 def validate(kind: str, r, st: dict) -> None:
-    """Raise ValueError naming the first failing field of a `kind` record."""
+    """Raise ValueError naming the first failing field of a `kind` record (a batch's item by index:
+    one bad item refuses the whole batch)."""
+    if not batch(kind, r):
+        return _validate(kind, r, st)
+    xs, seen = r["expected"], dict[str, int]()
+    if set(r) != {"expected"} or not isinstance(xs, list) or not xs:
+        raise ValueError("expected must list one or more {hypothesis, verdict, reason} items, alone in the body")
+    for i, x in enumerate(xs):
+        if batch(kind, x):
+            raise ValueError(f"expected[{i}]: a batch item is one expected verdict, not a batch")
+        try:
+            _validate(kind, x, st)
+        except ValueError as e:
+            raise ValueError(f"expected[{i}]: {e}")
+        if (j := seen.setdefault(x["hypothesis"], i)) != i:
+            raise ValueError(f"expected[{i}].hypothesis: {x['hypothesis']} is already at expected[{j}]")
+
+
+def _validate(kind: str, r, st: dict) -> None:
     if kind not in KINDS:
         raise ValueError(f"kind must be one of {', '.join(KINDS)}")
     if not isinstance(r, dict):

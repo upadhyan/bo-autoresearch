@@ -74,22 +74,25 @@ Each `next` entry maps to one action. Do every entry before the next `round-run`
 | `record interplay: review <H>'s removal …` / `… newcomer <H> …` | Spawn an **interplay reviewer** with that duty (several in one message). |
 | `write <H>'s lever code, then smoke <H> and commit-lever <H>` | Spawn the **lever coder** for `<H>`; wait for its commit before the next one (coders share the worktree: strictly one at a time). |
 | `record narrative R<r> …` | Spawn the **round analyst** for round `<r>` (after every round; its `generation: true` makes a pass due). |
-| `record expected <H> …` | Record your own **expected verdict**. |
+| `record expected <H> …` | Record your own **expected verdicts** (every such entry in one batch). |
 | `set-delta …` | Interview part 2, step 3 (a headless run.yaml carries δ, so it never appears there). |
 | `the run is paused …` | **Checkpoints**. |
 | `round-run …` | **Running a round**. |
 
 **Register the new proposals.** For every hypothesis the pass proposed (`BO untested`, status `proposed`): spawn a registration reviewer for each (all in one message). Where reviews call two hypotheses duplicates, park the weaker (`BO park <H> --reason "duplicate of H<m>"`). Then `BO register <H> --rationale "<why>"` for each one left standing — pruned and off-intent ones are already out. When the review lowered its priority (`stretch`, `deprioritize`), the rationale states why it is still worth testing. A refused `register` names the conflict. Resolve a shared lever or an exclusive slot by proposing (`BO propose --file <spec.json>`, the file written outside the repository) one hypothesis whose spec adds `"merges": {"from": ["H2.v1"], "mapping": {"<its lever>": {"lever": "H2.<name>", "values": [[<old>, <new>], …]}}}` (omit `values` for the identity map; every lever of a source still in the loop mapped over its whole range), or with `masked_by` / `exclusive_with`; or park it with the reason.
 
-**Expected verdicts.** Before each round, for every hypothesis it will test: what the harness will conclude — `retain`, `reject` or `undecided` — and why, from its verdict records and the summary. Your calibration is measured, so commit to a forecast.
+**Expected verdicts.** Before each round, for every hypothesis it will test: what the harness will conclude — `retain`, `reject` or `undecided` — and why, from its verdict records and the summary. Your calibration is measured, so commit to a forecast. Record them all in one call, `BO` written out by its full path (not a shell variable):
 
 ```bash
 BO record expected --file - --rationale "before round 3" <<'EOF'
-{"hypothesis": "H2.v1", "verdict": "retain", "reason": "Its lever mattered in round 2 and its best point beat the baseline."}
+{"expected": [
+  {"hypothesis": "H2.v1", "verdict": "retain", "reason": "Its lever mattered in round 2 and its best point beat the baseline."},
+  {"hypothesis": "H5.v1", "verdict": "undecided", "reason": "Too few trials on its lever to call."}
+]}
 EOF
 ```
 
-A decimal in the reason must be quoted from a verdict record (`quotes: [{record, field, value}]`); a reason in words needs none.
+Each item is checked on its own; one bad item refuses the whole batch, naming it (`expected[1]: …`) — fix it and record the batch again. A decimal in a reason must be quoted from a verdict record (the item's `quotes: [{record, field, value}]`); a reason in words needs none.
 
 **Between rounds**, act on the round analyst's diagnostics and suggestions and on the summary: `narrow` a lever the summary suggests narrowing, `prioritize` what the evidence favours, `park` with a reason, and optionally `enqueue --config '<json>' --expected <objective>` a few agent-chosen trials (capped per round).
 

@@ -192,6 +192,11 @@ BAD = [
     ("expected", {"hypothesis": "H1.v1", "verdict": "win", "reason": "x"}, "verdict"),
     ("expected", {"hypothesis": "H1.v1", "verdict": "retain", "reason": "two\nlines"}, "reason"),
     ("distill_spec", {"content": "", "cites": []}, "content"),
+    ("expected", {"expected": [{"hypothesis": "H1.v1", "verdict": "retain", "reason": "x"},
+                               {"hypothesis": "H9.v1", "verdict": "retain", "reason": "x"}]}, "expected[1]: hypothesis"),
+    ("expected", {"expected": [{"hypothesis": "H1.v1", "verdict": "retain", "reason": "x"}], "reason": "x"},
+     "alone in the body"),
+    ("expected", {"expected": [{"expected": []}]}, "expected[0]: a batch item"),
 ]
 
 

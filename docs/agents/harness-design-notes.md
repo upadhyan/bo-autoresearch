@@ -896,3 +896,17 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   reference's cap makes it inconclusive. Also: no check freezes a lever of a fidelity-sensitive hypothesis at a proxy
   fidelity (a freeze is a lever's reject; spec "can't be rejected at a proxy"); before, a 2-lever tail flat at the proxy
   fidelity was frozen there.
+- Batch expected verdicts (HANDOFF "What's left" 4; the user chose "batch body + clearer message"): the orchestrator
+  recorded ~20 expected verdicts a round one call each, since its Bash rules refuse the batching it tried (`$B`, a
+  heredoc in a loop, `> $F`). `record expected` now also takes `{"expected": [{hypothesis, verdict, reason, quotes?},
+  …]}` (`records.batch`/`items`): each item validated as the single form, prefixed `expected[i]: `; a nested batch, a
+  key beside `expected`, an empty list or a hypothesis twice is refused; all-or-nothing (validation precedes any
+  append). Logged as one `record` event per item (same actor, rationale, agent id), so `_expected_missing`, reports'
+  `_expected` and `check recorded` read it unchanged; the output adds `items: n`. The single form stays. Refusal text:
+  when the orchestrator's fail-closed scan (a command not only harness calls, whose text names or globs the raw log)
+  fires and a simple command's program is a `$VAR`, the reason (`checks.VARIABLE`) says the variable hides the
+  program, so the whole command incl. its heredoc body was scanned, names the matching word (`raw_word`, which replaced
+  `names_raw`) and points to the full path and the batch body; RAW_READ is unchanged elsewhere. The rule is not
+  loosened. Found while fixing it: keyed JSON (`{"a": …}`) never trips the brace glob (the scan splits on `:`), so a
+  `$B` record trips only on a body word that globs a raw path (`*`, `{}`, `$h.v1` against artifact names); `> $F` and
+  `cat > f <<EOF` refusals still read RAW_READ.

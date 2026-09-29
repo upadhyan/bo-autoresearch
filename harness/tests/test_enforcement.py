@@ -162,6 +162,11 @@ BASH_CASES = [
     ("orchestrator", "REPO", "boautoresearch record expected --file - <<'EOF'\n{\"reason\": \"not from log.db\"}\nEOF",
      True, None),
     ("orchestrator", "REPO", "git log -3 -- '*.py' && git status", True, None),
+    # a program named by a variable isn't a plain harness call, so its heredoc body is scanned too
+    ("orchestrator", "REPO", "B=RUN/venv/bin/boautoresearch; $B record expected --file - <<'EOF'\n"
+     "{\"hypothesis\": \"H1.v1\", \"verdict\": \"retain\", \"reason\": \"lr * 2 helps\"}\nEOF", False,
+     "`$B` names the program with a shell variable, so the hook can't tell this is a harness call and checks "
+     "the whole command, a heredoc body included, as one that could read the raw log: `*` could match"),
     ("boautoresearch:lever-coder", "WT", "python -c \"print('log.db')\" && ls *", True, None),
 ]
 

@@ -91,6 +91,33 @@ def test_round_run_is_refused_until_every_selected_hypothesis_has_an_expected_ve
     assert out["schedule"]["expected_missing"] == ["H1.v1"]
 
 
+def test_a_batch_of_expected_verdicts_is_one_record_call_all_or_nothing(tmp_path, project_python):
+    repo = make_repo(tmp_path)
+    run_dir = init(repo, project_python, BASE + "delta: 0.02\n")
+    assert bo(repo, "round-run", "--rationale", "calibrate", env=toy_env(sigma=0.01))[0] == 0
+    propose(repo, tmp_path, 1, ["a"])
+    propose(repo, tmp_path, 2, ["b"])
+    assert schedule(repo)["expected_missing"] == ["H1.v1", "H2.v1"]
+    f = tmp_path / "batch.json"
+    items = [{"hypothesis": "H1.v1", "verdict": "retain", "reason": "the bowl should pay"},
+             {"hypothesis": "H2.v1", "verdict": "reject", "reason": "no term reads it"}]
+    before = events(run_dir)
+    for bad, words in [([items[0], {**items[1], "verdict": "win"}], "expected[1]: verdict"),
+                       ([items[0], items[0]], "expected[1].hypothesis: H1.v1 is already at expected[0]"),
+                       ([], "one or more")]:
+        f.write_text(json.dumps({"expected": bad}))
+        code, out = bo(repo, "record", "expected", "--file", str(f), "--rationale", "before R1")
+        assert code == 1 and words in out["reason"], out
+    assert events(run_dir) == before  # the valid item of a refused batch isn't logged either
+    f.write_text(json.dumps({"expected": items}))
+    code, out = bo(repo, "record", "expected", "--file", str(f), "--rationale", "before R1")
+    assert code == 0 and out == {"recorded": "expected", "agent_id": None, "items": 2}, out
+    logged = [e for e in events(run_dir)[len(before):] if e["type"] == "record"]
+    assert [(e["actor"], e["payload"]["kind"], e["payload"]["record"]) for e in logged] == [
+        ("orchestrator", "expected", i) for i in items]
+    assert schedule(repo)["expected_missing"] == []
+
+
 def in_background(repo, run_dir, env, until):
     """round-run in the background, returned once `until(run_dir)` holds (the round still running)."""
     expect_all(repo)

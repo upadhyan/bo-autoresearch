@@ -90,10 +90,10 @@ def test_the_record_examples_in_the_prompts_use_their_kinds_fields_and_pass_the_
     for role, text in [*((r, agent(r)[1]) for r in ROLES), ("orchestrator", skill)]:
         for command, kind, body in RECORD.findall(text):
             fields, _ = records.KINDS[kind]
-            example = json.loads(body)
-            assert set(example) <= fields, (role, kind, set(example) - fields)
-            for spec in example.get("hypotheses", []):
-                assert set(spec) <= hypotheses.SPEC_KEYS, (role, set(spec) - hypotheses.SPEC_KEYS)
+            for example in records.items(kind, json.loads(body)):  # a batch's items, each as its own record
+                assert set(example) <= fields, (role, kind, set(example) - fields)
+                for spec in example.get("hypotheses", []):
+                    assert set(spec) <= hypotheses.SPEC_KEYS, (role, set(spec) - hypotheses.SPEC_KEYS)
             out = check_bash(run_repo, role, command.replace("BO ", "/x/venv/bin/boautoresearch ", 1))
             assert out["allow"], (role, out)
             if role != "orchestrator":  # a subagent's record carries its own id and role
