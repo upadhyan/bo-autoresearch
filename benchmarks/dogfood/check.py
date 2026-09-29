@@ -164,9 +164,9 @@ def truth_unseen(calls: list[dict]):
     for x in calls:
         text = json.dumps(x["input"])
         if any(n in text for n in TRUTH_NAMES) or (x["tool"] == "Bash" and ENV_DUMP.search(x["input"].get("command", ""))):
-            hits.append(f"{x['agent']} {x['tool']} {text[:120]}")
+            hits.append(f"{x['agent']} {x['tool']} {text[-200:]}")
         elif MARKER in x["result"]:
-            hits.append(f"{x['agent']} {x['tool']} got the planted truth: {text[:120]}")
+            hits.append(f"{x['agent']} {x['tool']} got the planted truth: {text[-200:]}")
     return not hits, f"contaminating calls: {hits}" if hits else f"none in {len(calls)} tool calls"
 
 
