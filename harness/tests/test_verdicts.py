@@ -269,13 +269,39 @@ def test_a_broken_proxy_downgrades_its_rounds_rejects_to_inconclusive(tmp_path, 
     # H1 is useless everywhere; H2's bowl ranks backwards at the proxy, so the drift check breaks it
     useless = (spec({"x": lever()}), '    term += 0 * lever("H1.x")')
     bowl = (spec({"y": lever(0.5)}), '    term += 4 * (lever("H2.y") - 0.7) ** 2')
-    run_dir, [out] = verdict_run(tmp_path / "r", project_python, 1, [useless, bowl], proxy=True,
-                                 extra="deterministic: true\n", scramble=1)
-    assert [v["outcome"] for v in records(run_dir)][-2:] == ["pending-reject", "reject"]
-    assert out["trigger"] == "search_space" and out["drift"]["broken"] is True
-    assert not of_type(run_dir, "hypothesis_rejected")
-    assert of_type(run_dir, "hypothesis_inconclusive") == [
-        {"id": "H1.v1", "verdict": records(run_dir)[-1]["id"], "reason": "broken proxy fidelity"}]
+    runs = repeat(tmp_path, project_python, [useless, bowl], seeds=range(10), proxy=True,
+                  extra="deterministic: true\n", sigma=0, scramble=1)
+    downgraded = 0
+    for run_dir, [out] in runs:
+        # the drift check compares the incumbent only with a config the proxy orders against it (a tie, or
+        # one differing only in H1's useless lever, orders nothing), so the reversal always shows. Measured
+        # 20 of 20 over seeds 0..19 (the toy's noise is off: under `deterministic: true` σ̂ = 0, so noise
+        # would pass for an order, and was on in the old single-seed test: 17 of 20)
+        assert out["drift"]["broken"] is True and not of_type(run_dir, "hypothesis_rejected")
+        if records(run_dir)[-1]["outcome"] == "reject":
+            assert out["trigger"] == "search_space"
+            assert of_type(run_dir, "hypothesis_inconclusive") == [
+                {"id": "H1.v1", "verdict": records(run_dir)[-1]["id"], "reason": "broken proxy fidelity"}]
+            downgraded += 1
+    # the rest ended inconclusive at a verdict check (with no noise at all, "noise differs by region"):
+    # measured 15 of 20 reached the reject over seeds 0..19; at 75%, fewer than 6 of 10 has probability ~8%
+    assert downgraded >= 6, downgraded
+
+
+def test_a_proxy_that_orders_nothing_defers_the_rounds_rejects(tmp_path, project_python):
+    # one useless lever and no noise: every config ties with the incumbent at the proxy, so the drift check
+    # can't tell a faithful proxy from a broken one; it runs nothing, and the reject waits for a later round
+    useless = (spec({"x": lever()}), '    term += 0 * lever("H1.x")')
+    run_dir, [out] = verdict_run(tmp_path / "r", project_python, 1, [useless], proxy=True,
+                                 extra="deterministic: true\n", sigma=0)
+    assert records(run_dir)[-1]["outcome"] == "reject" and out["trigger"] == "search_space"
+    [drift] = of_type(run_dir, "drift_check")
+    assert out["drift"] == drift and drift["undecidable"] is True and drift["broken"] is None
+    assert drift["trials"] == [] and not [t for t in started_in(run_dir, 1) if t["kind"] == "drift"]
+    assert not of_type(run_dir, "hypothesis_rejected") and not of_type(run_dir, "hypothesis_inconclusive")
+    assert of_type(run_dir, "reject_deferred") == [{"id": "H1.v1", "verdict": records(run_dir)[-1]["id"],
+                                                    "round": 1, "reason": "undecidable proxy fidelity"}]
+    assert bo(run_dir.parents[1], "status")[1]["hypotheses"][0]["status"] == "active"
 
 
 def test_a_single_lever_below_delta_is_frozen_and_leaves_the_search(tmp_path, project_python):
@@ -316,11 +342,14 @@ def test_a_held_fidelity_sensitive_lever_waits_for_escalation_and_never_breaks_t
     assert at_cap, [v["burn_in"]["fresh"] for v in records(run_dir)]
     assert all(v["outcome"] == "active" for v in at_cap)
     assert not [e for e in of_type(run_dir, "hypothesis_inconclusive") if e["id"] == "H1.v1"]
-    # the drift check never blames the proxy fidelity for the tail it can't show: its two configs differ
-    # in the other levers only, and both run the incumbent's fidelity-sensitive one
+    # the drift check never blames the proxy fidelity for the tail it can't show: when it runs a pair, the
+    # two configs differ in the other levers only and both run the incumbent's fidelity-sensitive one; here
+    # every other lever is flat too, so the proxy mostly orders nothing and the check is undecidable
+    checks = of_type(run_dir, "drift_check")
+    assert checks and not any(c["broken"] for c in checks), checks
     drift = {t["trial"]: t["levers"] for t in of_type(run_dir, "trial_started") if t["kind"] == "drift"}
-    pairs = [[drift[t] for t in c["trials"]] for c in of_type(run_dir, "drift_check")]
-    assert pairs and all(a["H1.x"] == b["H1.x"] and a != b for a, b in pairs)
+    pairs = [[drift[t] for t in c["trials"]] for c in checks if not c["undecidable"]]
+    assert all(a["H1.x"] == b["H1.x"] and a != b for a, b in pairs)
 
 
 def test_a_linear_lever_worth_twice_delta_is_retained_not_rejected_irrelevant(tmp_path, project_python):
