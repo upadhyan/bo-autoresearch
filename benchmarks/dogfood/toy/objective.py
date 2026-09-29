@@ -1,4 +1,5 @@
-"""The validation loss (protected: research never edits it). An external scorer computes it."""
+"""The validation loss (protected: research never edits it). An external scorer computes it from the
+whole cfg dict: a setting added to cfg in train_and_eval reaches the scorer as it is."""
 import importlib.util
 import os
 
