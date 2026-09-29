@@ -692,3 +692,7 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   reject as undecided. `sensitivity` adds m_u. `_kernel` accumulates per lever (no (n, m, D) array). Measured: 1 flat lever,
   σ = δ/2: reject at 30 fresh 6/6 before and after; 3 flat levers, σ = δ: before 6/6 at 45, after 4/6 at 45, 1 at 75, 1 still
   active at 70 (the sup statistics' power cost).
+- Tests (seed rates): a statistical test runs a contiguous seed set (`range(N)`, or `repeat`'s (1, 2, 3)) and asserts a rate ≥ a
+  threshold; its comment gives the rate measured over a wider sweep (seeds 0..19 or 0..9) and the chance the threshold fails at
+  that rate (aim ≤ ~10%). A single fixed seed is only a replay seed for a mechanics test whose premise holds on (nearly) every
+  seed, never a seed kept because it passes. Eligibility oracles in tests are epoch-aware.
