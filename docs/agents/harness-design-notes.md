@@ -738,3 +738,8 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   a round-ending trigger are not carried to the next round (the stall window and owed list restart per round; serial
   rounds already dropped them on a cap); an unknown cost (0) charges nothing, so a round at a never-measured fidelity could
   start `workers` trials uncharged (R1+ fidelities are always measured by R0 or ladder calibration).
+- #29 limit (queued trials): `cli._queued(st, r)` = trials enqueued for r plus those of an earlier round that never started
+  (no trial carries its `queued` seq) and were never skipped (the fold marks `agent_trial_skipped` {queued} entries
+  `skipped`). They run first in r, oldest first, and count against r's agent-trial cap (so `used` may exceed it once; they
+  were admitted under their own round's cap). A started one (abandoned in flight, or finished) is never run again. Kept:
+  R1's run.yaml seeds are not carried past an interrupted R1 (ponytail in `_run_round`).

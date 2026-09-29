@@ -327,3 +327,37 @@ def test_a_hypothesis_left_unselected_for_3_rounds_is_flagged(tmp_path, project_
         starved.append(schedule(repo)["starved"])
     assert starved == [[], [], [{"id": "H2.v1", "rounds": 3}]]
     assert all(s["hypotheses"] == ["H1.v1"] for s in of_type(run_dir, "round_started") if s["round"] >= 1)
+
+
+def test_queued_agent_chosen_trials_an_interrupted_round_never_started_run_in_the_resuming_round(
+        tmp_path, project_python):
+    repo = make_repo(tmp_path)
+    run_dir = init(repo, project_python, BASE + "delta: 0.02\n")
+    coded(repo, run_dir, tmp_path, env=toy_env(sigma=0.01))
+    for x, want in ((0.6, "0.8"), (0.65, "0.75"), (0.75, "0.7")):
+        assert enqueue(repo, {"H1.x": x, "H1.y": 0.3}, expected=want)[0] == 0
+    n = len(of_type(run_dir, "trial_started"))
+    # R1's first agent-chosen trial hangs, and the round is killed with it in flight
+    env = {**toy_env(sigma=0.01, sleep=120, sleep_from=n + 1), "TOY_SLEEP_KIND": "agent"}
+    expect_all(repo)
+    p = subprocess.Popen([sys.executable, "-m", "boautoresearch", "round-run", "--rationale", "go"],
+                         cwd=repo, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    deadline = time.monotonic() + 90
+    while not any(h["trial"] == n + 1 and h["elapsed_s"] >= 0.5 for h in of_type(run_dir, "trial_heartbeat")):
+        assert time.monotonic() < deadline and p.poll() is None
+        time.sleep(0.1)
+    p.kill()
+    p.wait()
+    assert [t["queued"] for t in round_trials(run_dir, 1)] == [1]
+    # the two never started are the resuming round's, and count against its cap of 4
+    assert schedule(repo)["agent_trials"] == {"round": 2, "cap": 4, "used": 2}
+
+    code, out = round_run(repo, "--rationale", "resume", env=toy_env(sigma=0.01))
+    assert code == 0, out
+    assert of_type(run_dir, "trial_abandoned")[0]["trial"] == n + 1
+    r2 = round_trials(run_dir, 2)
+    assert [(t["kind"], t["queued"], t["levers"]["H1.x"], t["expected"]) for t in r2[:2]] == [
+        ("agent", 2, 0.65, 0.75), ("agent", 3, 0.75, 0.7)]
+    # the abandoned one is never retried, and nothing runs twice
+    assert sorted(t["queued"] for t in of_type(run_dir, "trial_started") if "queued" in t) == [1, 2, 3]
+    assert out["schedule"]["agent_trials"] == {"round": 3, "cap": 3, "used": 0}

@@ -141,6 +141,8 @@ def state(events: list[dict]) -> dict:
             checks.append(p)
         elif e["type"] == "trial_enqueued":
             queue.append(p)
+        elif e["type"] == "agent_trial_skipped" and "queued" in p:  # judged: never carried on
+            queue[p["queued"] - 1]["skipped"] = True
         elif e["type"] == "checkpoint":  # checkpoint mode, at a round boundary
             paused = {"by": "checkpoint", "round": p["round"]}
         elif e["type"] == "user_pause":

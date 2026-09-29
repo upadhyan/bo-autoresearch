@@ -1702,11 +1702,12 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
     stall_after = max(5 * len(space), 20)
     share = ESCALATED_SHARE if any(e["step"] == "replicates" for h in selected
                                    for e in h["escalations"]) else REPLICATE_SHARE
-    # the agent-chosen trials first: R1's user-named seeds, then the ones enqueued for this round
-    # ponytail: a queued trial whose round was interrupted is not carried to the resuming round
+    # the agent-chosen trials first: R1's user-named seeds, then the ones queued for this round
+    # ponytail: R1's seeds are not carried past an interrupted R1 (queued trials are); give each seed
+    # an index on its trial and carry the unstarted ones like `_queued` if that bites
     chosen: list[tuple[str, dict, dict]] = [("seed", s, {}) for s in run["seeds"]] if r == 1 else []
     chosen += [("agent", q["config"], {"queued": q["queued"], "expected": q["expected"]})
-               for q in st["queue"] if q["round"] == r]
+               for q in _queued(st, r)]
     try:
         for kind, cfg, extra in chosen:
             if trigger := user_trigger(elog.load(con)):
@@ -2390,8 +2391,16 @@ def _agent_trials(st: dict) -> dict:
     """The next round's agent-chosen trials: max(1, 6 − R) per round (so the loop is never worse
     than plain BO), the user's run.yaml seeds counting against R1's."""
     r = _upcoming(st)
-    used = (len(st["run"]["seeds"]) if r == 1 else 0) + sum(q["round"] == r for q in st["queue"])
+    used = (len(st["run"]["seeds"]) if r == 1 else 0) + len(_queued(st, r))
     return {"round": r, "cap": max(1, 6 - r), "used": used}
+
+
+def _queued(st: dict, r: int) -> list[dict]:
+    """The agent-chosen trials round r runs: those enqueued for it, and those an interrupted earlier
+    round never reached (never started, never skipped). One that started is never run again."""
+    started = {t["queued"] for t in st["trials"] if "queued" in t}
+    return [q for q in st["queue"] if q["round"] == r or (
+        q["round"] < r and q["queued"] not in started and not q.get("skipped"))]
 
 
 def _config_error(cfg, space: dict) -> str | None:
