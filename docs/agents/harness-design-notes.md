@@ -714,3 +714,20 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   `exec`/`eval`, `builtins|sys.<exec|eval|modules|__import__>`, any str matching `\bboautoresearch\b`); refused when
   added against the base (Counter difference). Not "verify with the harness unimportable": the harness runner imports
   it in-process. Residual: a subprocess, a .pth file.
+- #36/#38 (free-mode contamination): the planted truth moved out of the toy repository to
+  benchmarks/dogfood/truth.py; the toy's protected objective.py loads it from $DOGFOOD_SCORER, which only
+  run_benchmark.py sets (no hook rule: an agent reaches it only by dumping the env or browsing the plugin's benchmark
+  dir). Ground-truth files carry the DOGFOOD-PLANTED-TRUTH marker; check.py --transcript fails a run whose agents
+  named one, dumped the env, or got the marker back in a result.
+- #36 (held Stops): a Stop held while the orchestrator waits on subagents stays a logged hook_blocked (spec: every
+  block is logged; subagents aren't among its allowed cases, and the hold keeps a headless session alive). The skill
+  spawns subagents with run_in_background: false (still parallel within one message), so the turn doesn't end
+  mid-wait; check.py reports hook_blocked by check/role and no longer uses the total as the adversary's evidence.
+- #36 (lens distinctness): parallel generators are blind to each other, so each gets every lens of the pass and a
+  lane (the mechanisms its own lens owns); it may propose fewer than asked (>= 2) rather than pad. Duplicates that
+  survive are the registration reviewer's (the ticket: "duplicates are caught by the reviewer"); no harness dedupe.
+- #36 (records through a variable): a subagent's `record` whose program isn't literally `boautoresearch` (`$BO record`)
+  is refused, not rewritten: tracking shell assignments is parsing we don't do, and the untagged record landed as the
+  orchestrator's while SubagentStop held the agent (which then dumped env hunting for its id).
+- #38 (headless isolation): claude runs with --setting-sources project,local --strict-mcp-config: the user's own
+  hooks, plugins and MCP servers stay out; subscription auth still works (stored apart from settings).
