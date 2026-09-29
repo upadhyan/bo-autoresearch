@@ -159,7 +159,7 @@ def judge(space: dict, baseline: dict, group: list[str], trials: list[dict], sig
         vt.append(np.sqrt(0.5 * ((fA - fM) ** 2).mean(1)))
     off = nA * (len(sets) + 1)
     fC, fCb = F[:, off:off + nC], F[:, off + nC:]
-    delta = fC.max(1) - fCb.max(1)
+    delta = np.maximum(fC.max(1), fCb.max(1)) - fCb.max(1)  # the free max covers the baseline set
     total = fA.var(1)
 
     # the best posterior point, for the prediction flag

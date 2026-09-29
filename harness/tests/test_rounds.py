@@ -375,9 +375,14 @@ def test_no_stall_before_every_hypothesis_is_burned_in(bo_repo, bo_run, tmp_path
     code3 = BOWL.rstrip("\n") + " + 0 * lever(\"H1.z\")\n"
     coded(bo_repo, run_dir, tmp_path, code=code3, env=toy_env(sigma=0.01), spec=spec)
     code, out = bo(bo_repo, "round-run", "--rationale", "search", env=toy_env(sigma=0.01))
-    assert code == 0 and out["trigger"] == "stall", out
+    assert code == 0, out
+    # the stall window is complete long before 30; at burn-in the first verdict check finds the bowl
+    # `irrelevant` next to δ = 10, and that pending reject holds the round open to its confirmation
     samplers = [t for t in started_in(run_dir, 1) if t["kind"] == "sampler"]
-    assert len(samplers) == 30
+    [first, confirming] = of_type(run_dir, "verdict")
+    assert first["burn_in"]["fresh"] == 30 and first["outcome"] == "pending-reject"
+    assert confirming["outcome"] == "reject" and out["trigger"] == "search_space"
+    assert len(samplers) == 30 + 15
 
 
 def drift_run(d, python, seed):

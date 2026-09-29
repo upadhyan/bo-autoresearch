@@ -92,9 +92,9 @@ def state(events: list[dict]) -> dict:
         elif e["type"] == "noise_estimate":  # σ re-estimated from a round's replicates
             rounds[p["round"]]["noise"] = p
         elif e["type"] == "fidelity_calibration":
-            calib = p
+            calib, escalated = p, None
         elif e["type"] == "proxy_accepted_unvalidated":
-            proxy = p
+            proxy, escalated = p, None
         elif e["type"] == "hypothesis_proposed":
             hyps[p["id"]] = {**p, "status": "proposed", "smoke": None, "commit": None,
                              "verdicts": [], "frozen": [], "escalations": []}

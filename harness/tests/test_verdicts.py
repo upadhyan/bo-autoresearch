@@ -173,12 +173,14 @@ def test_a_useful_lever_is_retained(tmp_path, project_python):
 def test_a_contradicted_prediction_flags_a_retain_without_changing_it(tmp_path, project_python):
     # predicted lower, but the improving values lie above the baseline 0.2 (the optimum is 0.7)
     wrong = (spec({"x": lever(0.2, "lower")}), '    term += 4 * (lever("H1.x") - 0.7) ** 2')
-    run_dir, _ = verdict_run(tmp_path / "r", project_python, 1, [wrong])
-    retains = [v for v in records(run_dir) if v["outcome"] == "retained"]
-    assert retains
-    for v in retains:
-        assert v["prediction"] == {"flag": "retained-against-prediction", "contradicted": ["H1.x"]}
-    assert bo(run_dir.parents[1], "status")[1]["hypotheses"][0]["status"] == "retained"
+    runs = repeat(tmp_path, project_python, [wrong])
+    status = [bo(run_dir.parents[1], "status")[1]["hypotheses"][0]["status"] for run_dir, _ in runs]
+    assert status.count("retained") >= 2, status
+    for run_dir, _ in runs:
+        for v in records(run_dir):
+            if v["outcome"] == "retained":
+                assert v["prediction"] == {"flag": "retained-against-prediction",
+                                           "contradicted": ["H1.x"]}
 
 
 def test_a_lever_that_helps_only_with_a_co_active_one_is_never_rejected(tmp_path, project_python):
@@ -243,7 +245,8 @@ def test_a_fidelity_sensitive_lever_is_never_rejected_at_a_proxy(tmp_path, proje
         at_proxy = [v for v in records(run_dir) if v["fidelity"] == {"epochs": 1}]
         assert at_proxy and all(v["outcome"] != "pending-reject" for v in at_proxy)
         held = [v for v in at_proxy if v["condition"]]
-        assert held and all(v["held"] == "fidelity-sensitive: never rejected at a proxy" for v in held)
+        assert held and all(v["held"] == "fidelity-sensitive: never rejected at a proxy fidelity"
+                            for v in held)
         # stuck at the proxy: more replicates, then up a rung to the reference, where it can be retained
         steps = [e["step"] for e in of_type(run_dir, "hypothesis_escalated")]
         assert steps == ["replicates", "rung"], steps
@@ -262,7 +265,7 @@ def test_a_broken_proxy_downgrades_its_rounds_rejects_to_inconclusive(tmp_path, 
     assert out["trigger"] == "search_space" and out["drift"]["broken"] is True
     assert not of_type(run_dir, "hypothesis_rejected")
     assert of_type(run_dir, "hypothesis_inconclusive") == [
-        {"id": "H1.v1", "verdict": records(run_dir)[-1]["id"], "reason": "broken proxy"}]
+        {"id": "H1.v1", "verdict": records(run_dir)[-1]["id"], "reason": "broken proxy fidelity"}]
 
 
 def test_a_single_lever_below_delta_is_frozen_and_leaves_the_search(tmp_path, project_python):

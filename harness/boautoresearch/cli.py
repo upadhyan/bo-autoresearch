@@ -541,9 +541,12 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
         while trigger is None:
             st = elog.load(con)
             inc = best(st["trials"])
-            if _verdict_checks(con, st, r, space, baseline, eligible, sign):
+            checked = _verdict_checks(con, st, r, space, baseline, eligible, sign)
+            if any(v["frozen"] or v["outcome"] in ("reject", "inconclusive") for v in checked):
                 trigger = "search_space"  # a confirmed reject, a freeze or an inconclusive
                 break
+            if checked:  # a reject just gone pending must hold the round open below
+                st = elog.load(con)
             pending, since = _progress(st, r, eligible, sign, confirmations)
             holding = any((v := _latest(h, st)) is not None and v["outcome"] == "pending-reject"
                           for h in _in_search(st))  # a pending reject holds the round open
@@ -557,7 +560,8 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
             elif (since >= stall_after and not pending and not holding
                   and _burned_in(st, selected, eligible)):
                 trigger = "stall"
-            elif pending or (confirmations and sum("replicate_of" in t for t in this) < share * len(this)):
+            elif pending or (confirmations
+                             and sum("replicate_of" in t for t in this) < share * len(this)):
                 if pending:
                     root, kind = pending[0], "confirmation"
                 else:  # the replicate floor
@@ -578,14 +582,14 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
         noise = _reestimate_noise(con, st, r, eligible, fidelity) if confirmations else None
         drift = _drift_check(run_dir, con, r, inc, eligible, sign) if fidelity != ref and inc else None
     except BudgetRefused:
-        _finalise(con, r, None)
+        _finalise_rejects(con, r, None)
         return {**_end_run(run_dir, con, {"round": r, "trigger": "budget_spent", "incumbent": inc}),
                 "verdicts": _round_verdicts(elog.load(con), r)}
     except BaseException:
         elog.append(con, "round_ended", "harness", {"round": r, "trigger": "failed", "incumbent": inc})
         _regenerate(run_dir, con)
         raise
-    _finalise(con, r, drift)
+    _finalise_rejects(con, r, drift)
     if trigger == "stall":
         _escalate(con, elog.load(con), r)
     elog.append(con, "round_ended", "harness", {"round": r, "trigger": trigger, "incumbent": inc})
@@ -621,15 +625,16 @@ def _schedule(h: dict) -> dict:
     return {"needed": max(10 * d, 20), "spacing": max(5 * d, 10), "cap": max(40 * d, 80)}
 
 
-def _verdict_checks(con, st: dict, r: int, space: dict, baseline: dict, eligible, sign: int) -> bool:
+def _verdict_checks(con, st: dict, r: int, space: dict, baseline: dict, eligible,
+                    sign: int) -> list[dict]:
     """Every verdict check now due: the first at burn-in, then every max(5·d, 10) fresh sampler
-    trials. Logs the verdict records; True when one changed the search space."""
+    trials. Logs and returns the verdict records."""
     run, delta, fid = st["run"], st["delta"], st["fidelity"]
     at_proxy = fid["fidelity"] != run["reference_fidelity"]
     sigma = next((x["sigma"] for x in st["noise"]["rungs"] if x["fidelity"] == fid["fidelity"]),
                  st["noise"]["sigma"])
     trials = eligible(st["trials"])
-    changed = False
+    checked = []
     for h in _in_search(st):
         sched, group, last = _schedule(h), _group(h), _latest(h, st)
         fresh = _fresh(st, h, eligible)
@@ -652,7 +657,7 @@ def _verdict_checks(con, st: dict, r: int, space: dict, baseline: dict, eligible
         if not gates["homogeneity"]["passed"]:  # v1 models constant noise only: never a reject
             outcome, reason = "inconclusive", "noise differs by region"
         elif gated and condition and h["spec"]["fidelity_sensitive"] and at_proxy:
-            outcome, held = "active", "fidelity-sensitive: never rejected at a proxy"
+            outcome, held = "active", "fidelity-sensitive: never rejected at a proxy fidelity"
         elif gated and condition:
             outcome = "reject" if pending else "pending-reject"
         elif gated and vt["lower"] > delta and dl["lower"] > delta:
@@ -691,8 +696,8 @@ def _verdict_checks(con, st: dict, r: int, space: dict, baseline: dict, eligible
         if outcome == "inconclusive":
             elog.append(con, "hypothesis_inconclusive", "harness",
                         {"id": h["id"], "verdict": vid, "reason": reason})
-        changed |= bool(frozen) or outcome in ("reject", "inconclusive")
-    return changed
+        checked.append(record)
+    return checked
 
 
 def _against(lv: dict, best) -> bool:
@@ -700,9 +705,9 @@ def _against(lv: dict, best) -> bool:
     return (best < lv["baseline"]) if lv["predicted"] == "higher" else (best > lv["baseline"])
 
 
-def _finalise(con, r: int, drift: dict | None) -> None:
-    """The round's confirmed rejects. At a proxy they stand only once the drift check passed; a
-    broken (or unchecked) proxy logs them as inconclusive instead."""
+def _finalise_rejects(con, r: int, drift: dict | None) -> None:
+    """The round's confirmed rejects. At a proxy fidelity they stand only once the drift check
+    passed; a broken (or unchecked) proxy fidelity logs them as inconclusive instead."""
     st = elog.load(con)
     at_proxy = st["fidelity"]["fidelity"] != st["run"]["reference_fidelity"]
     for h in _in_search(st):
@@ -712,7 +717,8 @@ def _finalise(con, r: int, drift: dict | None) -> None:
         if at_proxy and not (drift and drift["broken"] is False):
             elog.append(con, "hypothesis_inconclusive", "harness", {
                 "id": h["id"], "verdict": v["id"],
-                "reason": "broken proxy" if drift and drift["broken"] else "proxy unchecked"})
+                "reason": "broken proxy fidelity" if drift and drift["broken"]
+                else "proxy fidelity unchecked"})
         else:
             elog.append(con, "hypothesis_rejected", "harness", {
                 "id": h["id"], "verdict": v["id"], "condition": v["condition"],
@@ -724,33 +730,30 @@ def _escalate(con, st: dict, r: int) -> None:
     the next fidelity rung up. The evidence cap (inconclusive) is applied at its verdict checks."""
     # ponytail: moves up a rung without asking calibration whether the effect is resolvable at
     # this one; add that test when rung choice gets per-hypothesis effect sizes
-    fid, ref = st["fidelity"]["fidelity"], st["run"]["reference_fidelity"]
+    ref = st["run"]["reference_fidelity"]
+    up = _next_rung(st) if st["fidelity"]["fidelity"] != ref else None  # one rung per stall, run-wide
     for h in _in_search(st):
         last = _latest(h, st)
         if not last or last["outcome"] != "active":
             continue
-        steps = [e["step"] for e in h["escalations"]]
-        if "replicates" not in steps:
+        if "replicates" not in [e["step"] for e in h["escalations"]]:
             elog.append(con, "hypothesis_escalated", "harness", {
                 "id": h["id"], "round": r, "step": "replicates", "replicate_share": ESCALATED_SHARE})
-        elif fid != ref:
-            up = _next_rung(st)
+        elif up is not None:
             elog.append(con, "hypothesis_escalated", "harness", {
                 "id": h["id"], "round": r, "step": "rung", "fidelity": up,
                 "proxy": "reference" if up == ref else "validated"})
-            st = elog.load(con)
-            fid = up
 
 
 def _next_rung(st: dict) -> dict:
     """The cheapest validated rung dearer than the current fidelity, else the reference."""
     fid, ref = st["fidelity"]["fidelity"], st["run"]["reference_fidelity"]
     rungs = (st["calibration"] or {}).get("rungs", [])
-    cost = {json.dumps(x["fidelity"], sort_keys=True): x["cost_s"] for x in st["noise"]["rungs"]}
-    here = cost.get(json.dumps(fid, sort_keys=True), 0.0)
-    up = [x["fidelity"] for x in rungs if x.get("passed") and x["fidelity"] != fid
-          and cost[json.dumps(x["fidelity"], sort_keys=True)] > here]
-    return min(up, key=lambda f: cost[json.dumps(f, sort_keys=True)]) if up else ref
+    cost = [(x["fidelity"], x["cost_s"]) for x in st["noise"]["rungs"]]
+    here = next(c for f, c in cost if f == fid)
+    passed = [x["fidelity"] for x in rungs if x.get("passed")]
+    up = [(c, f) for f, c in cost if c > here and f in passed]
+    return min(up, key=lambda cf: cf[0])[1] if up else ref
 
 
 def _progress(st: dict, r: int, eligible, sign: int, confirmations: int) -> tuple[list[int], int]:
@@ -809,10 +812,9 @@ def _reestimate_noise(con, st: dict, r: int, eligible, fidelity: dict) -> dict:
 
 def _burned_in(st: dict, selected: list[dict], eligible) -> bool:
     """Every hypothesis in the search has max(10·d, 20) fresh sampler trials."""
-    ts = [t for t in eligible(st["trials"]) if t["kind"] == "sampler"]
     hyps = st["hypotheses"]
-    return all(sum(t["round"] >= hyps[h["id"]]["activated_round"] for t in ts)
-               >= _schedule(hyps[h["id"]])["needed"] for h in selected)
+    return all(len(_fresh(st, hyps[h["id"]], eligible)) >= _schedule(hyps[h["id"]])["needed"]
+               for h in selected)
 
 
 def _drift_check(run_dir: Path, con, r: int, inc: dict, eligible, sign: int) -> dict | None:
