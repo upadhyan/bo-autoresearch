@@ -209,7 +209,7 @@ def judge(space: dict, baseline: dict, group: list[str], trials: list[dict], sig
         "gp": {"lengthscales": [float(x) for x in ls],
                "signal_var": float(var), "noise_var": float(math.exp(gp.theta[-1])),
                "noise_floor": float(sigma**2 / sd**2),
-               "signal_floor": float((SIGNAL_DELTAS * delta / sd) ** 2)},
+               "signal_floor": float(gp.sfloor)},
     }
 
 

@@ -708,3 +708,5 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   levers, and BO leaves settings unexplored, so next to a curved co-active lever (a bowl) a flat lever is labelled
   `no-improvement`, not `irrelevant` (0/10, even at σ = δ/20; before, the flat fit supplied the label); a smooth partner
   (linear) still allows it at σ = δ/10 (20/20). Rejects are unaffected; the label and the warm start's key drop are.
+  OPEN (user decision, likely a #21 amendment): this breaks the Seam 2 "useless → `irrelevant`" case and leaves 5 tests
+  red (test_verdicts: broken proxy, single lever frozen `irrelevant` next to a bowl; test_reports: 3 on the planted H2).

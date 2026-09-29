@@ -238,7 +238,7 @@ def stuck_run(run_dir, outs) -> bool:
     esc = of_type(run_dir, "hypothesis_escalated")
     assert len(esc) <= 1  # at the reference fidelity there is no rung to move up to
     if esc:
-        assert esc[0] == {"id": "H1.v1", "round": esc[0]["round"], "step": "replicates", "replicate_share": 0.3}
+        assert {k: v for k, v in esc[0].items() if k != "round"} == {"id": "H1.v1", "step": "replicates", "replicate_share": 0.3}
         before, after = started_in(run_dir, esc[0]["round"]), started_in(run_dir, esc[0]["round"] + 1)
         if after:
             assert sum("replicate_of" in t for t in after) >= 0.3 * len(after) - 1
@@ -300,11 +300,8 @@ def test_a_broken_proxy_downgrades_its_rounds_rejects_to_inconclusive(tmp_path, 
     # H1 is useless everywhere; H2's bowl ranks backwards at the proxy, so the drift check breaks it
     useless = (spec({"x": lever()}), '    term += 0 * lever("H1.x")')
     bowl = (spec({"y": lever(0.5)}), '    term += 4 * (lever("H2.y") - 0.7) ** 2')
-    # σ = δ/5: H1's reject is confirmed within R1 in 10 of 10 runs over seeds 0..9 (at the toy's σ = δ/2
-    # the GP's signal floor leaves some runs active); the drift check breaks in 6 of those 10, and seed 1
-    # is one of them (a replay seed for the downgrade mechanics)
     run_dir, [out] = verdict_run(tmp_path / "r", project_python, 1, [useless, bowl], proxy=True,
-                                 extra="deterministic: true\n", scramble=1, sigma=0.02)
+                                 extra="deterministic: true\n", scramble=1)
     assert [v["outcome"] for v in records(run_dir)][-2:] == ["pending-reject", "reject"]
     assert out["trigger"] == "search_space" and out["drift"]["broken"] is True
     assert not of_type(run_dir, "hypothesis_rejected")
@@ -313,12 +310,9 @@ def test_a_broken_proxy_downgrades_its_rounds_rejects_to_inconclusive(tmp_path, 
 
 
 def test_a_single_lever_below_delta_is_frozen_and_leaves_the_search(tmp_path, project_python):
-    # `irrelevant` needs M_z's bound below δ at every setting of x, sparsely sampled ones too, so the
-    # scenario is a smooth x (linear, long lengthscale: what x does in one place speaks for the rest)
-    # and σ = δ/10. z frozen `irrelevant` at the first check in 20 of 20 runs over seeds 0..19 (a bowl
-    # in x at σ = δ/2: 0 of 10, frozen `no-improvement`); at 95%, fewer than 2 of 3 has probability ~1%
-    two = (spec({"x": lever(0.5), "z": lever()}), '    term += -0.5 * lever("H1.x") + 0 * lever("H1.z")')
-    runs = repeat(tmp_path, project_python, [two], rounds=2, sigma=0.01)
+    two = (spec({"x": lever(0.2), "z": lever()}),
+           '    term += 4 * (lever("H1.x") - 0.7) ** 2 + 0 * lever("H1.z")')
+    runs = repeat(tmp_path, project_python, [two], rounds=2)
     frozen = [of_type(run_dir, "lever_frozen") for run_dir, _ in runs]
     assert sum(f == [{"id": "H1.v1", "lever": "H1.z", "verdict": f[0]["verdict"], "condition": "irrelevant"}]
                if f else False for f in frozen) >= 2, frozen
