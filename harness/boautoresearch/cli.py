@@ -2042,10 +2042,12 @@ def _evidence(st: dict, h: dict) -> int:
     """The evidence cap's count: finished sampler trials of this epoch since the hypothesis entered the
     search, where it was effective (not masked), at every fidelity and whatever its group was then (a
     rung change or a freeze doesn't restart it). A fidelity-sensitive hypothesis counts only the current
-    fidelity's: a proxy fidelity's trials are no evidence about it at a dearer rung."""
+    fidelity's: a proxy fidelity's trials are no evidence about it at a dearer rung. A retain is a verdict:
+    the count restarts after the latest one (at any fidelity)."""
     fid = st["fidelity"]["fidelity"]
+    since = max((max(v["trials"], default=-1) for v in h["verdicts"] if v["outcome"] == "retained"), default=-1)
     return sum(t["kind"] == "sampler" and t["status"] == "finished" and t.get("epoch", 0) == st["epoch"]["epoch"]
-               and t["round"] >= h["activated_round"] and h["id"] not in t.get("masked", [])
+               and t["round"] >= h["activated_round"] and h["id"] not in t.get("masked", []) and t["trial"] > since
                and (t["fidelity"] == fid or not h["spec"]["fidelity_sensitive"]) for t in st["trials"])
 
 

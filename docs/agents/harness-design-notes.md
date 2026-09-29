@@ -915,3 +915,11 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   fresh count can shrink (dogfood seed 1: H2.smoothing_ramp's freeze took H8 from 40 fresh to 16, and its check waited
   34 new trials, R2 → R6). Without shrinkage nothing changes. `confirmation.due_at` stays count + spacing (only a
   display in reports; it overstates the count after a shrink). The planted reports fixture now reaches H1's R3 check.
+- Evidence cap restarts after a retain: `_evidence` counts only sampler trials after the latest `retained` record's
+  trials (at any fidelity), since a retain is a verdict and the cap means "no verdict after N sampler trials". Before, a
+  hypothesis retained at every proxy check reached the reference with its cap spent, and its first reference check
+  (burn-in only, `active`) made it inconclusive: dogfood seed 1, H4.v2 (revived clipping), "no verdict after 95
+  sampler trials", which failed "interaction found at registration". Measured before: retained then capped at the next
+  check in 2 of 16 borderline runs (gain 1.2δ/1.5δ, σ 1.5δ, seeds 0..7). Bounded still: a hypothesis that stays
+  undecided is capped N trials after its last retain. The held fidelity-sensitive test's evidence == fresh now holds
+  up to its first retain, and the stuck-up-a-rung rate test skips runs with a retain on the way (still ≥ 8 of 10).

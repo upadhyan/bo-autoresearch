@@ -241,6 +241,25 @@ def test_a_stuck_hypothesis_escalates_then_is_inconclusive_at_the_evidence_cap(t
     assert stuck_path >= 8, stuck_path
 
 
+def test_a_retain_restarts_the_evidence_cap(tmp_path, project_python):
+    # a gain of 1.5δ at σ = 1.5δ: retained at some checks, active at others. A retain is a verdict, so the
+    # cap ("no verdict after N sampler trials") counts only the trials after the latest one: never
+    # inconclusive at the check right after a retain. Seed 2 is retained at 50..80 fresh and was capped
+    # at 90 before (measured: retained then capped in 2 of 16 runs over seeds 0..7, gains 1.2δ and 1.5δ)
+    h = (spec({"x": lever()}), '    term += -0.15 * lever("H1.x")')
+    run_dir, _ = verdict_run(tmp_path / "r", project_python, 2, [h], rounds=8, sigma=0.15)
+    vs = records(run_dir)
+    retained = [i for i, v in enumerate(vs) if v["outcome"] == "retained"]
+    assert retained and len(vs) > retained[-1] + 1  # checked again after its retains
+    sampler = {t["trial"] for r in range(1, 9) for t in started_in(run_dir, r)
+               if t["kind"] == "sampler" and t["status"] == "finished"}
+    for i, v in enumerate(vs):
+        last = max((max(vs[j]["trials"]) for j in retained if j < i), default=-1)
+        assert v["burn_in"]["evidence"] <= sum(t > last for t in sampler), v["id"]  # none from before the retain
+        if v["outcome"] == "inconclusive":
+            assert vs[i - 1]["outcome"] != "retained", v["id"]
+
+
 def stuck_run(run_dir, outs) -> bool:
     """False unless R1 stalled with the hypothesis still active and escalated; then the rest of the
     stuck path must follow: a larger replicate share in R2, one escalation, inconclusive at the cap."""
@@ -430,7 +449,9 @@ def test_a_held_fidelity_sensitive_hypothesis_at_its_cap_moves_the_run_up_a_rung
     # at the reference its count restarts (the proxy fidelity's trials were no evidence about it)
     at_ref = [v for v in records(run_dir) if v["fidelity"] == {"epochs": 4}]
     assert at_ref and all(v["outcome"] in ("active", "retained") for v in at_ref), at_ref
-    assert all(v["burn_in"]["evidence"] == v["burn_in"]["fresh"] for v in at_ref)
+    # (and restarts again after a retain there)
+    upto = next((i for i, v in enumerate(at_ref) if v["outcome"] == "retained"), len(at_ref)) + 1
+    assert all(v["burn_in"]["evidence"] == v["burn_in"]["fresh"] for v in at_ref[:upto])
     assert not [e for e in of_type(run_dir, "hypothesis_inconclusive") if e["id"] == "H1.v1"]
     # the drift check never blames the proxy fidelity for the tail it can't show: when it runs a pair, the
     # two configs differ in the other levers only and both run the incumbent's fidelity-sensitive one; here
@@ -477,8 +498,8 @@ def test_a_stuck_hypothesis_carries_its_evidence_up_a_rung_to_the_cap(tmp_path, 
     for run_dir, outs in runs:
         steps = [e["step"] for e in of_type(run_dir, "hypothesis_escalated")]
         inc = of_type(run_dir, "hypothesis_inconclusive")
-        if steps != ["replicates", "rung"] or not inc:
-            continue
+        if steps != ["replicates", "rung"] or not inc or any(v["outcome"] == "retained" for v in records(run_dir)):
+            continue  # (a retain on the way restarts the count)
         last = records(run_dir)[-1]
         assert last["fidelity"] == {"epochs": 4} and last["outcome"] == "inconclusive"
         assert last["burn_in"]["evidence"] >= 80 > last["burn_in"]["fresh"]
