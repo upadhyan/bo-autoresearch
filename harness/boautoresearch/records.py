@@ -152,7 +152,48 @@ def _expected(r: dict, st: dict) -> list[str]:
 def _distill_spec(r: dict, st: dict) -> list[str]:
     _text(r, "content", "")
     _ids(r, "cites", _verdicts(st), what="verdict record")
-    return [r["content"]]
+    # every retained mechanism rests on its latest verdict record
+    last = [h["verdicts"][-1]["id"] for h in st["hypotheses"].values() if h["status"] == "retained"]
+    if missing := [v for v in last if v not in r["cites"]]:
+        raise ValueError(f"cites must include each retained hypothesis's latest verdict record: {', '.join(missing)}")
+    # a keep-or-drop decision, with a reason, for each non-lever change (commit-change, add-dependency)
+    changes, owed = r.get("changes"), [c["commit"] for c in st["commits"] if "id" not in c]
+    if not isinstance(changes, list) or not all(isinstance(c, dict) and set(c) == {"commit", "decision", "reason"}
+                                                for c in changes):
+        raise ValueError("changes must list {commit, decision, reason} items, one per non-lever change ([] for none)")
+    for i, c in enumerate(changes):
+        _choice(c, "decision", ("keep", "drop"), f"changes[{i}].")
+        _text(c, "reason", f"changes[{i}].")
+    if sorted(c["commit"] for c in changes) != sorted(owed):
+        raise ValueError(f"changes must decide each non-lever change exactly once: commits {owed or 'none'}")
+    return [r["content"], *(c["reason"] for c in changes)]
+
+
+TAKEAWAYS = 5  # bullets at most in REPORT.md's Takeaways
+VERDICT_ID = re.compile(r"V-R\d+-H\d+\.v\d+-\d+")
+
+
+def _takeaways(r: dict, st: dict) -> list[str]:
+    verdicts = _verdicts(st)
+    _ids(r, "cites", verdicts, what="verdict record")
+    items = r.get("takeaways")
+    if not isinstance(items, list) or not 1 <= len(items) <= TAKEAWAYS:
+        raise ValueError(f"takeaways must list 1 to {TAKEAWAYS} bullets")
+    for i, t in enumerate(items):
+        if not isinstance(t, str) or not t.strip() or "\n" in t.strip():
+            raise ValueError(f"takeaways[{i}] must be one line of text")
+        if verdicts and not set(VERDICT_ID.findall(t)) & set(r["cites"]):
+            raise ValueError(f"takeaways[{i}] must name the verdict record it rests on (one of cites)")
+    return items
+
+
+def _distill_review(r: dict, st: dict) -> list[str]:
+    w = st.get("wrapup")
+    if not w or not any(x["kind"] == "distill_spec" and x["seq"] > w["seq"] for x in st["records"]):
+        raise ValueError("kind: there is no distillation spec to review yet (record distill_spec comes first)")
+    _choice(r, "verdict", ("approve", "revise"))
+    _text(r, "rationale", "")
+    return []
 
 
 # kind -> (fields, validator returning the text fields whose numbers must be quoted)
@@ -164,8 +205,11 @@ KINDS = {
     "narrative": ({"round", "text", "cites", "quotes", "diagnostics", "suggestions", "generation"},
                   _narrative),
     "expected": ({"hypothesis", "verdict", "reason", "quotes"}, _expected),
-    "distill_spec": ({"content", "cites", "quotes"}, _distill_spec),
+    "distill_spec": ({"content", "cites", "changes", "quotes"}, _distill_spec),
+    "takeaways": ({"takeaways", "cites", "quotes"}, _takeaways),
+    "distill_review": ({"verdict", "rationale"}, _distill_review),
 }
+WRAPUP = "wrapup"  # the wrap-up's start (the research incumbent and its config): quotable in wrap-up records
 
 
 def _verdicts(st: dict) -> dict:
@@ -185,14 +229,18 @@ def _field(record: dict, path: str):
     return cur
 
 
-def _quotes(r: dict, st: dict) -> list:
+def _quotes(r: dict, st: dict, kind: str) -> list:
     """Check each structured quote against its verdict record; return the quoted values.
 
-    A quote comes from a record the output cites (an expected verdict cites none: any record).
+    A quote comes from a record the output cites (an expected verdict cites none: any record). A
+    wrap-up record may also quote record "wrapup": the tuned values (`config.<lever>`) and the research
+    incumbent (`incumbent.mean`) as the wrap-up's start logged them.
     """
     quotes, verdicts = r.get("quotes", []), _verdicts(st)
-    cited = (r["cites"] if "cites" in r else [c for f in r["flags"] for c in f["cites"]]
+    cited = (list(r["cites"]) if "cites" in r else [c for f in r["flags"] for c in f["cites"]]
              if "flags" in r else list(verdicts))
+    if kind in ("distill_spec", "takeaways") and st.get("wrapup"):
+        verdicts, cited = {**verdicts, WRAPUP: st["wrapup"]}, cited + [WRAPUP]
     if not isinstance(quotes, list):
         raise ValueError("quotes must list {record, field, value} items")
     for i, q in enumerate(quotes):
@@ -230,7 +278,7 @@ def validate(kind: str, r, st: dict) -> None:
     if unknown := set(r) - fields:
         raise ValueError(f"unknown {kind} fields: {sorted(unknown)}")
     texts = check(r, st)
-    values = _quotes(r, st) if "quotes" in fields else []
+    values = _quotes(r, st, kind) if "quotes" in fields else []
     for text in texts:
         for m in DECIMAL.finditer(text):
             num = m.group().replace("−", "-")

@@ -124,7 +124,7 @@ def test_a_user_stop_ends_the_running_round_and_the_run_and_newcomers_wait_for_a
     assert [e["reason"] for e in of_type(run_dir, "run_ended")] == ["user_stop"]
     [r1] = [s for s in of_type(run_dir, "round_started") if s["round"] == 1]
     assert r1["hypotheses"] == ["H1.v1"]
-    assert out["next"] == []
+    assert [d.split(" ")[0] for d in out["next"]] == ["wrapup"]  # only the wrap-up is left
     for cmd in (["round-run"], ["stop"]):
         code, out = bo(repo, *cmd, "--rationale", "again")
         assert code != 0 and "ended" in out["reason"], cmd

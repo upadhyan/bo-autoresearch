@@ -346,7 +346,7 @@ def test_a_spent_budget_ends_the_round_and_the_run(bo_repo, bo_run, tmp_path):
     code, out = round_run(bo_repo, "--rationale", "search", env=env)
     assert code == 0, out
     assert out["trigger"] == "budget_spent" and out["run_ended"] == "budget_spent"
-    assert out["next"] == []
+    assert [d.split(" ")[0] for d in out["next"]] == ["wrapup"]  # only the wrap-up is left
     assert of_type(run_dir, "trial_refused")[-1]["kind"] == "sampler"
     assert of_type(run_dir, "run_ended") == [{"reason": "budget_spent"}]
     code, out = round_run(bo_repo, "--rationale", "again", env=env)

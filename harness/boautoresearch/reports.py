@@ -20,9 +20,12 @@ def render(st: dict, view: dict) -> dict[str, str]:
     conflicts), `revivals` (each removed hypothesis a revival is planned for -> its partner) and
     `testing` (each active hypothesis -> its current verdict record, or None, and its schedule)."""
     status = view["status"]
+    w = st.get("wrapup")
     return {"SUMMARY.md": summary(st, view), "exports/trials.csv": trials_csv(st["trials"]),
             "exports/hypotheses.csv": hypotheses_csv(st),
-            **{f"rounds/{r:03d}.md": round_summary(st, status, r) for r, x in st["rounds"].items() if x["ended"]}}
+            **{f"rounds/{r:03d}.md": round_summary(st, status, r) for r, x in st["rounds"].items() if x["ended"]},
+            **({"DISTILL_SPEC.md": distill_spec(st, spec)} if w and (spec := _latest_record(st, "distill_spec")) else {}),
+            **({"REPORT.md": report(st, status)} if w and w["finished"] else {})}
 
 
 CAP = 10  # lines per SUMMARY.md section
@@ -386,4 +389,203 @@ def round_summary(st: dict, status: dict, r: int) -> str:
                 + (f" ({x['agent_id']})." if x["agent_id"] else ".")]
     else:
         out += ["_No narrative yet: the round analyst records one with `record narrative`._"]
+    return "\n".join(out) + "\n"
+
+
+def _latest_record(st: dict, kind: str) -> dict | None:
+    """The latest `kind` record of the wrap-up (logged after it started)."""
+    return next((x for x in reversed(st["records"]) if x["kind"] == kind and x["seq"] > st["wrapup"]["seq"]), None)
+
+
+def _by(x: dict) -> str:
+    return f"By {x['actor']}" + (f" ({x['agent_id']})." if x["agent_id"] else ".")
+
+
+def _decisions(st: dict, spec: dict) -> list[str]:
+    """The spec's keep-or-drop decision on each non-lever change, with what the change was."""
+    what = {c["commit"]: c["reason"] for c in st["wrapup"]["changes"]}
+    return [f"- {c['commit'][:12]} ({what.get(c['commit'])}): {c['decision']}, {c['reason']}" for c in spec["changes"]]
+
+
+def distill_spec(st: dict, x: dict) -> str:
+    """DISTILL_SPEC.md: the round analyst's distillation spec, its keep-or-drop decisions and citations."""
+    r = x["record"]
+    out = [f"# Distillation spec: run {st['run']['run_id']}", "", r["content"].strip(), "", "## Non-lever changes", ""]
+    out += _decisions(st, r) or ["- none"]
+    return "\n".join(out + ["", f"Cites: {', '.join(r['cites']) or 'none'}. {_by(x)}"]) + "\n"
+
+
+def _last_bo_round(st: dict) -> int | None:
+    """The latest BO round that ended with an incumbent (the research incumbent's)."""
+    return next((n for n in sorted(st["rounds"], reverse=True) if n >= 1 and st["rounds"][n].get("incumbent")), None)
+
+
+def _headline(st: dict, status: dict) -> list[str]:
+    run, w = st["run"], st["wrapup"]
+    done, obj = w["finished"], run["objective"]
+    fid = json.dumps(w["fidelity"], sort_keys=True)
+    c = done["confirmed"]
+    if c is None or c["mean"] is None:
+        inc = w["incumbent"]
+        why = ("wrap-up ran with --no-confirm" if c is None else
+               f"the confirmation replicates (trials {', '.join(map(str, c['trials']))}) did not all finish")
+        lines = [f"- Unconfirmed ({why}): " + (
+            f"the research incumbent, {obj} {inc['mean']:.4g} (trial {inc['trial']}), has no confirmed value at the "
+            f"reference fidelity {fid}" if inc else "no BO round found an incumbent")]
+    else:
+        where = (f"the distilled branch `{c['branch']}` (verified)" if done["result"] == "verified"
+                 else f"the research branch `{c['branch']}` at the incumbent's values (its retained levers; "
+                 "the rest at baseline)")
+        line = (f"- Confirmed result: {obj} {c['mean']:.4g} at the reference fidelity {fid}, the mean over "
+                f"{len(c['trials'])} replicates (trials {', '.join(map(str, c['trials']))}) of {where}")
+        base = _baseline_mean(st, w["fidelity"], st["epoch"]["epoch"])
+        if base is not None and c["mean"] is not None:
+            gain = (base - c["mean"]) * _sign(st)
+            line += f", against the baseline's {base:.4g}: {abs(gain):.4g} {'better' if gain >= 0 else 'worse'}"
+            if st["delta"]:
+                line += f", {abs(gain) / st['delta']:.3g}δ"
+        lines = [line]
+        if done["result"] == "unverified":
+            v = w["verifications"][-1]
+            gap = f"missed by {_num(abs(v['gap']))} (tolerance {_num(v['tolerance'])})" if v["gap"] is not None \
+                else "had a failed trial"
+            lines.append(f"- The distilled branch `{w['distilled']['branch']}` is unverified: after {len(w['verifications'])} "
+                         f"attempts its replicates {gap} against the research branch's; the research branch is the "
+                         "confirmed result")
+    b = status["budget"]
+    return lines + [f"- Run ended: {RUN_END.get(st['run_ended'], st['run_ended'])}",
+                    f"- Budget: {b['spent_s']:.1f}s of {b['total_s']:.1f}s used (wrap-up is outside it)"]
+
+
+def _what_to_take(st: dict) -> list[str]:
+    run, w = st["run"], st["wrapup"]
+    result, hyps = w["finished"]["result"], st["hypotheses"]
+    d = {"verified": "verified", "unverified": "unverified (see the headline)"}.get(result)
+    lines = [f"- Distilled branch: `{w['distilled']['branch']}`, {d}" if w["distilled"] and d else
+             "- Distilled branch: none (" + ("no hypothesis was retained" if w["confirm"] else "--no-confirm") + ")",
+             f"- Research branch: `{run['branch']}` (lever() reads levers.json, at baseline: it can be tuned on), "
+             f"confirmed config {json.dumps(w['config'], sort_keys=True)}", "", "### Retained mechanisms", ""]
+    lines += [f"- {i} {hyps[i]['spec']['title']}: " + ", ".join(f"{n} = {w['config'][n]!r}" for n in hyps[i]["spec"]["levers"]
+                                                                 if n in w["config"]) for i in w["retained"]] or ["- none"]
+    lines += ["", "### Non-lever changes", ""]
+    spec = _latest_record(st, "distill_spec")
+    lines += (_decisions(st, spec["record"]) if spec else []) or [
+        f"- {c['commit'][:12]} ({c['reason']}): not decided (no distillation)" for c in w["changes"]] or ["- none"]
+    lines += ["", "### Discouraged directives", ""]
+    r = _last_bo_round(st)
+    honour = _honouring(st, r) if r is not None else []
+    if any("costs" in ln for ln in honour):
+        honour.append("- Follow-up: the honouring trial's config can be distilled instead, in a follow-up (nothing else is delivered)")
+    return lines + (honour or ["- none"])
+
+
+def _worked(st: dict) -> list[str]:
+    hyps = list(st["hypotheses"].values())
+
+    def part(title: str, lines: list[str]) -> list[str]:
+        return ["", f"### {title}", "", *(lines or ["- none"])]
+
+    def line(h: dict, what: str = "") -> str:
+        return f"- {h['id']} {h['spec']['title']}" + (f": {what}" if what else "")
+
+    retained = [h for h in hyps if h["status"] == "retained"]
+    out = part("Working", [line(h, f"Δ {_interval(h['verdicts'][-1]['delta_stat'])}") for h in retained])
+    out += part("Retained against their prediction", [line(h, ", ".join(h["verdicts"][-1]["prediction"]["contradicted"]))
+                                                      for h in retained if h["verdicts"][-1]["prediction"]["flag"]])
+    for cond in ("irrelevant", "no-improvement"):
+        out += part(f"Rejected {cond} ({IN_WORDS[cond]})", [line(h) for h in hyps if h["status"] == "rejected"
+                                                             and h["condition"] == cond])
+    cap = [h for h in hyps if h["status"] == "inconclusive" and (h.get("reason") or "").startswith("no verdict after")]
+    out += part("Inconclusive at the evidence cap", [line(h, h["reason"]) for h in cap])
+    out += part("Inconclusive otherwise", [line(h, h.get("reason") or "") for h in hyps
+                                           if h["status"] == "inconclusive" and h not in cap])
+    out += part("Parked", [line(h, h.get("park_reason") or "") for h in hyps if h["status"] == "parked"])
+    out += part("Pruned", [line(h, _reason(h)) for h in hyps if h["status"] == "pruned"])
+    if st["run_ended"] != "exhausted":  # the run ended early: what it never reached
+        out += part("Untested", [line(h, h["status"]) for h in hyps if h["status"] in ("proposed", "registered")])
+    return out[1:]
+
+
+def _interactions(st: dict) -> list[str]:
+    """Each interplay flag, and what came of it (a revival, or none)."""
+    hyps, out = st["hypotheses"], []
+    for x in st["records"]:
+        if x["kind"] != "interplay":
+            continue
+        r = x["record"]
+        for f in r["flags"]:
+            old, partner = (r["removed"], f["partner"]) if r.get("removed") else (f["partner"], r["newcomer"])
+            pair = {hyps[old]["number"], hyps[partner]["number"]}
+            rev = next((h for h in hyps.values() if "revived_from" in h
+                        and {h["number"], hyps[h["partner"]]["number"]} == pair), None)
+            came = f"revived as {rev['id']} with {rev['partner']}, now {rev['status']}" if rev else "not revived"
+            out.append(f"- {old} with {partner}: {f['reason']} (cites {', '.join(f['cites'])}): {came}")
+    return out or ["- none"]
+
+
+def _terms(st: dict) -> list[str]:
+    run, reg = st["run"], st["registry"]
+    brief = reg["brief"] or {}
+    out = [f"- Brief: {k}: {brief[k]}" for k in ("purpose", "contribution", "complexity", "provenance") if k in brief] \
+        or ["- Brief: none"]
+    out += [f"- Directive {d['id']} ({d['severity']}): {d['statement']}; {d['reason']}"
+            + (f"; allowed: {d['predicate']}" if d.get("predicate") else "") for d in reg["directives"]] or ["- Directives: none"]
+    out += [f"- Protected paths: {', '.join([run['runner'], 'levers.json', *reg['protected_paths']])}",
+            f"- δ {_num(st['delta']) if st['delta'] else 'never set'}; budget {run['budget_s']}s; reference fidelity "
+            f"{json.dumps(run['reference_fidelity'], sort_keys=True)}; ladder {json.dumps(run['ladder'], sort_keys=True)}; "
+            f"{run['replicates_k']} replicates per σ estimate"]
+    out += [f"- R0: σ at {json.dumps(x['fidelity'], sort_keys=True)} {_num(x['sigma'])} from {x['n']} baseline replicates"
+            for x in (st["noise"] or {}).get("rungs", [])] or ["- R0: σ never measured"]
+    if st["calibration"]:
+        c = st["calibration"]
+        out.append(f"- Ladder calibration chose {json.dumps(c['chosen'], sort_keys=True)}"
+                   + (" (no rung passed: the reference fidelity)" if c["fallback"] else ""))
+    last = max(st["rounds"], default=None)
+    return out + (_proposed_directives(st, last) if last is not None and st["rounds"][last]["ended"] else [])
+
+
+def _diagnostics(st: dict) -> list[str]:
+    expected = _expected(st)
+    right = sum(v == _actual(st, h, r) for (h, r), v in expected.items())
+    out = [f"- Expected verdicts: {right} of {len(expected)} right" if expected else "- Expected verdicts: none recorded"]
+    lenses: dict[str, dict[str, int]] = {}
+    for h in st["hypotheses"].values():
+        c = lenses.setdefault(h["spec"]["lens"], {})
+        c[h["status"]] = c.get(h["status"], 0) + 1
+    out += [f"- Lens {lens}: {sum(c.values())} hypotheses; " + ", ".join(f"{n} {s}" for s, n in sorted(c.items()))
+            for lens, c in sorted(lenses.items())]
+    trials = [t for t in st["trials"] if t["status"] != "running"]
+    for kind in sorted({t["kind"] for t in trials}):
+        ts = [t for t in trials if t["kind"] == kind]
+        bad = sum(t["status"] != "finished" for t in ts)
+        out.append(f"- {kind} trials: {bad} of {len(ts)} failed or abandoned")
+    eq = st["equivalence"]
+    out.append(f"- Equivalence checks: {sum(c['passed'] is False for c in eq)} of {len(eq)} failed; "
+               f"{len(st['epochs'])} new epoch{'s' * (len(st['epochs']) != 1)}"
+               + "".join(f"; epoch {e['epoch']} from R{e['round']} ({e['change']}{', breaking' if e['breaking'] else ''})"
+                         for e in st["epochs"]))
+    vs = st["wrapup"]["verifications"]
+    if vs:
+        out.append(f"- Distillation: {len(vs)} verification attempt{'s' * (len(vs) != 1)}, "
+                   + ("the last passed" if vs[-1]["passed"] else "none passed"))
+    return out
+
+
+def report(st: dict, status: dict) -> str:
+    """REPORT.md: the hand-back, in its 8 sections, from the log."""
+    w = st["wrapup"]
+    t = _latest_record(st, "takeaways")
+    takeaways = [f"- {b}" for b in t["record"]["takeaways"]] + [
+        "", f"Cites: {', '.join(t['record']['cites']) or 'none'}. {_by(t)}"] if t else ["- none"]
+    files = ([f"- DISTILL_SPEC.md: the distillation spec"] if _latest_record(st, "distill_spec") else []) + [
+        "- SUMMARY.md: the research summary", "- exports/trials.csv: one row per trial of every kind",
+        "- exports/hypotheses.csv: one row per hypothesis version",
+        f"- rounds/: the {len(st['rounds'])} round summaries", "- log.db: the experiment log, every event"]
+    body = {"Headline": _headline(st, status), "What to take": _what_to_take(st), "Takeaways": takeaways,
+            "What worked and what didn't": _worked(st), "Interactions and revivals": _interactions(st),
+            "Terms of the run": _terms(st), "Process diagnostics": _diagnostics(st), "Files": files}
+    out = [f"# Report: run {st['run']['run_id']}", "",
+           f"{st['run']['objective']} ({st['run']['direction']}); wrap-up {w['finished']['result']}."]
+    for name, lines in body.items():
+        out += ["", f"## {name}", "", *lines]
     return "\n".join(out) + "\n"

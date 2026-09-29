@@ -46,4 +46,22 @@ Put the JSON only between the `<<'EOF'` line and the closing `EOF`, with no back
 
 ## Distill mode
 
-<!-- #37 fills this section: write DISTILL_SPEC.md and record it with `record distill_spec`. -->
+When the prompt says **distill mode** (the run has ended), you write the hand-back's analyst records instead of a narrative. `BO status` → `wrapup` holds `retained`, `config` (the tuned values), `incumbent` and `distilled`; `BO verdict <H>` gives the evidence; the research worktree (`.bo-research/<run>/worktree`, readable with Read) shows how each mechanism was coded. `wrapup.changes` lists the non-lever changes (each `commit-change` and `add-dependency` commit, with its reason).
+
+**Takeaways** — `record takeaways`: `takeaways`, 1 to 5 one-line bullets of what the run established, each naming the verdict record it rests on (`V-R2-H3.v1-2`); `cites`, those records; `quotes` for every decimal.
+
+**Distillation spec** — `record distill_spec`, when `wrapup.distilled` is set (the harness renders it as `DISTILL_SPEC.md` for the lever coder):
+- **content** — markdown: each retained mechanism and its tuned values; how it fits the project's own idioms (its config system, the names of its hyperparameters); what to drop (levers frozen at baseline, dead code paths, the lever scaffolding, every hypothesis not retained).
+- **cites** — at least each retained hypothesis's latest verdict record.
+- **changes** — one `{"commit", "decision": "keep"|"drop", "reason"}` per non-lever change (`[]` when there were none). The harness refuses a missing or an extra commit.
+- **quotes** — every decimal, as for a narrative; a tuned value quotes record `wrapup`, e.g. `{"record": "wrapup", "field": "config.H3.warmup_frac", "value": 0.083}`.
+
+```bash
+BO record distill_spec --file - --rationale "distillation spec" <<'EOF'
+{"content": "## Keep\n- H3 warmup: warm the rate up over the first 0.083 of training, as warmup_frac in config.yaml.\n## Drop\n- H1 and H2 (rejected), the lever() calls and levers.json.",
+ "cites": ["V-R4-H3.v1-2"], "changes": [],
+ "quotes": [{"record": "wrapup", "field": "config.H3.warmup_frac", "value": 0.083}]}
+EOF
+```
+
+A review asking for a revision comes back to you with its rationale: record a new `distill_spec` that answers it. Your final message: the takeaways, and the spec's keep and drop lists.

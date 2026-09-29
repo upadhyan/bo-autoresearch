@@ -121,4 +121,16 @@ The run ends when the harness says so — the budget is spent, the user stopped 
 
 ## Wrap-up
 
-<!-- #37 fills this section: distillation, verification, discouraged winners, REPORT.md, clean. -->
+Every run end — budget, stop, target, exhaustion — gets the same hand-back, outside the budget. `BO wrapup --rationale "<why>"` starts it and advances it; after the run ends, `next` lists only wrap-up duties, and the `Stop` hook holds you until wrap-up has finished. After a `stop` mid-round, let the background `round-run` exit first (`wrapup` waits for the round to end). Call `wrapup` the same way every time: with `--no-confirm` (only when the user asks: no distillation, no verification, the result reported **unconfirmed**) or without it.
+
+| `next` says | You do |
+|---|---|
+| `wrapup …` | `BO wrapup --rationale "<why>"` (it commits and verifies a new distilled tree, and finishes when every duty is done). |
+| `record takeaways …` / `record distill_spec …` | Spawn the **round analyst** in distill mode, one agent for both: its prompt says "distill mode" and carries `BO`. |
+| `record distill_review …` | Spawn the **registration reviewer** in distill mode: "distill mode", `BO` and `status.wrapup.distilled.spec` (the `DISTILL_SPEC.md` path). |
+| `record distill_spec again …` | Spawn the round analyst in distill mode with the review's rationale. |
+| `write the distilled branch …` / `fix the distilled branch …` | Spawn the **lever coder** in distill mode: "distill mode", `BO`, the distilled worktree and the spec path (`status.wrapup.distilled`), and on a retry the last `wrapup` output's `verification` (the gap) and `diff`. When it returns, `BO wrapup`. |
+
+Verification runs 3 replicates of the distilled branch and 3 of the research incumbent at the reference fidelity; they double as the final confirmation. After a third failed attempt the harness marks the distilled branch **unverified** and confirms the research branch at the incumbent's values. With no hypothesis retained there is nothing to distill: `wrapup` runs the final confirmation alone.
+
+**Done when** `wrapup` returns a `result` (verified, unverified, confirmed or unconfirmed) and an empty `next`. Tell the user, in a few lines: the headline (the confirmed result against the baseline, and which branch holds it), the distilled branch and whether it was verified, any discouraged directive the winner breaks with the price of honouring it (REPORT.md's "What to take"), and the path of `REPORT.md` (the output's `report`). Nothing is merged into the user's branches. When the user wants the disk back: `BO clean --rationale "<why>"` removes the worktrees and the run venv and keeps both branches and `log.db` (run it last: it deletes `BO` itself).

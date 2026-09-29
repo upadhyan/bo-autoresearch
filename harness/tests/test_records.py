@@ -148,7 +148,7 @@ def test_review_interplay_and_distill_spec_records_are_accepted(run):
     body = {"newcomer": other, "flags": flags,
             "quotes": [{"record": v["id"], "field": "delta_stat.upper", "value": v["delta_stat"]["upper"]}]}
     assert record(run, "interplay", body, agent="ip1", actor="interplay-reviewer")[0] == 0
-    body = {"content": "# Distill\nKeep nothing: H1 was rejected.", "cites": [v["id"]], "quotes": []}
+    body = {"content": "# Distill\nKeep nothing: H1 was rejected.", "cites": [v["id"]], "changes": [], "quotes": []}
     assert record(run, "distill_spec", body, agent="ds1")[0] == 0
     kinds = {e["payload"]["agent_id"]: (e["actor"], e["payload"]["kind"])
              for e in events(run) if e["type"] == "record"}
@@ -181,7 +181,7 @@ BAD = [
                   "quotes": [{"record": ["V"], "field": "delta", "value": 0.1}]}, "quotes[0].record"),
     ("expected", {"hypothesis": "H1.v1", "verdict": "retain", "reason": "x",
                   "quotes": [{"record": "V-R1-H1.v1-1", "field": 3, "value": 0.1}]}, "quotes[0].field"),
-    ("distill_spec", {"content": "x", "cites": [],
+    ("distill_spec", {"content": "x", "cites": [], "changes": [],
                       "quotes": [{"record": "V-R1-H1.v1-1", "field": "delta", "value": 0.1}]},
      "not cited"),
     ("narrative", {"round": 7, "text": "x", "cites": [], "diagnostics": [], "suggestions": [],

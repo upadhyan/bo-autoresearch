@@ -18,7 +18,8 @@ EVENT_TYPES = {"run_started", "trial_started", "trial_finished", "trial_failed",
                "agent_trial_skipped", "checkpoint", "user_pause", "user_resume", "removal",
                "hypothesis_revived", "generation_pass", "registry_revised", "hypothesis_pruned",
                "hypothesis_unpruned", "prohibited_check_refused", "hypothesis_merged", "round_summary",
-               "hook_blocked", "wrapup_finished"}
+               "hook_blocked", "wrapup_started", "distill_committed", "verification", "wrapup_finished",
+               "cleaned"}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -82,7 +83,10 @@ def state(events: list[dict]) -> dict:
     removals: list[dict] = []  # rejects, inconclusives and parks, each owed an interplay review
     passes: list[dict] = []  # generation passes; a proposal belongs to the latest one
     noise = calib = proxy = delta = ended = escalated = paused = None
-    wrapped_up = False  # wrap-up (#37) logs wrapup_finished: the hooks go inert
+    wrapped_up = False  # wrap-up logs wrapup_finished: the hooks go inert
+    wrapup = None  # the hand-back: its start, distilled commits, verifications and finish
+    checks: list[dict] = []  # equivalence checks, and the epochs they (or a breaking change) started
+    epochs: list[dict] = []
     baselines: list[dict] = []  # each epoch's baseline mean per fidelity (the replicates' mean)
     epoch = {"epoch": 0, "round": 0}  # the first round whose trials the epoch's evidence counts
     commits: list[dict] = []  # the harness-made commits of the worktree
@@ -125,8 +129,16 @@ def state(events: list[dict]) -> dict:
             delta = p["delta"]
         elif e["type"] == "run_ended":
             ended = p["reason"]
+        elif e["type"] == "wrapup_started":
+            wrapup = {**p, "seq": e["seq"], "verifications": [], "finished": None}
+        elif e["type"] == "verification":
+            wrapup["verifications"].append(p)  # type: ignore[index]
         elif e["type"] == "wrapup_finished":
             wrapped_up = True
+            if wrapup:
+                wrapup["finished"] = p
+        elif e["type"] == "equivalence_check":
+            checks.append(p)
         elif e["type"] == "trial_enqueued":
             queue.append(p)
         elif e["type"] == "checkpoint":  # checkpoint mode, at a round boundary
@@ -139,6 +151,7 @@ def state(events: list[dict]) -> dict:
             hyps[p["id"]].update(status="active", activated_round=p["round"])
         elif e["type"] == "epoch_started":
             epoch = {"epoch": p["epoch"], "round": p["round"]}
+            epochs.append(p)
         elif e["type"] == "noise_estimate" and "epoch" in p:  # σ re-estimated in a new epoch
             baselines.append({"epoch": p["epoch"], "fidelity": p["fidelity"], "mean": p["mean"]})
             if noise and p["sigma"] is not None:
@@ -232,7 +245,8 @@ def state(events: list[dict]) -> dict:
             "fidelity": fidelity, "delta": delta, "run_ended": ended, "epoch": epoch,
             "records": records, "paused": paused, "queue": queue, "removals": removals,
             "passes": passes, "registry": registry, "manifest": manifest,
-            "commits": commits, "baselines": baselines, "wrapup_finished": wrapped_up}
+            "commits": commits, "baselines": baselines, "wrapup_finished": wrapped_up, "wrapup": wrapup,
+            "equivalence": checks, "epochs": epochs}
 
 
 def lever_paths(hyps: dict) -> dict:

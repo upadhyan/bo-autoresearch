@@ -260,7 +260,7 @@ def test_exhaustion_waits_for_every_condition_then_ends_the_run(tmp_path, projec
     assert all(exhaustion().values())  # judged at the next boundary
     assert bo(repo, "status")[1]["next"] == ["round-run (the hypothesis list is exhausted: it ends the run)"]
     code_, out = bo(repo, "round-run", "--rationale", "the next round", env=ENV)
-    assert code_ == 0 and out["run_ended"] == "exhausted" and out["next"] == []
+    assert code_ == 0 and out["run_ended"] == "exhausted" and out["next"][0].startswith("wrapup (the run has ended")
     assert of_type(run_dir, "run_ended") == [{"reason": "exhausted", "exhaustion": {
         "queue_empty": True, "none_undecided": True, "removals_reviewed": True, "revivals_run": True,
         "final_pass_empty": True}}]

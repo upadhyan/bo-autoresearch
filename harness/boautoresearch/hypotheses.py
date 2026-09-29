@@ -212,6 +212,22 @@ def _config_reads(tree: ast.AST) -> Counter:
     return sites
 
 
+def harness_imports(source: str, path: str) -> set:
+    """What a module imports from boautoresearch (`boautoresearch`, `boautoresearch.lever`, ...)."""
+    # ponytail: static imports only; importlib/__import__ slip past (the verification still runs it)
+    try:
+        tree = ast.parse(source, path)
+    except SyntaxError as e:
+        raise ValueError(f"{path} does not parse: {e}")
+    out: set = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            out |= {a.name for a in node.names if a.name.split(".")[0] == "boautoresearch"}
+        elif isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "boautoresearch":
+            out |= {f"{node.module}.{a.name}" for a in node.names}
+    return out
+
+
 def _lever_reads(tree: ast.AST) -> list:
     """The argument of every lever(...) call: a str literal, or None for anything else."""
     reads = []

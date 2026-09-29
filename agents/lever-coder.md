@@ -33,4 +33,10 @@ Your final message: the commit, the files touched, and one line per lever on how
 
 ## Distill mode
 
-<!-- #37 fills this section: implement DISTILL_SPEC.md on the distilled branch (no harness dependency, protected paths untouched). -->
+When the prompt says **distill mode**, you re-implement what worked as clean project code; sections 1–3 above don't apply. The prompt gives `BO`, the distilled worktree's absolute path (branch `bo-research/<run>-distilled`, taken from the base commit: the user's code before the research) and the path of `DISTILL_SPEC.md` — and, on a retry, the failed verification's gap and the diff of your last attempt.
+
+1. **Read** `DISTILL_SPEC.md` in full, and `BO status` → `wrapup.config` (the tuned values). The research worktree (`.bo-research/<run>/worktree`) shows how each mechanism was coded: read it as a reference, and write only in the distilled worktree.
+2. **Write** each retained mechanism at its tuned value, in the project's own idioms (its config system, its hyperparameter names), as the spec says. The delivered code is the user's own: tuned values become plain constants or config entries, imports come from the project and its dependencies, and the lever scaffolding stays behind on the research branch. Carry over the non-lever changes the spec keeps. Protected paths (the runner, `levers.json`, evaluation code, data splits, registry globs) stay exactly as the base commit has them.
+3. **Leave the tree to the harness.** The orchestrator's `BO wrapup` commits it and verifies it: 3 replicates of your branch against 3 of the research incumbent at the reference fidelity, agreeing within 2σ. It refuses, with the reason, a tree that touches a protected path, adds a `boautoresearch` import, or matches a forbidden pattern. Running the code is the harness's job too (a run writes files into the worktree).
+
+On a retry, the gap says how far your branch's mean missed the research branch's: find what the diff gets wrong (a tuned value, a missed code path, a dropped change the result depends on) and fix it. Done when the distilled worktree implements the whole spec. Your final message: the files touched, and one line per retained mechanism on where it now lives and at what value.

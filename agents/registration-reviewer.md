@@ -46,3 +46,15 @@ EOF
 ```
 
 Put the JSON only between the `<<'EOF'` line and the closing `EOF`, with no backticks in it (the hook reads a backtick as a command substitution). Your final message: the three verdicts and `strict`, one line each.
+
+## Distill mode
+
+When the prompt says **distill mode**, you review the distillation spec instead of a hypothesis. Read `DISTILL_SPEC.md` (its path is in the prompt) and `BO registry`, and judge the distilled branch it describes against the brief — above all its complexity appetite — and the directives: does it stay within what the user asked for, and keep every prohibited directive? Record `approve`, or `revise` with what must change:
+
+```bash
+BO record distill_review --file - --rationale "review of the distillation spec" <<'EOF'
+{"verdict": "revise", "rationale": "The brief asks for small changes; the spec keeps the data-loader refactor, which no retained mechanism needs: drop it."}
+EOF
+```
+
+Your final message: the verdict and its rationale.

@@ -72,12 +72,14 @@ def _repo_root() -> Path:
     return Path(_git(Path.cwd(), "rev-parse", "--path-format=absolute", "--git-common-dir")).parent
 
 
-def _open_run(recover: bool = True) -> tuple[Path, sqlite3.Connection]:
-    """The latest run. Actions first settle what a crashed harness process left running."""
-    runs = sorted((_repo_root() / ".bo-research").glob("*/log.db"))
+def _open_run(recover: bool = True, run_id: str | None = None) -> tuple[Path, sqlite3.Connection]:
+    """The latest run (or `run_id`'s). Actions first settle what a crashed harness process left running."""
+    if run_id is not None and not re.fullmatch(r"\d{8}-\d{6}", run_id):
+        raise Refused(f"{run_id!r} is not a run id (YYYYMMDD-HHMMSS, a directory under .bo-research/)")
+    runs = sorted((_repo_root() / ".bo-research").glob(f"{run_id or '*'}/log.db"))
     if not runs:
-        raise Refused("no run: start one with `boautoresearch init run.yaml`")
-    # ponytail: latest run wins; add --run when runs coexist
+        raise Refused(f"no run {run_id}" if run_id else "no run: start one with `boautoresearch init run.yaml`")
+    # ponytail: latest run wins (only `clean` names one); add --run elsewhere when runs coexist
     run_dir, con = runs[-1].parent, elog.connect(runs[-1])
     if recover:
         _recover(run_dir, con)
@@ -295,44 +297,47 @@ def cmd_init(a) -> dict:
             "venv": str(run_dir / "venv"), **_status(elog.load(con))}
 
 
-def _baseline(run_dir: Path) -> dict:
-    """The committed lever baselines: the worktree's levers.json."""
-    levers_file = run_dir / "worktree" / "levers.json"
+def _baseline(run_dir: Path, worktree: Path | None = None) -> dict:
+    """The committed lever baselines: the (research) worktree's levers.json."""
+    levers_file = (worktree or run_dir / "worktree") / "levers.json"
     try:
         return json.loads(levers_file.read_text()) if levers_file.exists() else {}
     except json.JSONDecodeError as e:
         raise Refused(f"levers.json is not valid JSON: {e}")
 
 
-def _trial(run_dir: Path, con, a, kind: str, levers: dict, fidelity: dict, **extra) -> dict:
+def _trial(run_dir: Path, con, a, kind: str, levers: dict, fidelity: dict, worktree: Path | None = None,
+           **extra) -> dict:
     """Run one trial, or log `trial_refused` and refuse when the budget can't cover it.
 
-    `a` is the caller's action; None for a trial the harness schedules itself.
+    `a` is the caller's action; None for a trial the harness schedules itself. A wrap-up trial (kind
+    `wrapup`, in `worktree`: the research one unless given) is outside the budget and the trial ceiling.
     """
     st = elog.load(con)
     run, n = st["run"], len(st["trials"]) + 1
     levers, masking = _mask(st, levers)
-    if d := directives.violated(st["registry"]["directives"], levers, elog.lever_paths(st["hypotheses"])):
-        elog.append(con, "prohibited_check_refused", "harness", {
-            "kind": kind, "levers": levers, "fidelity": fidelity, "directive": d["id"], **extra})
-        _regenerate(run_dir, con)
-        raise ProhibitedRefused(f"a {kind} trial at {json.dumps(levers, sort_keys=True)} breaks prohibited "
-                                f"directive {d['id']} ({d['predicate']}): it never runs")
-    remaining = _remaining(st)
-    estimate = _cost(st["trials"], fidelity)
-    if run["max_trials"] is not None and n > run["max_trials"]:
-        elog.append(con, "trial_refused", "harness", {"kind": kind, "fidelity": fidelity,
-                                                      "max_trials": run["max_trials"], **extra})
-        _regenerate(run_dir, con)
-        raise TrialRefused(f"the run's ceiling of {run['max_trials']} trials is reached", "max_trials")
-    if remaining <= 0 or estimate > remaining:
-        elog.append(con, "trial_refused", "harness", {
-            "kind": kind, "fidelity": fidelity, "estimated_cost_s": estimate,
-            "remaining_s": remaining, **extra})
-        _regenerate(run_dir, con)
-        raise TrialRefused(f"budget: a {kind} trial at {json.dumps(fidelity)} is estimated at "
-                      f"{estimate:.1f}s but {remaining:.1f}s of the budget remain")
-    worktree = run_dir / "worktree"
+    if kind != WRAPUP_KIND:  # wrap-up is outside the budget and the ceiling; its configs are the incumbent's
+        if d := directives.violated(st["registry"]["directives"], levers, elog.lever_paths(st["hypotheses"])):
+            elog.append(con, "prohibited_check_refused", "harness", {
+                "kind": kind, "levers": levers, "fidelity": fidelity, "directive": d["id"], **extra})
+            _regenerate(run_dir, con)
+            raise ProhibitedRefused(f"a {kind} trial at {json.dumps(levers, sort_keys=True)} breaks prohibited "
+                                    f"directive {d['id']} ({d['predicate']}): it never runs")
+        remaining = _remaining(st)
+        estimate = _cost(st["trials"], fidelity)
+        if run["max_trials"] is not None and n > run["max_trials"]:
+            elog.append(con, "trial_refused", "harness", {"kind": kind, "fidelity": fidelity,
+                                                          "max_trials": run["max_trials"], **extra})
+            _regenerate(run_dir, con)
+            raise TrialRefused(f"the run's ceiling of {run['max_trials']} trials is reached", "max_trials")
+        elif remaining <= 0 or estimate > remaining:
+            elog.append(con, "trial_refused", "harness", {
+                "kind": kind, "fidelity": fidelity, "estimated_cost_s": estimate,
+                "remaining_s": remaining, **extra})
+            _regenerate(run_dir, con)
+            raise TrialRefused(f"budget: a {kind} trial at {json.dumps(fidelity)} is estimated at "
+                          f"{estimate:.1f}s but {remaining:.1f}s of the budget remain")
+    worktree = worktree or run_dir / "worktree"
     trial = {"trial": n, "kind": kind, "levers": levers, "fidelity": fidelity,
              "seed": _rng(run, n).getrandbits(31), "epoch": st["epoch"]["epoch"],
              "commit": _git(worktree, "rev-parse", "HEAD"),
@@ -342,7 +347,7 @@ def _trial(run_dir: Path, con, a, kind: str, levers: dict, fidelity: dict, **ext
         elog.append(con, "trial_started", a.actor, {"rationale": a.rationale, **started})
     else:
         elog.append(con, "trial_started", "harness", started)
-    outcome = _run_trial(run_dir, run["runner"], trial)
+    outcome = _run_trial(run_dir, run["runner"], trial, worktree)
     elog.append(con, "trial_" + outcome.pop("status"), "harness", {"trial": n, **outcome})
     _regenerate(run_dir, con)
     return elog.load(con)["trials"][-1]
@@ -606,8 +611,8 @@ def cmd_check_stop(a) -> dict:
     if _live(st):
         why = None  # the background round-run wakes the orchestrator when it returns
     elif st["run_ended"]:
-        why = (f"the run has ended ({st['run_ended']}) but wrap-up hasn't finished: `boautoresearch wrapup` "
-               "(distillation, verification and the report) comes first")
+        why = (f"the run has ended ({st['run_ended']}) but wrap-up hasn't finished (distillation, verification "
+               f"and the report). Next: {'; '.join(_next(st))}")
     elif st["paused"] or (not st["run"].get("go") and not any(r >= 1 for r in st["rounds"])):
         why = None  # a checkpoint, a user pause, or the pre-loop interviews: the user answers
     else:
@@ -952,6 +957,231 @@ def cmd_stop(a) -> dict:
     return _status(elog.load(con))
 
 
+WRAPUP_KIND = "wrapup"  # the kind of every wrap-up trial: outside the budget
+VERIFY_REPLICATES = 3  # r replicates of each branch at the reference fidelity (1 for a noiseless objective)
+DISTILL_ATTEMPTS = 3  # the lever coder's first distillation, then up to 2 retries with the gap and the diff
+ENDED_EARLY = "the run ended before a verdict"
+
+
+def cmd_wrapup(a) -> dict:
+    """The hand-back, at every kind of run end, outside the budget: takeaways; unless --no-confirm, the
+    distillation spec, its review, the distilled branch and its verification (the final confirmation);
+    then REPORT.md and `wrapup_finished`. Call it again after each duty `next` names."""
+    run_dir, con = _open_run()
+    st = elog.load(con)
+    if not st["run_ended"]:
+        raise Refused("wrap-up comes at the run's end, and the run is still going: `stop` ends it")
+    if st["wrapup_finished"]:
+        raise Refused("wrap-up has finished: REPORT.md is in the run directory (`clean` reclaims the worktrees "
+                      "and the venv)")
+    _between_rounds(st, "wrap-up runs")
+    confirm, w = not a.no_confirm, st["wrapup"]
+    if w is None:
+        _start_wrapup(run_dir, con, a, st, confirm)
+    elif w["confirm"] != confirm:
+        raise Refused("this wrap-up runs " + ("with distillation and verification: call `wrapup` without "
+                      "--no-confirm" if w["confirm"] else "unconfirmed: call `wrapup --no-confirm`"))
+    out = _advance_wrapup(run_dir, con)
+    _regenerate(run_dir, con)
+    st = elog.load(con)
+    return {**out, "wrapup": st["wrapup"], "next": _next(st)}
+
+
+def _start_wrapup(run_dir: Path, con, a, st: dict, confirm: bool) -> None:
+    """The research incumbent (the latest BO round's) and the config the result is confirmed at: its
+    values for the retained hypotheses' levers, every other lever at baseline. Still-active hypotheses
+    become inconclusive. With distillation, the distilled branch's worktree, taken from the base commit."""
+    inc = next((r["incumbent"] for n, r in sorted(st["rounds"].items(), reverse=True)
+                if n >= 1 and r.get("incumbent")), None)
+    retained = [h for h in st["hypotheses"].values() if h["status"] == "retained"]
+    config = {**_baseline(run_dir), **{n: inc["levers"][n] for h in retained for n in h["spec"]["levers"]
+                                       if inc and n in inc["levers"]}}
+    distilled = None
+    if confirm and retained:
+        branch, wt = f"{st['run']['branch']}-distilled", run_dir / "distilled"
+        if not wt.exists():
+            _git(_repo_root(), "worktree", "add", "-q", "-b", branch, str(wt), st["run"]["base_commit"])
+        distilled = {"branch": branch, "worktree": str(wt), "spec": str(run_dir / "DISTILL_SPEC.md")}
+    elog.append(con, "wrapup_started", a.actor, {
+        "rationale": a.rationale, "confirm": confirm, "incumbent": inc, "config": config,
+        "retained": [h["id"] for h in retained], "distilled": distilled,
+        "changes": [{"commit": c["commit"], "reason": c.get("reason") or f"add-dependency {c['requirement']}"}
+                    for c in st["commits"] if "id" not in c],  # the non-lever changes the spec decides
+        "fidelity": st["run"]["reference_fidelity"]})
+    for h in st["hypotheses"].values():
+        if h["status"] == "active":
+            elog.append(con, "hypothesis_inconclusive", "harness", {
+                "id": h["id"], "verdict": h["verdicts"][-1]["id"] if h["verdicts"] else None, "reason": ENDED_EARLY})
+
+
+def _wrapup_record(st: dict, kind: str, after: int | None = None) -> dict | None:
+    """The latest `kind` record since the wrap-up started (or since seq `after`)."""
+    since = st["wrapup"]["seq"] if after is None else after
+    return next((x for x in reversed(st["records"]) if x["kind"] == kind and x["seq"] > since), None)
+
+
+def _distill_state(st: dict) -> tuple[dict | None, dict | None]:
+    """The current distillation spec and its review (None while missing)."""
+    spec = _wrapup_record(st, "distill_spec")
+    return spec, _wrapup_record(st, "distill_review", spec["seq"]) if spec else None
+
+
+def _advance_wrapup(run_dir: Path, con) -> dict:
+    """Every wrap-up step whose duty is done: commit and verify a new distilled tree, finish."""
+    st = elog.load(con)
+    w = st["wrapup"]
+    if _wrapup_record(st, "takeaways") is None:
+        return {}
+    if not w["confirm"]:
+        return _finish(run_dir, con, "unconfirmed", None)
+    if not w["retained"]:  # nothing to distill: the final confirmation of the research branch
+        research = _replicates(run_dir, con, "research")
+        return _finish(run_dir, con, "confirmed" if research["mean"] is not None else "unconfirmed",
+                       _confirmed(st, research))
+    spec, review = _distill_state(st)
+    if not review or review["record"]["verdict"] != "approve":
+        return {}
+    wt, base = Path(w["distilled"]["worktree"]), st["run"]["base_commit"]
+    tree = _worktree_tree(wt)
+    if tree == _git(wt, "rev-parse", "HEAD^{tree}"):
+        return {}  # nothing new from the lever coder
+    _distill_allowed(st, wt, base, tree)
+    attempt = len(w["verifications"]) + 1
+    paths = _git(wt, "diff-tree", "-r", "-z", "--name-only", "HEAD", tree).split("\0")
+    sha = _commit(wt, f"distilled (attempt {attempt}): the retained mechanisms of run {st['run']['run_id']}")
+    elog.append(con, "distill_committed", "harness", {"attempt": attempt, "commit": sha, "paths": [p for p in paths if p]})
+    research = (w["verifications"][0]["research"] if w["verifications"]
+                else _replicates(run_dir, con, "research"))
+    distilled = _replicates(run_dir, con, "distilled", wt, attempt)
+    st = elog.load(con)
+    sigma = _sigma(st, w["fidelity"]) if st["noise"] else None
+    r = len(research["trials"])
+    tol = 2 * (sigma or 0.0) * math.sqrt(2 / r) + 1e-9 * max(1.0, abs(research["mean"] or 0.0))
+    gap = (distilled["mean"] - research["mean"]
+           if distilled["mean"] is not None and research["mean"] is not None else None)
+    v = {"attempt": attempt, "commit": sha, "research": research, "distilled": distilled, "sigma": sigma,
+         "replicates": r, "tolerance": tol, "gap": gap, "passed": gap is not None and abs(gap) <= tol}
+    elog.append(con, "verification", "harness", v)
+    if v["passed"]:
+        return _finish(run_dir, con, "verified", {"branch": w["distilled"]["branch"], "commit": sha,
+                                                  "trials": distilled["trials"], "mean": distilled["mean"],
+                                                  "fidelity": w["fidelity"]})
+    if attempt >= DISTILL_ATTEMPTS:
+        return _finish(run_dir, con, "unverified", _confirmed(st, research))
+    return {"verification": v, "diff": _git(wt, "diff", base, sha)}
+
+
+def _distill_allowed(st: dict, wt: Path, base: str, tree: str) -> None:
+    """The distilled tree against the base commit: protected paths untouched, no boautoresearch import
+    added, no prohibited directive's forbidden pattern."""
+    paths = [p for p in _git(wt, "diff-tree", "-r", "-z", "--name-only", base, tree).split("\0") if p]
+    if hit := directives.protected(wt, paths, st["run"]["runner"], st["registry"]["protected_paths"]):
+        raise Refused(f"the distilled branch changes protected paths {hit}: restore them (verification compares "
+                      "the branches on the same measurement)")
+    for p in paths:
+        if not p.endswith(".py"):
+            continue
+        old = subprocess.run(["git", "show", f"{base}:{p}"], cwd=wt, capture_output=True, text=True)
+        new = subprocess.run(["git", "show", f"{tree}:{p}"], cwd=wt, capture_output=True, text=True)
+        if new.returncode:
+            continue  # deleted
+        try:
+            added = (hypotheses.harness_imports(new.stdout, p)
+                     - hypotheses.harness_imports(old.stdout if old.returncode == 0 else "", p))
+        except ValueError as e:
+            raise Refused(f"the distilled branch: {e}")
+        if added:
+            raise Refused(f"{p} imports {sorted(added)}: the distilled branch has no boautoresearch dependency "
+                          "(tuned values go in as the project's own constants or config)")
+    _forbidden_additions(st, wt, base, tree)
+
+
+def _replicates(run_dir: Path, con, branch: str, wt: Path | None = None, attempt: int | None = None) -> dict:
+    """r wrap-up trials at the reference fidelity: the research branch at the wrap-up's config, or the
+    distilled branch as it stands (its own levers.json: it reads no levers)."""
+    st = elog.load(con)
+    w = st["wrapup"]
+    if branch == "research" and (failing := _workspace(run_dir, st)):
+        raise Refused("the research worktree must be as the harness left it: " + " | ".join(failing.values()))
+    # 1 when the calibration round measured no noise (σ = 0: replicates off); unmeasured noise gets 3
+    r = VERIFY_REPLICATES if not st["noise"] or st["noise"]["replication"] else 1
+    levers = w["config"] if branch == "research" else _baseline(run_dir, wt)
+    runs = [_trial(run_dir, con, None, WRAPUP_KIND, levers, w["fidelity"], wt, wrapup_of=branch,
+                   **({"attempt": attempt} if attempt else {})) for _ in range(r)]
+    ys = [t["objective"] for t in runs if t["status"] == "finished"]
+    return {"trials": [t["trial"] for t in runs], "commit": runs[0]["commit"],
+            "mean": statistics.fmean(ys) if len(ys) == len(runs) else None}
+
+
+def _confirmed(st: dict, research: dict) -> dict:
+    return {"branch": st["run"]["branch"], "commit": research["commit"], "trials": research["trials"],
+            "mean": research["mean"], "fidelity": st["wrapup"]["fidelity"], "config": st["wrapup"]["config"]}
+
+
+def _finish(run_dir: Path, con, result: str, confirmed: dict | None) -> dict:
+    elog.append(con, "wrapup_finished", "harness", {"result": result, "confirmed": confirmed})
+    return {"result": result, "confirmed": confirmed, "report": str(run_dir / "REPORT.md")}
+
+
+def _wrapup_next(st: dict) -> list[str]:
+    """The wrap-up's outstanding duties, once the run has ended."""
+    w = st["wrapup"]
+    if w is None:
+        return ["wrapup (the run has ended: distillation, verification and REPORT.md; `wrapup --no-confirm` "
+                "skips distillation and verification and marks the result unconfirmed)"]
+    if w["finished"]:
+        return []
+    duties = []
+    if _wrapup_record(st, "takeaways") is None:
+        duties.append("record takeaways (the round analyst: at most 5 bullets, each citing verdict records)")
+    if w["confirm"] and w["retained"]:
+        spec, review = _distill_state(st)
+        if spec is None:
+            duties.append("record distill_spec (the round analyst in distill mode writes DISTILL_SPEC.md: the "
+                          "retained mechanisms at their tuned values, how they fit the project, what to drop, "
+                          "and keep or drop for each non-lever change)")
+        elif review is None:
+            duties.append("record distill_review (the registration reviewer checks DISTILL_SPEC.md against the "
+                          "brief and the directives)")
+        elif review["record"]["verdict"] == "revise":
+            duties.append(f"record distill_spec again: its review asks for a revision ({review['record']['rationale']})")
+        elif not w["verifications"]:
+            duties.append(f"write the distilled branch in {w['distilled']['worktree']} as {w['distilled']['spec']} "
+                          "says (the lever coder in distill mode), then `wrapup` commits and verifies it")
+        else:
+            v = w["verifications"][-1]
+            gap = f"gap {v['gap']:.4g}, tolerance {v['tolerance']:.4g}" if v["gap"] is not None else "a trial failed"
+            duties.append(f"fix the distilled branch in {w['distilled']['worktree']}: verification attempt "
+                          f"{v['attempt']} of {DISTILL_ATTEMPTS} failed ({gap}; the lever coder in distill mode "
+                          "gets the gap and the diff), then `wrapup`")
+    return duties or ["wrapup"]
+
+
+def cmd_clean(a) -> dict:
+    """Reclaim disk once wrap-up has finished: the worktrees and the venv go; the branches and the log stay."""
+    run_dir, con = _open_run(run_id=a.run)
+    st = elog.load(con)
+    if not st["wrapup_finished"]:
+        raise Refused("clean comes after wrap-up has finished (`wrapup`): the run still needs its worktree and venv")
+    root, removed = _repo_root(), []
+    for wt in (run_dir / "worktree", run_dir / "distilled"):
+        if wt.exists():
+            removed.append(str(wt))
+    if (run_dir / "venv").exists():
+        removed.append(str(run_dir / "venv"))
+    if not removed:
+        raise Refused(f"run {st['run']['run_id']} is already clean: its branches and log.db are all that is left")
+    branches = [b for b in (st["run"]["branch"], f"{st['run']['branch']}-distilled")
+                if subprocess.run(["git", "rev-parse", "--verify", "-q", f"refs/heads/{b}"], cwd=root,
+                                  capture_output=True).returncode == 0]
+    elog.append(con, "cleaned", a.actor, {"rationale": a.rationale, "removed": removed, "branches": branches})
+    for wt in (run_dir / "worktree", run_dir / "distilled"):
+        if wt.exists():
+            _git(root, "worktree", "remove", "--force", str(wt))
+    shutil.rmtree(run_dir / "venv", ignore_errors=True)  # this process's own interpreter may be in it
+    return {"removed": removed, "kept": {"branches": branches, "log": str(run_dir / "log.db")}}
+
+
 def cmd_commit_lever(a) -> dict:
     """The harness-made commit of H's lever code, after its smoke passed on these exact contents."""
     run_dir, con = _open_run()
@@ -1025,10 +1255,14 @@ def _change_allowed(run_dir: Path, st: dict, paths: list[str], tree: str | None 
     worktree = run_dir / "worktree"
     if hit := directives.protected(worktree, paths, st["run"]["runner"], st["registry"]["protected_paths"]):
         raise Refused(f"the change touches protected paths {hit}: the research may never change them")
-    if tree is None:
-        return
+    if tree is not None:
+        _forbidden_additions(st, worktree, "HEAD", tree)
+
+
+def _forbidden_additions(st: dict, worktree: Path, old: str, new: str) -> None:
+    """Refuse when a line the diff old..new adds matches a prohibited directive's forbidden pattern."""
     added, path = [], None
-    for ln in _git(worktree, "diff-tree", "-p", "-r", "--no-color", "HEAD", tree).splitlines():
+    for ln in _git(worktree, "diff-tree", "-p", "-r", "--no-color", old, new).splitlines():
         if ln.startswith("+++ "):
             path = ln[len("+++ b/"):]
         elif ln.startswith("+") and path:
@@ -1856,7 +2090,7 @@ def _calibrate_ladder(run_dir: Path, con, noise: dict, space: dict) -> dict:
     return elog.load(con)["calibration"]
 
 
-def _run_trial(run_dir: Path, runner: str, trial: dict) -> dict:
+def _run_trial(run_dir: Path, runner: str, trial: dict, worktree: Path) -> dict:
     art = run_dir / trial["artifact_dir"]
     art.mkdir(parents=True)
     (art / "trial.json").write_text(json.dumps({**trial, "artifact_dir": str(art)}, indent=2))
@@ -1880,7 +2114,7 @@ def _run_trial(run_dir: Path, runner: str, trial: dict) -> dict:
     with open(art / "stdout.txt", "w") as out, open(art / "stderr.txt", "w") as err:
         # its own process group: recovery, or this process failing, kills the runner and its children
         p = subprocess.Popen([run_dir / "venv" / "bin" / "python", runner], start_new_session=True,
-                             cwd=run_dir / "worktree", env=env, stdout=out, stderr=err)
+                             cwd=worktree, env=env, stdout=out, stderr=err)
         beat = threading.Thread(target=heartbeat, args=(p.pid,), daemon=True)
         beat.start()
         try:
@@ -1911,7 +2145,8 @@ def _run_trial(run_dir: Path, runner: str, trial: dict) -> dict:
 
 
 def _spent(st: dict) -> float:
-    return sum(t["wall_clock_s"] for t in st["trials"] if t["status"] != "running")
+    """The budget ledger: the research loop's trials (wrap-up is outside the budget)."""
+    return sum(t["wall_clock_s"] for t in st["trials"] if t["status"] != "running" and t["kind"] != WRAPUP_KIND)
 
 
 def _remaining(st: dict) -> float:
@@ -1942,7 +2177,7 @@ def _status(st: dict) -> dict:
             "generation": {"mode": run["generation"], "passes": len(st["passes"]),
                            "due": _generation_due(st), "lenses": run.get("lenses"),
                            "proposals_per_lens": run.get("proposals_per_lens")},
-            "exhaustion": _exhaustion(st), "next": _next(st),
+            "exhaustion": _exhaustion(st), "next": _next(st), "wrapup": st["wrapup"],
             "conflicts": {"rivals": _rivals(st), "masking": _masking(st),
                           "merged": [{"id": h["id"], "into": h["merged_into"]}
                                      for h in st["hypotheses"].values() if h["status"] == "merged"]}}
@@ -2096,7 +2331,7 @@ def _schedule_status(st: dict) -> dict:
 def _next(st: dict) -> list[str]:
     """The duties outstanding before the next round-run can go ahead."""
     if st["run_ended"]:
-        return []
+        return _wrapup_next(st)
     if not st["r0_complete"]:
         return ["round-run (the calibration round)"]
     if all(_exhaustion(st).values()):
@@ -2444,6 +2679,8 @@ def _parser() -> argparse.ArgumentParser:
     action("register", cmd_register).add_argument("hypothesis")
     action("commit-lever", cmd_commit_lever).add_argument("hypothesis")
     action("stop", cmd_stop)
+    action("wrapup", cmd_wrapup).add_argument("--no-confirm", action="store_true")
+    action("clean", cmd_clean).add_argument("run", nargs="?")  # a run id; the latest run by default
     action("generate", cmd_generate)
     q = action("enqueue", cmd_enqueue)
     q.add_argument("--config", required=True)
