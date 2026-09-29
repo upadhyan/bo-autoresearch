@@ -598,7 +598,9 @@ def cmd_check_read(a) -> dict:
         return {"allow": True}
     run_dir, con, st = run
     p = checks.resolve(Path.cwd(), a.path)
-    raw = checks.role(a.agent) == "orchestrator" and checks.raw_read(p, run_dir.parent)
+    # a Glob pattern (or Grep glob) that could match the raw log, from wherever it starts
+    raw = checks.role(a.agent) == "orchestrator" and (
+        checks.raw_read(p, run_dir.parent) or checks.raw_glob(a.path, Path.cwd(), checks.raw_paths(run_dir.parent)))
     return _decide(con, "read", a.agent, str(p), checks.RAW_READ if raw else None)
 
 
@@ -1091,8 +1093,9 @@ def _distill_allowed(st: dict, wt: Path, base: str, tree: str) -> None:
         except ValueError as e:
             raise Refused(f"the distilled branch: {e}")
         if added:
-            raise Refused(f"{p} imports {sorted(added)}: the distilled branch has no boautoresearch dependency "
-                          "(tuned values go in as the project's own constants or config)")
+            raise Refused(f"{p} imports or could load the harness through {sorted(added)}: the distilled branch "
+                          "has no boautoresearch dependency (tuned values go in as the project's own constants "
+                          "or config; no dynamic imports or exec)")
     _forbidden_additions(st, wt, base, tree)
 
 
