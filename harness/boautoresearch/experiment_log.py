@@ -10,7 +10,8 @@ EVENT_TYPES = {"run_started", "trial_started", "trial_finished", "trial_failed",
                "proxy_accepted_unvalidated", "hypothesis_proposed", "hypothesis_registered",
                "lever_smoke", "lever_committed", "delta_set", "hypothesis_activated",
                "trial_heartbeat", "trial_abandoned", "drift_check", "run_ended", "verdict",
-               "hypothesis_rejected", "hypothesis_inconclusive", "hypothesis_escalated", "lever_frozen", "record"}
+               "hypothesis_rejected", "hypothesis_inconclusive", "hypothesis_escalated", "lever_frozen", "record",
+               "commit_change", "dependency_added", "equivalence_check", "epoch_started", "narrowed"}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -66,6 +67,7 @@ def state(events: list[dict]) -> dict:
     hyps: dict[str, dict] = {}
     records: list[dict] = []
     noise = calib = proxy = delta = ended = escalated = None
+    epoch = {"epoch": 0, "round": 0}  # the first round whose trials the epoch's evidence counts
     for e in events:
         p = {k: v for k, v in e["payload"].items() if k != "rationale"}
         if e["type"] == "run_started":
@@ -88,6 +90,14 @@ def state(events: list[dict]) -> dict:
             ended = p["reason"]
         elif e["type"] == "hypothesis_activated":
             hyps[p["id"]].update(status="active", activated_round=p["round"])
+        elif e["type"] == "epoch_started":
+            epoch = {"epoch": p["epoch"], "round": p["round"]}
+        elif e["type"] == "noise_estimate" and "epoch" in p:  # σ re-estimated in a new epoch
+            if noise and p["sigma"] is not None:
+                rungs = [{**x, "sigma": p["sigma"], "mean": p["mean"]} if x["fidelity"] == p["fidelity"]
+                         else x for x in noise["rungs"]]
+                noise = {**noise, "rungs": rungs, "sigma": rungs[0]["sigma"],
+                         "replication": any(x["sigma"] > 0 for x in rungs)}
         elif e["type"] == "noise_estimate" and p["round"] == 0:
             noise = p
         elif e["type"] == "noise_estimate":  # σ re-estimated from a round's replicates
@@ -114,6 +124,10 @@ def state(events: list[dict]) -> dict:
             hyps[p["id"]].update(status="rejected", condition=p["condition"])
         elif e["type"] == "hypothesis_inconclusive":
             hyps[p["id"]].update(status="inconclusive", reason=p["reason"])
+        elif e["type"] == "narrowed":  # the new range, from the next round on
+            h = hyps[p["id"]]
+            levers = h["spec"]["levers"]
+            h["spec"] = {**h["spec"], "levers": {**levers, p["lever"]: {**levers[p["lever"]], **p["after"]}}}
         elif e["type"] == "lever_frozen":
             hyps[p["id"]]["frozen"].append(p["lever"])
         elif e["type"] == "record":
@@ -133,5 +147,5 @@ def state(events: list[dict]) -> dict:
     fidelity = escalated or fidelity  # a stuck hypothesis moved the run up a rung
     return {"run": run, "trials": [trials[n] for n in sorted(trials)], "rounds": rounds,
             "noise": noise, "calibration": calib, "hypotheses": hyps, "r0_complete": r0_complete,
-            "fidelity": fidelity, "delta": delta, "run_ended": ended,
+            "fidelity": fidelity, "delta": delta, "run_ended": ended, "epoch": epoch,
             "records": records}

@@ -4,10 +4,11 @@ Pure functions; the CLI turns their ValueError into a refusal.
 """
 import ast
 import math
+import re
 from collections import Counter
 
 SPEC_KEYS = {"title", "rationale", "mechanism", "provenance", "source", "lens", "directives",
-             "fidelity_sensitive", "fidelity_reason", "levers"}
+             "fidelity_sensitive", "fidelity_reason", "levers", "merges"}
 LEVER_KEYS = {"float": {"low", "high", "log", "predicted"}, "int": {"low", "high", "log", "predicted"},
               "categorical": {"options"}, "bool": {"why_not_graded"}}
 GRADED = ("float", "int")
@@ -52,6 +53,43 @@ def validate(spec) -> None:
         raise ValueError("levers must map at least one lever name to its declaration")
     for name, lv in levers.items():
         _validate_lever(name, lv)
+    if "merges" in spec:
+        _validate_merges(spec["merges"], levers)
+
+
+def _validate_merges(m, levers: dict) -> None:
+    """{from: [H<n>.v<k>], mapping: {own lever: {lever: H<n>.<name>, values?: [[old, new], ...]}}};
+    registering the merge itself (the merged hypotheses leaving the search) is #32's."""
+    if not isinstance(m, dict) or set(m) != {"from", "mapping"}:
+        raise ValueError("merges must be {from: [hypothesis ids], mapping: {lever: {lever, values}}}")
+    if (not isinstance(m["from"], list) or not m["from"]
+            or not all(isinstance(i, str) and re.fullmatch(r"H\d+\.v\d+", i) for i in m["from"])):
+        raise ValueError("merges.from must list the merged hypotheses' ids, e.g. [\"H2.v1\"]")
+    if not isinstance(m["mapping"], dict) or not m["mapping"]:
+        raise ValueError("merges.mapping must map at least one of this hypothesis's levers")
+    for name, rule in m["mapping"].items():
+        where = f"merges.mapping.{name}"
+        if name not in levers:
+            raise ValueError(f"{where}: not one of this hypothesis's levers")
+        if (not isinstance(rule, dict) or not set(rule) <= {"lever", "values"}
+                or not isinstance(rule.get("lever"), str) or not re.fullmatch(r"H\d+\.\w+", rule["lever"])):
+            raise ValueError(f"{where}.lever must name the merged lever, e.g. H2.bn")
+        values = rule.get("values", [])
+        if not isinstance(values, list) or not all(
+                isinstance(p, list) and len(p) == 2 and in_range(p[1], levers[name]) for p in values):
+            raise ValueError(f"{where}.values must list [old, new] pairs, each new value in the "
+                             "lever's range (leave it out to keep the values as they are)")
+
+
+def in_range(value, lv: dict) -> bool:
+    """The harness's own bounds check of a lever value against its declaration."""
+    if lv["kind"] == "bool":
+        return isinstance(value, bool)
+    if lv["kind"] == "categorical":
+        return any(type(o) is type(value) and o == value for o in lv["options"])
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return (lv["kind"] == "float" or isinstance(value, int)) and lv["low"] <= value <= lv["high"]
 
 
 def _validate_lever(name: str, lv) -> None:

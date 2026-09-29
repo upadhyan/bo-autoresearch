@@ -43,7 +43,7 @@ def calibrate(repo, run_dir, env=None):
     anchor = '    scale, cheap = lever("H1.scale"), epochs < _env("CHEAP_BELOW")\n'
     train.write_text(train.read_text().replace(anchor, anchor + '    scale += lever("H2.shift")\n'))
     assert bo(repo, "smoke", "H2", "--rationale", "try", env=env)[1]["passed"]
-    assert bo(repo, "commit-lever", "H2", "--rationale", "passed")[0] == 0
+    assert bo(repo, "commit-lever", "H2", "--rationale", "passed", env=env)[0] == 0
     return bo(repo, "round-run", "--rationale", "calibrate the ladder", env=env)
 
 
@@ -238,7 +238,10 @@ def test_a_budget_stop_in_the_ladder_calibration_ends_the_run_and_keeps_r0(repo,
     code, out = calibrate(repo, run_dir, env=env)
     assert code == 0, out
     assert out["trigger"] == "budget_spent" and out["run_ended"] == "budget_spent"
-    assert only(run_dir, "trial_refused")["payload"]["kind"] == "calibration"
+    # commit-lever's equivalence check was refused first (logged, no epoch), then the calibration
+    assert [e["payload"]["kind"] for e in events(run_dir) if e["type"] == "trial_refused"] == [
+        "equivalence", "calibration"]
+    assert only(run_dir, "equivalence_check")["payload"]["passed"] is None
     assert [e["payload"] for e in events(run_dir) if e["type"] == "round_ended"] == [
         {"round": 0, "trigger": "calibrated"}]
     assert out["r0_complete"] is True and len(trials_of(run_dir, "baseline")) == 4

@@ -6,35 +6,47 @@ only by the rounds that search, so every other command stays fast.
 import warnings
 from pathlib import Path
 
-from .hypotheses import GRADED, options
+from .hypotheses import GRADED, in_range, options
 
 
-def in_range(value, lv: dict) -> bool:
-    """The harness's own bounds check of a lever value against its declaration."""
-    if lv["kind"] == "bool":
-        return isinstance(value, bool)
-    if lv["kind"] == "categorical":
-        return any(type(o) is type(value) and o == value for o in lv["options"])
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return False
-    return (lv["kind"] == "float" or isinstance(value, int)) and lv["low"] <= value <= lv["high"]
+def eligible(t: dict, space: dict, baseline: dict, fidelity: dict, epoch: int = 0,
+             dropped: frozenset = frozenset(), merges: dict | None = None) -> dict | None:
+    """THE eligibility rule, for the sampler and the verdict GP: same epoch, same fidelity, in range
+    after the warm-start mapping. Returns the trial rewritten into the round's levers, or None.
 
-
-def eligible(t: dict, space: dict, baseline: dict, fidelity: dict, epoch: int = 0) -> bool:
-    """THE eligibility rule, for the sampler and the verdict GP: same epoch, same fidelity, in range.
-
-    In range: the searched levers inside their boxes, every other lever at its baseline, and no
-    lever the round doesn't know. #28 extends this with the warm-start mapping rules (backfill,
-    dropped and filtered levers, narrowing, merges).
+    Mapping: a trial that ran a merged-away lever (not searched now) but not the lever `merges` maps
+    it to takes the mapped value (`values` pairs old -> new; none = the same value), and a value the
+    mapping can't express makes it ineligible. A `dropped` lever (credibly irrelevant: rejected `irrelevant`, or frozen) out of the
+    search loses its key, whatever its value; a lever the trial predates is backfilled at its
+    baseline. Then the searched levers must
+    lie inside their boxes (never clipped), every other lever at its baseline, and no lever the round
+    doesn't know.
     """
-    # ponytail: trials carry no epoch until #28 starts epochs; a missing one is epoch 0
     if t["status"] != "finished" or t["fidelity"] != fidelity or t.get("epoch", 0) != epoch:
-        return False
-    levers = t["levers"]
-    if set(levers) != set(baseline) | set(space):
-        return False
-    return all(in_range(levers[n], space[n]) if n in space else levers[n] == baseline[n]
-               for n in levers)
+        return None
+    gone = set(dropped) - set(space)
+    levers = dict(t["levers"])
+    for new, rule in (merges or {}).items():
+        old = rule["lever"]
+        if new in levers or old not in levers or old in space:
+            continue  # the trial ran the new lever, or predates the old one, or it is still searched
+        v = levers.pop(old)
+        gone.add(old)  # expressed by the new lever from here on
+        if "values" in rule:
+            hits = [b for a, b in rule["values"] if type(a) is type(v) and a == v]
+            if not hits:
+                return None
+            v = hits[0]
+        levers[new] = v
+    levers = {n: v for n, v in levers.items() if n not in gone}
+    known = (set(baseline) | set(space)) - gone
+    for n in known:
+        if n not in levers:  # an added lever: its baseline reproduces the code the trial ran
+            levers[n] = baseline[n] if n in baseline else space[n]["baseline"]
+    if set(levers) != known:
+        return None
+    ok = all(in_range(levers[n], space[n]) if n in space else levers[n] == baseline[n] for n in levers)
+    return {**t, "levers": levers} if ok else None
 
 
 def _distributions(space: dict) -> dict:

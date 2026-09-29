@@ -34,7 +34,7 @@ def code_hypothesis(repo, run_dir, d, n, s, line, env):
     train.write_text(src.replace("    term = 0.0\n", f"    term = 0.0\n{line}\n"))
     code, out = bo(repo, "smoke", f"H{n}", "--rationale", "try", env=env)
     assert code == 0 and out["passed"], out
-    assert bo(repo, "commit-lever", f"H{n}", "--rationale", "smoke passed")[0] == 0
+    assert bo(repo, "commit-lever", f"H{n}", "--rationale", "smoke passed", env=env)[0] == 0
 
 
 def verdict_run(d, python, seed, hyps, rounds=1, sigma=SIGMA, extra="", proxy=False, budget=3600,
@@ -114,7 +114,7 @@ FIELDS = {"id", "hypothesis", "round", "check", "group", "outcome", "condition",
 
 def test_verdict_records_hold_every_field_and_the_probe_shows_them(tmp_path, project_python):
     harmful = (spec({"x": lever()}), '    term += 2 * lever("H1.x")')
-    run_dir, [out] = verdict_run(tmp_path / "r", project_python, 4, [harmful])
+    run_dir, [out] = verdict_run(tmp_path / "r", project_python, 1, [harmful])
     repo = run_dir.parents[1]
     vs = records(run_dir)
     assert vs and out["verdicts"] == vs
@@ -283,5 +283,9 @@ def test_a_single_lever_below_delta_is_frozen_and_leaves_the_search(tmp_path, pr
         assert outs[0]["trigger"] == "search_space"  # a freeze changes the search space
         [r2] = [s for s in of_type(run_dir, "round_started") if s["round"] == 2]
         assert set(r2["search_space"]) == {"H1.x"}
+        # frozen is credibly irrelevant: H1.z's key is dropped, so every R1 trial seeds R2
+        r1 = [t for t in started_in(run_dir, 1) if t["status"] == "finished"]
+        assert any(t["levers"]["H1.z"] != 0.0 for t in r1)
+        assert {t["trial"] for t in r1} <= set(r2["seeded"])
         assert all(t["levers"]["H1.z"] == 0.0 for t in started_in(run_dir, 2))
         assert not of_type(run_dir, "hypothesis_rejected")

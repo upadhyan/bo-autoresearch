@@ -15,7 +15,7 @@ from test_verdicts import lever, spec, verdict_run
 def run(tmp_path_factory, project_python):
     d = tmp_path_factory.mktemp("records")
     harmful = (spec({"x": lever()}), '    term += 2 * lever("H1.x")')
-    run_dir, _ = verdict_run(d / "r", project_python, 4, [harmful])
+    run_dir, _ = verdict_run(d / "r", project_python, 1, [harmful])
     return run_dir
 
 

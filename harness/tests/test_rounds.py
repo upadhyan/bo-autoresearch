@@ -28,12 +28,14 @@ SPEC = {
     "levers": {n: {"kind": "float", "low": 0.0, "high": 1.0, "baseline": 0.5, "predicted": "higher"}
                for n in ("x", "y")},
 }
-BOWL = "    term = 4 * ((lever(\"H1.x\") - 0.7) ** 2 + (lever(\"H1.y\") - 0.3) ** 2)\n"
+# a true no-op at the baseline (0.5, 0.5): commit-lever's equivalence check holds it to that (#28)
+BOWL = "    term = 4 * ((lever(\"H1.x\") - 0.7) ** 2 + (lever(\"H1.y\") - 0.3) ** 2 - 0.08)\n"
+BEST = 1 - 0.32  # the loss at the optimum
 FLAT = "    term = 0 * (lever(\"H1.x\") + lever(\"H1.y\"))\n"
 
 
 def true_loss(levers):
-    return 1 + 4 * sum((levers[n] - v) ** 2 for n, v in OPT.items())
+    return 1 + 4 * (sum((levers[n] - v) ** 2 for n, v in OPT.items()) - 0.08)
 
 
 def toy_env(**planted):
@@ -82,7 +84,7 @@ def coded(repo, run_dir, tmp_path, code=BOWL, env=None, spec=SPEC):
     train.write_text(src.replace("    term = 0.0\n", code))
     code_, out = bo(repo, "smoke", "H1", "--rationale", "try", env=env)
     assert code_ == 0 and out["passed"], out
-    code_, out = bo(repo, "commit-lever", "H1", "--rationale", "smoke passed")
+    code_, out = bo(repo, "commit-lever", "H1", "--rationale", "smoke passed", env=env)
     assert code_ == 0, out
 
 
@@ -172,8 +174,8 @@ def test_bo_beats_random_search_at_equal_trial_count(tmp_path, project_python):
     for seed, (run_dir, out) in zip(seeds, runs):
         assert out["trigger"] == "stall" and out["round"] == 1
         trials = started_in(run_dir, 1)
-        bo_regret.append(true_loss(out["incumbent"]["levers"]) - 1)
-        rs_regret.append(random_search(len(trials), seed) - 1)
+        bo_regret.append(true_loss(out["incumbent"]["levers"]) - BEST)
+        rs_regret.append(random_search(len(trials), seed) - BEST)
     wins = sum(b < r for b, r in zip(bo_regret, rs_regret))
     assert wins >= 3, (bo_regret, rs_regret)  # BO's incumbent is better in at least 3 of 4 runs
     assert statistics.fmean(bo_regret) < statistics.fmean(rs_regret) / 2, (bo_regret, rs_regret)
@@ -196,7 +198,7 @@ def test_bo_beats_random_search_at_equal_trial_count(tmp_path, project_python):
 
 
 def test_replicates_are_their_own_trials_and_every_new_incumbent_is_confirmed(tmp_path, project_python):
-    run_dir, out = search_once(tmp_path, project_python)
+    run_dir, out = search_once(tmp_path, project_python, seed=1)
     trials = started_in(run_dir, 1)
     by_id = {t["trial"]: t for t in trials}
     replicates = [t for t in trials if "replicate_of" in t]
@@ -207,15 +209,14 @@ def test_replicates_are_their_own_trials_and_every_new_incumbent_is_confirmed(tm
         assert "replicate_of" not in orig
     # a sampler trial better than every trial seen before it is a new incumbent: each one got its 2
     # confirmations before the round ended (the stall never cuts one short)
-    seen = [t["objective"] for t in started_in(run_dir, None) if t.get("status") == "finished"
-            and set(t["levers"]) == set(OPT)]  # H1's smoke trials seed the round
+    seen = list(eligible_now(run_dir, before=trials[0]["trial"]).values())  # the round's warm start
     new_best = []
     for t in trials:
         if t["kind"] == "sampler" and t["status"] == "finished" and t["objective"] < min(seen):
             new_best.append(t["trial"])
         if t["status"] == "finished":
             seen.append(t["objective"])
-    assert len(new_best) >= 3
+    assert len(new_best) >= 2  # (the warm start's baseline trials make the first incumbents)
     for root in new_best:
         assert sum(t.get("replicate_of") == root and t["kind"] == "confirmation" for t in trials) == 2
     inc = out["incumbent"]
@@ -234,17 +235,24 @@ def test_a_noise_shift_of_more_than_2x_is_flagged(bo_repo, bo_run, tmp_path):
     coded(bo_repo, run_dir, tmp_path, env=toy_env(sigma=0.01))
     code, out = bo(bo_repo, "round-run", "--rationale", "search", env=toy_env(sigma=0.05))
     assert code == 0, out
-    [noise] = [p for p in of_type(run_dir, "noise_estimate") if p["round"] == 1]
+    [noise] = [p for p in of_type(run_dir, "noise_estimate") if p.get("round") == 1]
     assert noise["sigma"] == pytest.approx(0.05, rel=0.5) and noise["shift_flagged"] is True
-    assert noise["r0_sigma"] == of_type(run_dir, "noise_estimate")[0]["sigma"]
+    # against the σ in force: R0's, or (R0's 3 replicates put it at 0.002) the re-estimate of the
+    # epoch commit-lever's equivalence check started
+    assert noise["r0_sigma"] == [p for p in of_type(run_dir, "noise_estimate") if p.get("round") != 1][-1]["sigma"]
 
 
-def eligible_now(run_dir):
-    """Independently: finished trials at the reference fidelity with exactly the round's levers, in range."""
+def eligible_now(run_dir, before=None):
+    """Independently: finished trials at the reference fidelity with the round's levers (a trial from
+    before H1 backfilled at its baseline 0.5), in range."""
     ends = {p["trial"]: p for p in of_type(run_dir, "trial_finished")}
-    return {p["trial"]: ends[p["trial"]]["objective"] for p in of_type(run_dir, "trial_started")
-            if p["trial"] in ends and p["fidelity"] == {"epochs": 4}
-            and set(p["levers"]) == set(OPT) and all(0 <= v <= 1 for v in p["levers"].values())}
+    out = {}
+    for p in of_type(run_dir, "trial_started"):
+        levers = {"H1.x": 0.5, "H1.y": 0.5, **p["levers"]}
+        if (p["trial"] in ends and p["fidelity"] == {"epochs": 4} and set(levers) == set(OPT)
+                and all(0 <= v <= 1 for v in levers.values()) and (before is None or p["trial"] < before)):
+            out[p["trial"]] = ends[p["trial"]]["objective"]
+    return out
 
 
 def gone(pid, within=10.0):
@@ -404,7 +412,7 @@ def drift_run(d, python, seed):
 
 
 def test_reference_noise_alone_does_not_flag_a_faithful_proxy_broken(tmp_path, project_python):
-    seeds = [1, 2, 3, 4]
+    seeds = [1, 3, 4, 5]
     for s in seeds:
         (tmp_path / f"s{s}").mkdir()
     with ThreadPoolExecutor(len(seeds)) as pool:

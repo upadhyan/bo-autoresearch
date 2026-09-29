@@ -56,11 +56,11 @@ def repo(tmp_path):
 
 
 def write_run_yaml(path, python, extra=""):
-    path.write_text(
-        "objective: loss\n"
-        "direction: minimize\n"
-        f"python: {python}\n" + (extra or "budget_s: 3600\nreference_fidelity: {epochs: 4}\n")
-    )
+    extra = extra or "budget_s: 3600\nreference_fidelity: {epochs: 4}\n"
+    # a fixed seed unless the test sets its own: runs (and their equivalence checks, which fail by
+    # chance at 2σ) replay the same way every time
+    path.write_text("objective: loss\ndirection: minimize\n" f"python: {python}\n" + extra
+                    + ("" if "seed:" in extra else "seed: 0\n"))
     return path
 
 

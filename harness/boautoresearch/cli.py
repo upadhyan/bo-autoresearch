@@ -255,7 +255,7 @@ def _trial(run_dir: Path, con, a, kind: str, levers: dict, fidelity: dict, **ext
                       f"{estimate:.1f}s but {remaining:.1f}s of the budget remain")
     worktree = run_dir / "worktree"
     trial = {"trial": n, "kind": kind, "levers": levers, "fidelity": fidelity,
-             "seed": _rng(run, n).getrandbits(31),
+             "seed": _rng(run, n).getrandbits(31), "epoch": st["epoch"]["epoch"],
              "commit": _git(worktree, "rev-parse", "HEAD"),
              "artifact_dir": f"artifacts/trial-{n}", **extra}
     started = {**trial, "pid": os.getpid()}  # a dead pid on a running trial means it was abandoned
@@ -372,6 +372,9 @@ def _propose(run_dir: Path, con, spec: dict, a) -> str:
     taken += [int(m[1]) for k in _baseline(run_dir) if (m := re.match(r"H(\d+)\.", k))]
     n = max(taken, default=0) + 1
     spec = {**spec, "levers": {f"H{n}.{name}": lv for name, lv in spec["levers"].items()}}
+    if "merges" in spec:
+        spec["merges"] = {**spec["merges"],
+                          "mapping": {f"H{n}.{k}": r for k, r in spec["merges"]["mapping"].items()}}
     hid = f"H{n}.v1"
     elog.append(con, "hypothesis_proposed", a.actor, {
         "rationale": a.rationale, "id": hid, "number": n, "version": 1, "spec": spec})
@@ -428,6 +431,7 @@ def cmd_commit_lever(a) -> dict:
     tree = _worktree_tree(worktree)
     if tree != h["smoke"]["tree"]:
         raise Refused(f"the worktree changed since {h['id']}'s passing smoke: smoke it again")
+    _change_allowed(st, _git(worktree, "diff-tree", "-r", "-z", "--name-only", "HEAD", tree).split("\0"))
 
     def show(rev_path: str):
         p = subprocess.run(["git", "show", rev_path], cwd=worktree, capture_output=True, text=True)
@@ -446,14 +450,214 @@ def cmd_commit_lever(a) -> dict:
     # the levers.json H was smoked with (the project's own levers kept), plus H's baselines
     baselines = {**_baseline(run_dir), **{n: lv["baseline"] for n, lv in h["spec"]["levers"].items()}}
     (worktree / "levers.json").write_text(json.dumps(baselines, indent=2, sort_keys=True) + "\n")
-    _git(worktree, "add", "-A")
-    _git(worktree, "-c", "user.name=boautoresearch", "-c", "user.email=harness@boautoresearch",
-         "commit", "-q", "--no-verify", "-m", f"{h['id']}: {h['spec']['title']}")
-    sha = _git(worktree, "rev-parse", "HEAD")
+    sha = _commit(worktree, f"{h['id']}: {h['spec']['title']}")
     elog.append(con, "lever_committed", a.actor,
                 {"rationale": a.rationale, "id": h["id"], "commit": sha, "levers": baselines})
+    # new lever code at its baseline should pass trivially: the check catches a baseline that
+    # isn't really a no-op
+    return {"hypothesis": h["id"], "commit": sha, **_after_change(run_dir, con, sha, "lever_committed")}
+
+
+def _commit(worktree: Path, message: str) -> str:
+    """A harness-made commit of everything in the worktree."""
+    _git(worktree, "add", "-A")
+    _git(worktree, "-c", "user.name=boautoresearch", "-c", "user.email=harness@boautoresearch",
+         "commit", "-q", "--no-verify", "-m", message)
+    return _git(worktree, "rev-parse", "HEAD")
+
+
+def _between_rounds(st: dict, what: str) -> None:
+    if any(r["ended"] is None for r in st["rounds"].values()):  # _open_run settled the dead ones
+        raise Refused(f"a round is running: {what} only between rounds (a round runs on one commit "
+                      "and one search space); do it once the round has ended")
+
+
+def _change_allowed(st: dict, paths: list[str]) -> None:
+    """Code changes only between rounds, and never on protected paths."""
+    _between_rounds(st, "code changes")
+    # #31 adds here: run.yaml protected_paths globs and the hash-manifest check
+    if hit := sorted({st["run"]["runner"], "levers.json"} & set(paths)):
+        raise Refused(f"the change touches protected paths {hit}: the harness owns them")
+
+
+def cmd_commit_change(a) -> dict:
+    """A change that isn't lever code (a refactor, a crash fix), committed with its reason."""
+    run_dir, con = _open_run()
+    st, worktree = elog.load(con), run_dir / "worktree"
+    if not a.reason.strip():
+        raise Refused("commit-change needs a --reason")
+    tree = _worktree_tree(worktree)
+    paths = [p for p in _git(worktree, "diff-tree", "-r", "-z", "--name-only", "HEAD", tree).split("\0") if p]
+    if not paths:
+        raise Refused("nothing to commit: the worktree has no changes")
+    _change_allowed(st, paths)
+    sha = _commit(worktree, f"commit-change: {a.reason}")
+    elog.append(con, "commit_change", a.actor, {"rationale": a.rationale, "reason": a.reason,
+                                                "commit": sha, "paths": paths, "breaking": a.breaking})
+    return {"commit": sha, **_after_change(run_dir, con, sha, "commit_change", a.breaking)}
+
+
+FREEZE_FILE = "requirements-freeze.txt"  # the run venv's exact freeze, committed in the worktree
+
+
+def cmd_add_dependency(a) -> dict:
+    """A new requirement, installed into the run venv only (never the user's environment); the
+    venv's updated freeze is committed."""
+    run_dir, con = _open_run()
+    st, worktree = elog.load(con), run_dir / "worktree"
+    if not a.requirement.strip() or a.requirement.startswith("-"):
+        raise Refused("add-dependency takes one requirement (a name, specifier, path or URL), not options")
+    if _git(worktree, "status", "--porcelain"):
+        raise Refused("the worktree has uncommitted changes: commit them with commit-change first")
+    _change_allowed(st, [FREEZE_FILE])
+    python = run_dir / "venv" / "bin" / "python"
+    uv = shutil.which("uv")
+    cmd = ([uv, "pip", "install", "-q", "--python", str(python), a.requirement] if uv else
+           [str(python), "-m", "pip", "install", "-q", "--disable-pip-version-check", a.requirement])
+    p = subprocess.run(cmd, capture_output=True, text=True)
+    if p.returncode:
+        raise Refused(f"installing {a.requirement} into the run venv failed: {p.stderr.strip()}")
+    # ponytail: writes its own freeze file, not the project's lock file (uv.lock, poetry.lock);
+    # update that one when a project needs it
+    freeze = [r for r in _freeze(str(python)) if re.split(r"[=<>@ ]", r)[0].lower() != "boautoresearch"]
+    (worktree / FREEZE_FILE).write_text("".join(f"{r}\n" for r in freeze))
+    if not _git(worktree, "status", "--porcelain"):
+        raise Refused(f"{a.requirement} is already in the run venv: nothing changed")
+    sha = _commit(worktree, f"add-dependency: {a.requirement}")
+    elog.append(con, "dependency_added", a.actor, {"rationale": a.rationale, "requirement": a.requirement,
+                                                   "commit": sha, "freeze": freeze})
+    return {"requirement": a.requirement, "commit": sha,
+            **_after_change(run_dir, con, sha, "dependency_added")}
+
+
+def cmd_narrow(a) -> dict:
+    """Shrink a searched lever's range on evidence (its latest verdict record's gates passed). The
+    hypothesis and its reject conditions stay; the next round searches the new range, and trials
+    outside it drop out of the warm start (never clipped)."""
+    run_dir, con = _open_run()
+    st = elog.load(con)
+    _between_rounds(st, "narrowing happens")
+    h = _hypothesis(st, a.hypothesis)
+    if h["status"] not in ("active", "retained"):
+        raise Refused(f"{h['id']} is {h['status']}: only a hypothesis in the search can be narrowed")
+    if a.lever not in _group(h):
+        raise Refused(f"{a.lever} is not one of {h['id']}'s searched levers {_group(h)}")
+    last = _latest(h, st)
+    need = f"narrowing {h['id']} needs its latest verdict record's gates to pass (the importance gates and the surrogate fit)"
+    if last is None:
+        raise Refused(f"{need}: it has no verdict record yet")
+    if failed := [g for g, v in last["gates"].items() if not v["passed"]]:
+        raise Refused(f"{need}: {last['id']} failed {failed}")
+    lv = h["spec"]["levers"][a.lever]
+    if lv["kind"] in hypotheses.GRADED:
+        if a.low is None or a.high is None or a.options is not None:
+            raise Refused(f"{a.lever} is {lv['kind']}: narrow it with --low and --high")
+        low, high = a.low, a.high
+        if lv["kind"] == "int":
+            if not (low.is_integer() and high.is_integer()):
+                raise Refused(f"{a.lever} is an int lever: --low and --high must be integers")
+            low, high = int(low), int(high)
+        before, after = {"low": lv["low"], "high": lv["high"]}, {"low": low, "high": high}
+        if not lv["low"] <= low < high <= lv["high"] or after == before:
+            raise Refused(f"[{low}, {high}] must be a smaller range inside {a.lever}'s [{lv['low']}, {lv['high']}]")
+        if not low <= lv["baseline"] <= high:
+            raise Refused(f"the baseline {lv['baseline']} must stay inside the narrowed range")
+    elif lv["kind"] == "categorical":
+        try:
+            opts = json.loads(a.options) if a.options is not None else None
+        except json.JSONDecodeError as e:
+            raise Refused(f"--options must be a JSON list: {e}")
+        if not isinstance(opts, list) or a.low is not None or a.high is not None:
+            raise Refused(f"{a.lever} is categorical: narrow it with --options '[...]'")
+        before, after = {"options": lv["options"]}, {"options": opts}
+        if (len(opts) < 2 or len(opts) >= len(lv["options"])
+                or not all(bo_study.in_range(o, lv) for o in opts) or len({json.dumps(o) for o in opts}) < len(opts)):
+            raise Refused(f"--options must keep at least 2 but fewer than all of {lv['options']}")
+        if not bo_study.in_range(lv["baseline"], {"kind": "categorical", "options": opts}):
+            raise Refused(f"the baseline {lv['baseline']!r} must stay among the options")
+    else:
+        raise Refused(f"{a.lever} is a bool lever: it has nothing to narrow")
+    elog.append(con, "narrowed", a.actor, {"rationale": a.rationale, "id": h["id"], "lever": a.lever,
+                                           "before": before, "after": after, "verdict": last["id"]})
     _regenerate(run_dir, con)
-    return {"hypothesis": h["id"], "commit": sha}
+    return {"hypothesis": h["id"], "lever": a.lever, "range": after, **_status(elog.load(con))}
+
+
+def _after_change(run_dir: Path, con, sha: str, change: str, breaking: bool = False) -> dict:
+    """Every code change: the equivalence check, and a new epoch when it fails or the user declared
+    the change breaking. Before the calibration round has measured anything there is nothing to
+    compare, so neither."""
+    check = epoch = None
+    if elog.load(con)["r0_complete"]:
+        if not breaking:
+            check = _equivalence_check(run_dir, con, sha, change)
+        if breaking or (check and check["passed"] is False):  # None: the budget refused the check
+            epoch = _new_epoch(run_dir, con, sha, change, breaking)
+    _regenerate(run_dir, con)
+    st = elog.load(con)
+    return {"equivalence_check": check, "epoch_started": epoch, **_status(st)}
+
+
+def _equivalence_check(run_dir: Path, con, sha: str, change: str) -> dict:
+    """The incumbent and the baseline, 2 replicates each at the current fidelity on the new commit,
+    against their logged means: within 2σ (a float tolerance when σ = 0)."""
+    st = elog.load(con)
+    fidelity, baseline = st["fidelity"]["fidelity"], _baseline(run_dir)
+    sign = 1 if st["run"]["direction"] == "minimize" else -1
+    trials = _eligibility(st, _space(_in_search(st)), baseline, fidelity)(st["trials"])
+    inc = bo_study.incumbent(trials, sign, CONFIRMATIONS if st["noise"]["replication"] else 0)
+    configs = [("baseline", baseline)]
+    if inc and {**baseline, **inc["levers"]} != baseline:
+        configs.append(("incumbent", {**baseline, **inc["levers"]}))
+    sigma = _sigma(st, fidelity)
+    logged = {name: [t["objective"] for t in trials if {**baseline, **t["levers"]} == levers]
+              for name, levers in configs}
+    rows, refused = [], None
+    for name, levers in configs:
+        runs = []
+        try:
+            for _ in range(2):
+                runs.append(_trial(run_dir, con, None, "equivalence", levers, fidelity,
+                                   equivalence_of=name))
+        except BudgetRefused as e:  # the run can't go on anyway: no round fits either
+            refused = str(e)
+            break
+        ys = [t["objective"] for t in runs if t["status"] == "finished"]
+        before = statistics.fmean(logged[name]) if logged[name] else None
+        mean = statistics.fmean(ys) if len(ys) == len(runs) else None
+        tol = 2 * sigma + 1e-9 * max(1.0, abs(before or 0.0))
+        # nothing logged at this config yet: nothing it could disagree with
+        passed = mean is not None and (before is None or abs(mean - before) <= tol)
+        rows.append({"config": name, "levers": levers, "logged_mean": before, "logged_n": len(logged[name]),
+                     "trials": [t["trial"] for t in runs], "mean": mean, "tolerance": tol,
+                     "passed": passed})
+    payload = {"commit": sha, "change": change, "fidelity": fidelity, "sigma": sigma, "configs": rows,
+               "passed": None if refused else all(r["passed"] for r in rows), "refused": refused}
+    elog.append(con, "equivalence_check", "harness", payload)
+    return payload
+
+
+def _new_epoch(run_dir: Path, con, sha: str, change: str, breaking: bool) -> dict:
+    """Earlier trials become telemetry; σ is re-estimated from baseline replicates in the new epoch
+    (burn-in restarts, since only this epoch's trials are eligible)."""
+    st = elog.load(con)
+    run, fidelity, baseline = st["run"], st["fidelity"]["fidelity"], _baseline(run_dir)
+    payload = {"epoch": st["epoch"]["epoch"] + 1, "round": max(st["rounds"]) + 1, "commit": sha,
+               "change": change, "breaking": breaking}
+    elog.append(con, "epoch_started", "harness", payload)
+    done = []
+    try:
+        for _ in range(1 if run["deterministic"] else run["replicates_k"]):
+            done.append(_trial(run_dir, con, None, "baseline", baseline, fidelity))
+    except BudgetRefused:
+        pass  # σ stays unmeasured in this epoch (None below); the budget ends the run
+    ys = [t["objective"] for t in done if t["status"] == "finished"]
+    sigma = 0.0 if run["deterministic"] else calibration.sigma(ys) if len(ys) >= 2 else None
+    elog.append(con, "noise_estimate", "harness", {
+        "epoch": payload["epoch"], "fidelity": fidelity, "sigma": sigma, "n": len(ys),
+        "trials": [t["trial"] for t in done], "mean": statistics.fmean(ys) if ys else None,
+        "previous_sigma": _sigma(st, fidelity)})
+    return payload
 
 
 def cmd_round_run(a) -> dict:
@@ -547,13 +751,11 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
         if h["status"] == "registered":
             elog.append(con, "hypothesis_activated", "harness", {"id": h["id"], "round": r})
 
-    def eligible(trials):
-        return [t for t in trials if bo_study.eligible(t, space, baseline, fidelity)]
-
+    eligible = _eligibility(st, space, baseline, fidelity)
     seeds = eligible(st["trials"])
     elog.append(con, "round_started", a.actor, {
         "rationale": a.rationale, "round": r, "commit": _git(run_dir / "worktree", "rev-parse", "HEAD"),
-        "fidelity": fidelity, "epoch": 0, "search_space": space, "hypotheses": [h["id"] for h in selected],
+        "fidelity": fidelity, "epoch": st["epoch"]["epoch"], "search_space": space, "hypotheses": [h["id"] for h in selected],
         "pid": os.getpid(), "cap_s": cap, "seeded": [t["trial"] for t in seeds]})
     rng = _rng(run, f"R{r}")
     study = bo_study.Study(run_dir / "studies.db", run["direction"], space, seeds, rng.getrandbits(31))
@@ -598,8 +800,9 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
                     # share); pick by posterior overlap if replicates are wasted on settled configs
                     top = bo_study.ranked(eligible(st["trials"]), sign)[:3]
                     root, kind = min(top, key=lambda c: c["replicates"])["trial"], "replicate"
-                levers = next(t["levers"] for t in st["trials"] if t["trial"] == root)
-                t = _trial(run_dir, con, None, kind, levers, fidelity, round=r, replicate_of=root)
+                levers = next(t["levers"] for t in eligible(st["trials"]) if t["trial"] == root)
+                t = _trial(run_dir, con, None, kind, {**baseline, **levers}, fidelity, round=r,
+                           replicate_of=root)
                 if t["status"] == "finished":
                     study.add(t)
             else:
@@ -628,14 +831,31 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
             "verdicts": _round_verdicts(st, r), **_status(st)}
 
 
+def _eligibility(st: dict, space: dict, baseline: dict, fidelity: dict):
+    """The round's warm start: its eligible trials, rewritten into its levers (study.eligible)."""
+    hyps = st["hypotheses"].values()
+    dropped = frozenset(n for h in hyps for n in h["frozen"]) | frozenset(
+        n for h in hyps if h["status"] == "rejected" and h["condition"] == "irrelevant"
+        for n in h["spec"]["levers"])
+
+    merges = {n: rule for h in hyps for n, rule in h["spec"].get("merges", {}).get("mapping", {}).items()
+              if n in space}
+    epoch = st["epoch"]["epoch"]
+
+    def eligible(trials: list[dict]) -> list[dict]:
+        return [m for t in trials if (m := bo_study.eligible(t, space, baseline, fidelity, epoch,
+                                                             dropped, merges))]
+    return eligible
+
+
 def _in_search(st: dict) -> list[dict]:
     return [h for h in st["hypotheses"].values() if h["status"] in ("active", "retained")]
 
 
 def _latest(h: dict, st: dict) -> dict | None:
     """The hypothesis's last verdict record on its current group at the run's fidelity."""
-    past = [v for v in h["verdicts"]
-            if v["fidelity"] == st["fidelity"]["fidelity"] and v["group"] == _group(h)]
+    past = [v for v in h["verdicts"] if v["fidelity"] == st["fidelity"]["fidelity"]
+            and v["group"] == _group(h) and v["round"] >= st["epoch"]["round"]]
     return past[-1] if past else None
 
 
@@ -660,8 +880,7 @@ def _verdict_checks(con, st: dict, r: int, space: dict, baseline: dict, eligible
     trials. Logs and returns the verdict records."""
     run, delta, fid = st["run"], st["delta"], st["fidelity"]
     at_proxy = fid["fidelity"] != run["reference_fidelity"]
-    sigma = next((x["sigma"] for x in st["noise"]["rungs"] if x["fidelity"] == fid["fidelity"]),
-                 st["noise"]["sigma"])
+    sigma = _sigma(st, fid["fidelity"])
     trials = eligible(st["trials"])
     checked = []
     for h in _in_search(st):
@@ -727,6 +946,12 @@ def _verdict_checks(con, st: dict, r: int, space: dict, baseline: dict, eligible
                         {"id": h["id"], "verdict": vid, "reason": reason})
         checked.append(record)
     return checked
+
+
+def _sigma(st: dict, fidelity: dict) -> float:
+    """σ at this fidelity: the calibration round's, or the current epoch's re-estimate."""
+    return next((x["sigma"] for x in st["noise"]["rungs"] if x["fidelity"] == fidelity),
+                st["noise"]["sigma"])
 
 
 def _against(lv: dict, best) -> bool:
@@ -857,7 +1082,8 @@ def _drift_check(run_dir: Path, con, r: int, inc: dict, eligible, sign: int) -> 
     other = _rng(st["run"], f"R{r}", "drift").choice(others)
     proxy = {c["trial"]: c["mean"] for c in bo_study.ranked(eligible(st["trials"]), sign)}
     pair = [(inc["trial"], inc["levers"]), (other["trial"], other["levers"])]
-    runs = [_trial(run_dir, con, None, "drift", levers, ref, round=r, drift_of=root)
+    baseline = _baseline(run_dir)
+    runs = [_trial(run_dir, con, None, "drift", {**baseline, **levers}, ref, round=r, drift_of=root)
             for root, levers in pair]
     at_ref = [t.get("objective") for t in runs]
     at_proxy = [proxy[root] for root, _ in pair]
@@ -984,6 +1210,7 @@ def _status(st: dict) -> dict:
             "sigma": st["noise"]["sigma"] if st["noise"] else None,
             "replication": st["noise"]["replication"] if st["noise"] else None,
             "delta": st["delta"], "suggested_delta": _suggested_delta(st), "run_ended": st["run_ended"],
+            "epoch": st["epoch"]["epoch"],
             "hypotheses": [{"id": h["id"], "title": h["spec"]["title"], "status": h["status"],
                             "commit": h["commit"]} for h in st["hypotheses"].values()],
             "next": _next(st)}
@@ -1072,18 +1299,23 @@ def cmd_verdict(a) -> dict:
     h = _hypothesis(st, a.hypothesis)
     out = {"hypothesis": h["id"], "status": h["status"], "records": h["verdicts"]}
     if h["status"] in ("active", "retained"):
-        space, baseline, fidelity = _space(_selected(st)), _baseline(run_dir), st["fidelity"]["fidelity"]
-        fresh = _fresh(st, h, lambda ts: [t for t in ts
-                                          if bo_study.eligible(t, space, baseline, fidelity)])
+        fresh = _fresh(st, h, _next_eligibility(run_dir, st))
         last = _latest(h, st)
         out["verdict"] = last["outcome"] if last else "burn-in"
         out["burn_in"] = {"fresh": len(fresh), **_schedule(h)}
     return out
 
 
+def _next_eligibility(run_dir: Path, st: dict):
+    """The next round's warm start: its selected hypotheses' levers at the run's fidelity."""
+    return _eligibility(st, _space(_selected(st)), _baseline(run_dir), st["fidelity"]["fidelity"])
+
+
 def cmd_trials(a) -> dict:
-    _, con = _open_run(recover=False)
-    return {"trials": elog.load(con)["trials"]}
+    """Every logged trial; --eligible: the next round's warm start, rewritten into its levers."""
+    run_dir, con = _open_run(recover=False)
+    st = elog.load(con)
+    return {"trials": _next_eligibility(run_dir, st)(st["trials"]) if a.eligible else st["trials"]}
 
 
 def _regenerate(run_dir: Path, con) -> None:
@@ -1121,6 +1353,16 @@ def _parser() -> argparse.ArgumentParser:
     action("register", cmd_register).add_argument("hypothesis")
     action("commit-lever", cmd_commit_lever).add_argument("hypothesis")
     action("round-run", cmd_round_run)
+    c = action("commit-change", cmd_commit_change)
+    c.add_argument("--reason", required=True)
+    c.add_argument("--breaking", action="store_true")
+    action("add-dependency", cmd_add_dependency).add_argument("requirement")
+    n = action("narrow", cmd_narrow)
+    n.add_argument("hypothesis")
+    n.add_argument("--lever", required=True)
+    n.add_argument("--low", type=float)
+    n.add_argument("--high", type=float)
+    n.add_argument("--options")
     action("accept-proxy", cmd_accept_proxy).add_argument("--fidelity", required=True)
     action("set-delta", cmd_set_delta).add_argument("value", type=float)
     r = action("record", cmd_record)
@@ -1132,7 +1374,9 @@ def _parser() -> argparse.ArgumentParser:
     c.add_argument("agent_id")
     c.set_defaults(fn=cmd_check_recorded, action=False)
     sub.add_parser("status").set_defaults(fn=cmd_status, action=False)
-    sub.add_parser("trials").set_defaults(fn=cmd_trials, action=False)
+    t = sub.add_parser("trials")
+    t.add_argument("--eligible", action="store_true")
+    t.set_defaults(fn=cmd_trials, action=False)
     v = sub.add_parser("verdict")
     v.add_argument("hypothesis")
     v.set_defaults(fn=cmd_verdict, action=False)
