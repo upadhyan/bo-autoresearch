@@ -701,3 +701,16 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   own shell and never exited (BSD pgrep hid it on macOS); the full `BO` path also keeps one run's wait off another
   run's round (the 7-run matrix). Headless start verified live: `claude -p "/boautoresearch:start"` on the dogfood toy
   reaches R1 unprompted (scripted ≈5.5 min, free ≈17 min).
+- #34 follow-up (orchestrator raw reads, no parser): the orchestrator's Bash may compute no words (`$(`, backticks,
+  `$'`, `<(`/`>(` outside a trailing heredoc → `checks.COMPUTED`); a command not only `boautoresearch`/`cd` may not
+  name `log.db`/`artifacts/trial-` in its raw text (inline code, heredoc bodies) or its shlex words; and every word,
+  in Bash or as a Read/Grep/Glob path, is refused if as a glob (braces, `$VAR` glued to text → `*`; `*` crosses `/`)
+  resolved from its cwd it fnmatches a `checks.raw_paths` entry (bo dir, run dirs, log.db*, artifacts, a stand-in
+  trial-0, every file under artifacts). Names over parsing: every route must carry one. Known false positives
+  (orchestrator only): a lone `*` word (`ls *`, `-m '* fix'`), a user file named log.db. Residual: names built in code
+  (`'lo'+'g.db'`), a script file outside the repo, recursive reads naming nothing (`grep -r x .`).
+- #37 follow-up (distilled branch, dynamic loads): `harness_imports` returns a Counter of sites (static harness imports,
+  `import builtins`, loaders `__import__`/`import_module`/`run_module`/`run_path`/`exec_module`/`load_module`, bare
+  `exec`/`eval`, `builtins|sys.<exec|eval|modules|__import__>`, any str matching `\bboautoresearch\b`); refused when
+  added against the base (Counter difference). Not "verify with the harness unimportable": the harness runner imports
+  it in-process. Residual: a subprocess, a .pth file.
