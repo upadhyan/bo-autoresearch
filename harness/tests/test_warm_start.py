@@ -422,6 +422,87 @@ def pip_freeze(python):
     return subprocess.run([str(python), "-m", "pip", "freeze"], capture_output=True, text=True).stdout
 
 
+PYPROJECT = '[project]\nname = "toy"\nversion = "0.1"\nrequires-python = ">=3.10"\ndependencies = []\n'
+
+
+def locked(tmp_path, python, lock):
+    """toy_bo as a project locked by `lock` (uv.lock or poetry.lock), after R0."""
+    repo = make_repo(tmp_path)
+    (repo / "pyproject.toml").write_text(PYPROJECT)
+    if lock == "uv.lock":
+        subprocess.run(["uv", "lock", "-q", "--offline"], cwd=repo, check=True)
+    else:
+        (repo / lock).write_text("# locked\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-q", "-m", "locked")
+    run_dir = init(repo, python, BASE + "delta: 0.1\nseed: 1\n")
+    assert round_run(repo, "--rationale", "calibrate", env=toy_env(sigma=SIGMA))[0] == 0
+    return repo, run_dir
+
+
+def test_add_dependency_in_a_uv_project_updates_its_lock_file(tmp_path, project_python):
+    repo, run_dir = locked(tmp_path, project_python, "uv.lock")
+    worktree, whl = run_dir / "worktree", wheel(tmp_path)
+    user_env = pip_freeze(project_python)
+    code, out = bo(repo, "add-dependency", str(whl), "--rationale", "the trainer needs toydep",
+                   env={**toy_env(sigma=SIGMA), "UV_OFFLINE": "1"})
+    assert code == 0, out
+    assert imports_toydep(run_dir / "venv" / "bin" / "python")
+    assert not imports_toydep(project_python) and pip_freeze(project_python) == user_env
+    head = git(worktree, "rev-parse", "HEAD")
+    assert out["commit"] == head and git(worktree, "status", "--porcelain") == ""
+    assert sorted(git(worktree, "diff-tree", "--no-commit-id", "--name-only", "-r", head).split()) == [
+        "pyproject.toml", "uv.lock"]  # the project's own lock, not a freeze file of the harness's
+    assert "toydep" in git(worktree, "show", "HEAD:pyproject.toml")
+    assert 'name = "toydep"' in git(worktree, "show", "HEAD:uv.lock")
+    [dep] = of_type(run_dir, "dependency_added")
+    assert dep["lock_file"] == "uv.lock" and dep["commit"] == head
+    assert any(r.startswith("toydep") for r in dep["freeze"])
+    assert out["equivalence_check"]["passed"] is True
+    code, out = bo(repo, "add-dependency", str(whl), "--rationale", "again", env={**os.environ, "UV_OFFLINE": "1"})
+    assert code == 1 and "already" in out["reason"]
+
+
+def fake_poetry(d, fail=False):
+    """A `poetry` on PATH that logs its arguments and adds the requirement to poetry.lock (or fails)."""
+    bin_ = d / "bin"
+    bin_.mkdir()
+    f = bin_ / "poetry"
+    f.write_text(f"#!{sys.executable}\nimport sys\nfrom pathlib import Path\n"
+                 f"with open({str(d / 'poetry-args.txt')!r}, 'a') as log:\n    log.write(' '.join(sys.argv[1:]) + '\\n')\n"
+                 + ("sys.exit('poetry: resolution failed')\n" if fail else
+                    "Path('poetry.lock').write_text(Path('poetry.lock').read_text() + sys.argv[-1] + '\\n')\n"))
+    f.chmod(0o755)
+    return {**toy_env(sigma=SIGMA), "PATH": f"{bin_}:{os.environ['PATH']}"}
+
+
+def test_add_dependency_in_a_poetry_project_updates_its_lock_file_without_installing_through_poetry(
+        tmp_path, project_python):
+    repo, run_dir = locked(tmp_path, project_python, "poetry.lock")
+    worktree, whl = run_dir / "worktree", wheel(tmp_path)
+    code, out = bo(repo, "add-dependency", str(whl), "--rationale", "the trainer needs toydep",
+                   env=fake_poetry(tmp_path))
+    assert code == 0, out
+    # poetry only locks; the harness installs into the run venv
+    assert (tmp_path / "poetry-args.txt").read_text() == f"add --lock {whl}\n"
+    assert imports_toydep(run_dir / "venv" / "bin" / "python")
+    assert git(worktree, "show", "HEAD:poetry.lock") == f"# locked\n{whl}"
+    assert git(worktree, "status", "--porcelain") == ""
+    assert of_type(run_dir, "dependency_added")[0]["lock_file"] == "poetry.lock"
+
+
+def test_a_failed_lock_update_installs_nothing_and_leaves_the_worktree_as_it_was(tmp_path, project_python):
+    repo, run_dir = locked(tmp_path, project_python, "poetry.lock")
+    worktree, whl = run_dir / "worktree", wheel(tmp_path)
+    head = git(worktree, "rev-parse", "HEAD")
+    code, out = bo(repo, "add-dependency", str(whl), "--rationale", "the trainer needs toydep",
+                   env=fake_poetry(tmp_path, fail=True))
+    assert code == 1 and "poetry.lock" in out["reason"] and "resolution failed" in out["reason"]
+    assert not imports_toydep(run_dir / "venv" / "bin" / "python")
+    assert git(worktree, "rev-parse", "HEAD") == head and git(worktree, "status", "--porcelain") == ""
+    assert not of_type(run_dir, "dependency_added")
+
+
 def test_add_dependency_installs_only_into_the_run_venv_and_commits_its_freeze(tmp_path, project_python):
     repo, run_dir = calibrated(tmp_path, project_python)
     worktree, whl = run_dir / "worktree", wheel(tmp_path)

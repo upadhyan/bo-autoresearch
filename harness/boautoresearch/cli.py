@@ -1329,32 +1329,55 @@ def cmd_commit_change(a) -> dict:
 FREEZE_FILE = "requirements-freeze.txt"  # the run venv's exact freeze, committed in the worktree
 
 
+def _lock_command(worktree: Path, python: Path, requirement: str) -> tuple[str, list[str]] | None:
+    """The project's own lock file and the command that adds `requirement` to it (and to
+    pyproject.toml) without installing anything; None when the project locks with neither uv nor poetry."""
+    if (worktree / "uv.lock").exists():
+        return "uv.lock", ["uv", "add", "-q", "--no-sync", "--python", str(python), requirement]
+    if (worktree / "poetry.lock").exists():
+        return "poetry.lock", ["poetry", "add", "--lock", requirement]
+    return None
+
+
 def cmd_add_dependency(a) -> dict:
-    """A new requirement, installed into the run venv only (never the user's environment); the
-    venv's updated freeze is committed."""
+    """A new requirement, installed into the run venv only (never the user's environment). A uv or
+    poetry project's pyproject.toml and lock file are updated (the tool only locks: the harness
+    installs); any other project commits the venv's freeze instead."""
     run_dir, con = _open_run()
     st, worktree = elog.load(con), run_dir / "worktree"
     if not a.requirement.strip() or a.requirement.startswith("-"):
         raise Refused("add-dependency takes one requirement (a name, specifier, path or URL), not options")
     if _git(worktree, "status", "--porcelain"):
         raise Refused("the worktree has uncommitted changes: commit them with commit-change first")
-    _change_allowed(run_dir, st, [FREEZE_FILE])
     python = run_dir / "venv" / "bin" / "python"
+    # a local path is the caller's: the lock tool runs in the worktree
+    req = str(Path(a.requirement).resolve()) if Path(a.requirement).exists() else a.requirement
+    lock = _lock_command(worktree, python, req)
+    _change_allowed(run_dir, st, ["pyproject.toml", lock[0]] if lock else [FREEZE_FILE])
+    if lock:  # first, so a failed resolution installs nothing
+        try:
+            p = subprocess.run(lock[1], cwd=worktree, capture_output=True, text=True)
+        except FileNotFoundError:
+            raise Refused(f"the project locks with {lock[0]}, but {lock[1][0]} is not on PATH")
+        if p.returncode:
+            _git(worktree, "checkout", "--", ".")  # the tree was clean: as it was
+            raise Refused(f"adding {a.requirement} to {lock[0]} failed: {(p.stderr or p.stdout).strip()}")
     uv = shutil.which("uv")
-    cmd = ([uv, "pip", "install", "-q", "--python", str(python), a.requirement] if uv else
-           [str(python), "-m", "pip", "install", "-q", "--disable-pip-version-check", a.requirement])
+    cmd = ([uv, "pip", "install", "-q", "--python", str(python), req] if uv else
+           [str(python), "-m", "pip", "install", "-q", "--disable-pip-version-check", req])
     p = subprocess.run(cmd, capture_output=True, text=True)
     if p.returncode:  # ponytail: trusts the installer to leave the venv as it was on failure
+        _git(worktree, "checkout", "--", ".")
         raise Refused(f"installing {a.requirement} into the run venv failed: {p.stderr.strip()}")
-    # ponytail: writes its own freeze file, not the project's lock file (uv.lock, poetry.lock);
-    # update that one when a project needs it
     freeze = [r for r in _freeze(str(python)) if re.split(r"[=<>@ ]", r)[0].lower() != "boautoresearch"]
-    (worktree / FREEZE_FILE).write_text("".join(f"{r}\n" for r in freeze))
+    if not lock:
+        (worktree / FREEZE_FILE).write_text("".join(f"{r}\n" for r in freeze))
     if not _git(worktree, "status", "--porcelain"):
         raise Refused(f"{a.requirement} is already in the run venv: nothing changed")
     sha = _commit(worktree, f"add-dependency: {a.requirement}")
     elog.append(con, "dependency_added", a.actor, {"rationale": a.rationale, "requirement": a.requirement,
-                                                   "commit": sha, "freeze": freeze})
+                                                   "commit": sha, "freeze": freeze,
+                                                   "lock_file": lock[0] if lock else FREEZE_FILE})
     return {"requirement": a.requirement, "commit": sha,
             **_after_change(run_dir, con, sha, "dependency_added")}
 
