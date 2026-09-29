@@ -195,6 +195,19 @@ def test_a_subagents_record_comes_back_carrying_its_agent_id_and_role(guarded):
                    "boautoresearch record proposal --file p.json --agent-id rr", "the hook adds")
 
 
+def test_a_subagents_record_through_a_shell_variable_is_refused(guarded):
+    """The hook can tag only a literal `boautoresearch record`: through `$BO` the record would land
+    unattributed (as the orchestrator's), and SubagentStop would hold the agent forever."""
+    repo = guarded.parents[1]
+    for agent, cmd in [("boautoresearch:hypothesis-generator",
+                        "BO=/x/venv/bin/boautoresearch; $BO record proposal --file - <<'EOF'\n{}\nEOF"),
+                       ("boautoresearch:registration-reviewer", "\"$BO\" record review --file r.json")]:
+        out = check(repo, "bash", "--agent", agent, "--agent-id", "g1", "--", cmd)
+        assert_blocked(guarded, out, "bash", agent, cmd, "full path")
+    # the orchestrator records as itself, so a variable is fine there
+    assert check(repo, "bash", "--agent", "orchestrator", "--", "$BO record expected --file e.json") == {"allow": True}
+
+
 def test_the_record_rewrite_leaves_the_heredoc_body_alone(guarded):
     cmd = "boautoresearch record narrative --file - <<'EOF'\n{\"text\": \"ran boautoresearch record expected\"}\nEOF"
     out = check(guarded.parents[1], "bash", "--agent", "boautoresearch:round-analyst", "--agent-id", "an1", "--", cmd)

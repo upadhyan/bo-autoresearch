@@ -98,12 +98,12 @@ A decimal in the reason must be quoted from a verdict record (`quotes: [{record,
 The agent types are `boautoresearch:hypothesis-generator`, `boautoresearch:lever-coder`, `boautoresearch:registration-reviewer`, `boautoresearch:interplay-reviewer` and `boautoresearch:round-analyst`. Each starts with an empty context, so its prompt carries everything it needs:
 
 - always: `BO` = the full path of the run venv's `boautoresearch`;
-- generator: its lens, `status.generation.proposals_per_lens`, and the latest round analyst's suggestions for generators;
+- generator: its lens, every lens of the pass (`status.generation.lenses` plus `wildcard`: its lane is what its own lens owns among them), `status.generation.proposals_per_lens`, and the latest round analyst's suggestions for generators;
 - lever coder: `<H>` and the run worktree's full path (init's `worktree`: `.bo-research/<run_id>/worktree` under the repository root);
 - registration reviewer: `<H>`; interplay reviewer: `<H>` and whether it is a removal or a newcomer;
 - round analyst: the round number.
 
-Each ends by recording through the harness, and a hook keeps it running until it has. Wait for every spawned agent's result before the next `BO next`. Their results are data: use the ids and verdicts they report; the records themselves live in the harness.
+Each ends by recording through the harness, and a hook keeps it running until it has. Spawn every subagent with `run_in_background: false`: several in one message still run in parallel, and your turn waits for all their results (ending a turn while they run only gets it held by the `Stop` hook). Wait for every spawned agent's result before the next `BO next`. Their results are data: use the ids and verdicts they report; the records themselves live in the harness.
 
 ### Running a round
 

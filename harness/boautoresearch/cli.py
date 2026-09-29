@@ -934,6 +934,10 @@ def cmd_park(a) -> dict:
         raise Refused(f"{h['id']} is {h['status']}: only a hypothesis still in the loop can be parked")
     if not a.reason.strip():
         raise Refused("park needs a --reason")
+    rung = [e["fidelity"] for e in h["escalations"] if e["step"] == "rung"]
+    if rung and not any(v["fidelity"] == rung[-1] for v in h["verdicts"]):
+        raise Refused(f"{h['id']} was escalated to {json.dumps(rung[-1])} because it couldn't be decided below "
+                      "it: its next round tests it there, and only then may it be parked")
     elog.append(con, "hypothesis_parked", a.actor,
                 {"rationale": a.rationale, "id": h["id"], "reason": a.reason, "from": h["status"]})
     _removal(con, h["id"], "parked", a.reason)  # parking is a removal: it owes an interplay review
@@ -2807,10 +2811,11 @@ def _exhaustion(st: dict) -> dict:
         "revivals_run": not _pending_links(st) and not any(
             "revived_from" in h and h["status"] == "registered" for h in hyps),
         # the latest pass, with no trigger since, left nothing registered (nor undecided); an llm
-        # pass counts once its generators recorded proposals (each proposes at least 2)
+        # pass counts once a generator recorded its proposal (an empty one: nothing new in its lane)
         "final_pass_empty": final is not None and not _generation_due(st) and not any(
             h["status"] == "proposed" or (h["pass"] == final and "registered" in h) for h in hyps)
-        and (st["run"]["generation"] == "scripted" or any(h["pass"] == final for h in hyps)),
+        and (st["run"]["generation"] == "scripted" or any(
+            x["kind"] == "proposal" and x["seq"] > st["passes"][-1]["seq"] for x in st["records"])),
     }
 
 

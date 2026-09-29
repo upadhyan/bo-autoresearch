@@ -1,3 +1,4 @@
+# DOGFOOD-PLANTED-TRUTH (check.py flags a run whose agents read this file)
 # Scripted generation pass 1 (run start): the planted cases, in id order H1..H9.
 - title: Warm the learning rate up
   rationale: Large early steps on an untrained model are noisy; a short warmup should settle them.

@@ -742,6 +742,23 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   `exec`/`eval`, `builtins|sys.<exec|eval|modules|__import__>`, any str matching `\bboautoresearch\b`); refused when
   added against the base (Counter difference). Not "verify with the harness unimportable": the harness runner imports
   it in-process. Residual: a subprocess, a .pth file.
+- #36/#38 (free-mode contamination): the planted truth moved out of the toy repository to
+  benchmarks/dogfood/truth.py; the toy's protected objective.py loads it from $DOGFOOD_SCORER, which only
+  run_benchmark.py sets (no hook rule: an agent reaches it only by dumping the env or browsing the plugin's benchmark
+  dir). Ground-truth files carry the DOGFOOD-PLANTED-TRUTH marker; check.py --transcript fails a run whose agents
+  named one, dumped the env, or got the marker back in a result.
+- #36 (held Stops): a Stop held while the orchestrator waits on subagents stays a logged hook_blocked (spec: every
+  block is logged; subagents aren't among its allowed cases, and the hold keeps a headless session alive). The skill
+  spawns subagents with run_in_background: false (still parallel within one message), so the turn doesn't end
+  mid-wait; check.py reports hook_blocked by check/role and no longer uses the total as the adversary's evidence.
+- #36 (lens distinctness): parallel generators are blind to each other, so each gets every lens of the pass and a
+  lane (the mechanisms its own lens owns); it may propose fewer than asked (>= 2) rather than pad. Duplicates that
+  survive are the registration reviewer's (the ticket: "duplicates are caught by the reviewer"); no harness dedupe.
+- #36 (records through a variable): a subagent's `record` whose program isn't literally `boautoresearch` (`$BO record`)
+  is refused, not rewritten: tracking shell assignments is parsing we don't do, and the untagged record landed as the
+  orchestrator's while SubagentStop held the agent (which then dumped env hunting for its id).
+- #38 (headless isolation): claude runs with --setting-sources project,local --strict-mcp-config: the user's own
+  hooks, plugins and MCP servers stay out; subscription auth still works (stored apart from settings).
 - workers (parallel trials, #21 story 16): a BO round (R1+) keeps up to `workers` trials in flight; everything else (R0, ladder
   calibration, smoke, equivalence, drift, wrap-up) stays one at a time (ponytail: their trials are few). `cli._start` (gates +
   trial_started) and `cli._outcome` (trial_finished/failed) run on the main thread; only the subprocess wait (`_run_trial`,
@@ -811,6 +828,12 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   proxy broke 2 of 20 before, 1 of 20 after; an exactly reversed proxy was caught 19 of 20 before, 20 of 20 after, and 7
   → 20 of 20 with a useless co-active lever (test_a_broken_proxy_downgrades…, noise off). Tests that declare
   `deterministic: true` must turn the toy's noise off (σ̂ = 0 lets noise pass for a proxy order).
+- #36/#38 (park after a rung escalation): `park` is refused while H's latest rung escalation has no verdict at that
+  fidelity: the escalation ladder is the harness's, and the claude-caller smoke parked the fidelity-sensitive case the
+  moment it was escalated (on the analyst's stale advice), losing +0.80 of the optimum.
+- #36 (empty passes): `record proposal` accepts `{"hypotheses": []}` (a generator whose lane holds nothing new), and an
+  llm pass counts toward `final_pass_empty` once any proposal record follows its `generation_pass`. Before, a free run
+  couldn't exhaust (the condition wanted a hypothesis from the final pass) and empty-handed generators were held forever.
 - workers (user decision): sequential is the default (`workers: 1`) and the interview recommends it; parallel trials only
   when the user asks. Trials sharing a machine skew runtime/throughput/memory objectives, so the interview warns about that.
 - #28 limit (epoch σ; spec "σ is re-estimated", #7 resolution 2 "k runs per candidate rung"): a new epoch measures σ at once
