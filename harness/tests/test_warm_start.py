@@ -126,10 +126,19 @@ def test_a_changed_objective_fails_the_equivalence_check_and_starts_a_new_epoch(
     assert not of_type(run_dir, "epoch_started") and out["epoch"] == 0
     assert set(eligible(repo)) == r0 | {t["trial"] for t in reps}  # still one epoch
 
-    # every loss up by 1 (20σ): the check fails, a new epoch starts, σ is re-estimated there
+    # every loss up by 1 (20σ): the first 2 replicates disagree beyond 2σ̂, so 4 more run, and all 6 still
+    # disagree in the t-test; σ̂ is pooled over the epoch's baseline trials (R0's smoke and 3 replicates, the
+    # no-op's 2: df 5), the tolerance t(1 − 0.05/2, 5)·σ̂·√(1/6 + 1/6) with t(0.975, 5) = 2.571 (one config)
     code, out = change(repo, run_dir, "loss = 1.0 +", "loss = 2.0 +")
     assert code == 0, out
-    assert out["equivalence_check"]["passed"] is False and out["epoch"] == 1
+    check = out["equivalence_check"]
+    assert check["passed"] is False and out["epoch"] == 1
+    assert check["df"] == 5 and check["alpha"] == 0.05
+    [row] = check["configs"]
+    assert row["stage1"]["passed"] is False and row["trials"][:2] == row["stage1"]["trials"]
+    assert len(row["trials"]) == 6 and row["passed"] is False and row["logged_n"] == 6
+    assert abs(row["mean"] - row["logged_mean"] - 1.0) < 0.2
+    assert abs(row["tolerance"] - 2.571 * check["sigma"] * (1 / 3) ** 0.5) < 1e-3 * check["sigma"] + 1e-8
     [started] = of_type(run_dir, "epoch_started")
     assert started["epoch"] == 1 and started["breaking"] is False
     fresh = [t for t in finished(run_dir).values() if t.get("epoch") == 1]
@@ -141,12 +150,61 @@ def test_a_changed_objective_fails_the_equivalence_check_and_starts_a_new_epoch(
     assert set(eligible(repo)) == {t["trial"] for t in fresh}  # the earlier trials are telemetry
 
 
+def test_a_first_look_failure_stands_when_the_budget_refuses_the_second(tmp_path, project_python):
+    repo, run_dir = calibrated(tmp_path, project_python, "max_trials: 6\n")
+    assert len(of_type(run_dir, "trial_started")) == 4  # R0: the smoke and 3 baseline replicates
+    code, out = change(repo, run_dir, "loss = 1.0 +", "loss = 2.0 +")  # 20σ: the first look fails
+    assert code == 0, out
+    check = out["equivalence_check"]
+    [row] = check["configs"]
+    assert len(row["trials"]) == 2 and row["passed"] is False and row["stage1"] is None
+    assert check["refused"] and check["passed"] is False  # the ceiling refused the 4 more replicates
+    assert of_type(run_dir, "epoch_started")
+
+
+def no_op_check(d, python, seed):
+    d.mkdir()
+    repo = make_repo(d)
+    run_dir = init(repo, python, BASE.replace("replicates_k: 3", "replicates_k: 2") + f"delta: 0.1\nseed: {seed}\n")
+    assert round_run(repo, "--rationale", "calibrate", env=toy_env(sigma=SIGMA))[0] == 0
+    code, out = change(repo, run_dir, "    term = 0.0\n", "    term = 0.0  # the baseline term\n")
+    assert code == 0, out
+    return out["equivalence_check"]
+
+
+def test_a_true_no_op_rarely_starts_a_new_epoch(tmp_path, project_python):
+    with ThreadPoolExecutor(20) as pool:
+        checks = list(pool.map(lambda s: no_op_check(tmp_path / f"s{s}", project_python, s), range(40)))
+    [rows] = zip(*(c["configs"] for c in checks))
+    # σ̂ pooled over R0's smoke and 2 replicates (df 2): the first 2 replicates alone (the old rule) fail a
+    # no-op P(|t₂| > 2/√(1/2 + 1/3)) ≈ 16%; the 6-replicate t-test at α = 5% keeps most of those.
+    # Measured over seeds 0..39: first look failed 5, the check failed 2 (5%); at 5%, more than 4 of 40
+    # fail has probability ~5%
+    assert sum(c["passed"] is True for c in checks) >= 36, checks
+    # the first look did fail some of them: the second is what kept them in the epoch (3 of 40 measured; at
+    # 7.5%, none in 40 has probability ~4%)
+    rescued = [r for r in rows if r["stage1"] and r["stage1"]["passed"] is False and r["passed"]]
+    assert rescued and all(len(r["trials"]) == 6 for r in rescued), rows
+
+
 def test_a_breaking_change_skips_the_check_and_restarts_burn_in(tmp_path, project_python):
     repo, run_dir = calibrated(tmp_path, project_python)
     coded(repo, run_dir, tmp_path, code=NOOP_BOWL, env=toy_env(sigma=SIGMA))
     code, out = round_run(repo, "--rationale", "search", env=toy_env(sigma=SIGMA))
     assert code == 0, out
     assert bo(repo, "verdict", "H1")[1]["burn_in"]["fresh"] >= 20
+    inc = out["incumbent"]
+
+    # a no-op after the round: the incumbent's logged mean leaves out the trial that made it the incumbent
+    # (the best of many draws, biased) and keeps its replicates
+    code, out = change(repo, run_dir, "import time\n", "import time  # the clock\n")
+    assert code == 0, out
+    row = next(r for r in out["equivalence_check"]["configs"] if r["config"] == "incumbent")
+    ends = {p["trial"]: p["objective"] for p in of_type(run_dir, "trial_finished")}
+    reps = [ends[t["trial"]] for t in finished(run_dir).values()
+            if t.get("replicate_of") == inc["trial"] and t["trial"] not in row["trials"]]
+    assert row["levers"] == inc["levers"] and row["logged_n"] == len(reps) >= 2
+    assert abs(row["logged_mean"] - sum(reps) / len(reps)) < 1e-9
     checks = len(of_type(run_dir, "equivalence_check"))
 
     code, out = change(repo, run_dir, "loss = 1.0 +", "loss = 5.0 +", "--breaking")
@@ -155,7 +213,7 @@ def test_a_breaking_change_skips_the_check_and_restarts_burn_in(tmp_path, projec
     [started] = of_type(run_dir, "epoch_started")
     assert started == {"epoch": 1, "round": 2, "commit": out["commit"], "change": "commit_change",
                        "breaking": True}
-    assert of_type(run_dir, "commit_change")[0]["breaking"] is True
+    assert of_type(run_dir, "commit_change")[-1]["breaking"] is True
     fresh = {n for n, t in finished(run_dir).items() if t.get("epoch") == 1}
     assert len(fresh) == 3 and set(eligible(repo)) == fresh
     probe = bo(repo, "verdict", "H1")[1]
