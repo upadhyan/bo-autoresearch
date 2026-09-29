@@ -286,6 +286,7 @@ def _trial(run_dir: Path, con, a, kind: str, levers: dict, fidelity: dict, **ext
     """
     st = elog.load(con)
     run, n = st["run"], len(st["trials"]) + 1
+    levers, masking = _mask(st, levers)
     if d := directives.violated(st["registry"]["directives"], levers, elog.lever_paths(st["hypotheses"])):
         elog.append(con, "prohibited_check_refused", "harness", {
             "kind": kind, "levers": levers, "fidelity": fidelity, "directive": d["id"], **extra})
@@ -310,7 +311,7 @@ def _trial(run_dir: Path, con, a, kind: str, levers: dict, fidelity: dict, **ext
     trial = {"trial": n, "kind": kind, "levers": levers, "fidelity": fidelity,
              "seed": _rng(run, n).getrandbits(31), "epoch": st["epoch"]["epoch"],
              "commit": _git(worktree, "rev-parse", "HEAD"),
-             "artifact_dir": f"artifacts/trial-{n}", **extra}
+             "artifact_dir": f"artifacts/trial-{n}", **masking, **extra}
     started = {**trial, "pid": os.getpid()}  # a dead pid on a running trial means it was abandoned
     if a:
         elog.append(con, "trial_started", a.actor, {"rationale": a.rationale, **started})
@@ -320,6 +321,27 @@ def _trial(run_dir: Path, con, a, kind: str, levers: dict, fidelity: dict, **ext
     elog.append(con, "trial_" + outcome.pop("status"), "harness", {"trial": n, **outcome})
     _regenerate(run_dir, con)
     return elog.load(con)["trials"][-1]
+
+
+def _mask(st: dict, sampled: dict) -> tuple[dict, dict]:
+    """Masking: while any lever of a masking hypothesis is away from its baseline (its mechanism is on),
+    the masked hypothesis's levers run at their baselines. -> (the effective levers, what the trial
+    logs beside them: the masked levers' `sampled` values and the hypotheses `masked` in it)."""
+    # ponytail: judged on the sampled values, so a masker that is itself masked still masks (chains);
+    # iterate to a fixed point on the effective values if chained masking is ever declared
+    hyps, levers = st["hypotheses"].values(), dict(sampled)
+    logged: dict = {}
+    masked: list[str] = []
+    for m in _masking(st):
+        masked_levers = {n: lv["baseline"] for n, lv in st["hypotheses"][m["masked"]]["spec"]["levers"].items()
+                if n in sampled}
+        masker_levers = {n: lv["baseline"] for x in hyps if f"H{x['number']}" == m["by"]
+                  for n, lv in x["spec"]["levers"].items()}
+        logged.update({n: sampled[n] for n in masked_levers})
+        if masked_levers and any(n in sampled and sampled[n] != b for n, b in masker_levers.items()):
+            levers.update(masked_levers)
+            masked.append(m["masked"])
+    return levers, {"sampled": logged, "masked": masked} if logged else {}
 
 
 def _cost(trials: list[dict], fidelity: dict) -> float:
@@ -565,13 +587,104 @@ def cmd_register(a) -> dict:
                       f"{st['registry']['version']}")
     if out := _outside(run_dir, st, h):
         raise Refused(f"{out[1]}: propose a version whose ranges and options stay inside it")
+    moving = _merged_sources(st, h)
+    if why := _clash(st, h) or _unresolved(st, h, r):
+        raise Refused(why)
     lowered = _penalty(st, h)
     elog.append(con, "hypothesis_registered", a.actor, {
         "rationale": a.rationale, "id": h["id"], "review": {k: r[k] for k in ("directive_verdict", "intent")},
         # a stretch or deprioritize verdict is tested only with a stated reason: the rationale
         **({"lowered": {"by": lowered, "reason": a.rationale}} if lowered else {})})
+    for x in moving:  # carried on by the merged hypothesis: out of the loop, no verdict of their own
+        elog.append(con, "hypothesis_merged", "harness", {"id": x["id"], "into": h["id"], "from": x["status"]})
     _regenerate(run_dir, con)
     return {"hypothesis": elog.load(con)["hypotheses"][h["id"]]}
+
+
+LIVE = ("registered", "active", "retained")
+IN_LOOP = ("proposed", *LIVE)
+
+
+def _numbers(ids) -> set[int]:
+    return {int(i[1:].split(".")[0]) for i in ids}  # H<n> or H<n>.v<k>
+
+
+def _merged_sources(st: dict, h: dict) -> list[dict]:
+    """The hypotheses H's merge takes out of the loop (those still in it; removed ones are lineage
+    only), refused unless its mapping carries every one of their levers over their whole range."""
+    m, hyps = h["spec"].get("merges"), st["hypotheses"]
+    if not m:
+        return []
+    if bad := [i for i in m["from"] if i not in hyps or hyps[i]["number"] == h["number"]]:
+        raise Refused(f"merges.from: {bad} are not other hypotheses")
+    old = {n: lv for i in m["from"] for n, lv in hyps[i]["spec"]["levers"].items()}
+    pairs = [(new, rule) for new, rs in m["mapping"].items() for rule in hypotheses.rules(rs)]
+    if bad := [rule["lever"] for _, rule in pairs if rule["lever"] not in old]:
+        raise Refused(f"merges.mapping: {bad} are not levers of {m['from']}")
+    moving = [hyps[i] for i in m["from"] if hyps[i]["status"] in IN_LOOP]
+    for x in moving:
+        for n, lv in x["spec"]["levers"].items():
+            mine = [(new, rule) for new, rule in pairs if rule["lever"] == n]
+            if not mine:
+                raise Refused(f"merges.mapping leaves {n} of {x['id']} out: the merged hypothesis covers both")
+            for new, rule in mine:
+                if why := hypotheses.uncovered(lv, h["spec"]["levers"][new], rule):
+                    raise Refused(f"merges.mapping.{new} ({n}): {why}: the merged hypothesis covers both")
+    if any(x["status"] in ("active", "retained") for x in moving):
+        _between_rounds(st, "a merge takes hypotheses out of the search")
+    return moving
+
+
+def _clash(st: dict, h: dict) -> str | None:
+    """A config path belongs to one live hypothesis: the one H's levers would share (unless H merges it)."""
+    merging = set(h["spec"].get("merges", {}).get("from", []))
+    paths = {lv["path"] for lv in h["spec"]["levers"].values() if "path" in lv}
+    for x in st["hypotheses"].values():
+        if x["status"] in LIVE and x["number"] != h["number"] and x["id"] not in merging:
+            if shared := sorted(paths & {lv["path"] for lv in x["spec"]["levers"].values() if "path" in lv}):
+                return (f"config path {', '.join(shared)} belongs to {x['id']}: propose one hypothesis that "
+                        f"merges both (`merges` from {x['id']}, its mapping covering both ranges)")
+    return None
+
+
+def _unresolved(st: dict, h: dict, r: dict) -> str | None:
+    """A shared-lever or exclusive conflict the review flagged with a live hypothesis and H's spec
+    leaves unresolved: shared levers merge; exclusive mechanisms merge (one categorical lever with a
+    "none" option), mask (`masked_by`, either way) or never share a round (`exclusive_with`)."""
+    hyps = st["hypotheses"]
+    if both := [x["id"] for x in hyps.values() if x["status"] in LIVE and _masks(x, h) and _masks(h, x)]:
+        return f"{h['id']} and {both[0]} mask each other: masking declares one precedence"
+    for i in r["conflict_with"] if r["conflict"] in ("shared-lever", "exclusive") else []:
+        x = hyps[i]
+        if x["status"] not in LIVE:
+            continue
+        merged = i in h["spec"].get("merges", {}).get("from", [])
+        if r["conflict"] == "shared-lever" and not merged:
+            return f"the review finds {h['id']} shares levers with {i}: propose one hypothesis that merges both"
+        if r["conflict"] == "exclusive" and not (merged or _masks(h, x) or _masks(x, h) or _exclusive(h, x)):
+            return (f"the review finds {h['id']} exclusive with {i}: merge them (one categorical lever with a "
+                    "\"none\" option), declare masking (`masked_by`), or `exclusive_with` for code paths that "
+                    "can't run together")
+    return None
+
+
+def _masks(masker: dict, masked: dict) -> bool:
+    return masker["number"] in _numbers(masked["spec"].get("masked_by", {}))
+
+
+def _masking(st: dict) -> list[dict]:
+    """The registered masking declarations: {masked, by: H<m>, reason}."""
+    return [{"masked": h["id"], "by": m, "reason": why} for h in st["hypotheses"].values()
+            if h["status"] not in ("proposed", "pruned") for m, why in h["spec"].get("masked_by", {}).items()]
+
+
+def _rivals(st: dict) -> list[list[str]]:
+    """The rival links: pairs each hypothesis's latest review calls rivals. Both are tested (together
+    where the cap allows), each with its own verdict."""
+    latest = {x["record"]["hypothesis"]: x["record"] for x in st["records"] if x["kind"] == "review"}
+    return [list(p) for p in sorted({tuple(sorted((h, i))) for h, r in latest.items()
+                                     if r["conflict"] == "rival" for i in r["conflict_with"]})]
+
 
 
 def cmd_prioritize(a) -> dict:
@@ -581,7 +694,7 @@ def cmd_prioritize(a) -> dict:
     st = elog.load(con)
     _not_ended(st)
     h = _hypothesis(st, a.hypothesis)
-    if h["status"] in ("rejected", "inconclusive"):
+    if h["status"] in ("rejected", "inconclusive", "merged"):
         raise Refused(f"{h['id']} is {h['status']}: it has left the loop")
     elog.append(con, "hypothesis_prioritized", a.actor,
                 {"rationale": a.rationale, "id": h["id"], "priority": a.priority})
@@ -665,7 +778,7 @@ def cmd_park(a) -> dict:
     _not_ended(st)
     _between_rounds(st, "parking happens")
     h = _hypothesis(st, a.hypothesis)
-    if h["status"] not in ("proposed", "registered", "active", "retained"):
+    if h["status"] not in IN_LOOP:
         raise Refused(f"{h['id']} is {h['status']}: only a hypothesis still in the loop can be parked")
     if not a.reason.strip():
         raise Refused("park needs a --reason")
@@ -692,6 +805,10 @@ def cmd_unpark(a) -> dict:
     # the user's call overrides a taste verdict (off-intent), never a prohibition
     if out := _outside(run_dir, st, h):
         raise Refused(f"{out[1]}: it can't return while the prohibition stands")
+    if why := _clash(st, h):
+        raise Refused(f"{why}; it can't return while another hypothesis owns its config path")
+    if (r := _review(st, h)) and (why := _unresolved(st, h, r)):
+        raise Refused(f"{why}; it can't return until the conflict is resolved")
     if (r := _review(st, h)) and r["directive_verdict"] == "prune":
         raise Refused(f"{h['id']}'s review prunes it under {r['directive']}: it returns only after the "
                       "directives are revised and a new review allows it")
@@ -1242,10 +1359,19 @@ def _eligibility(st: dict, space: dict, baseline: dict, fidelity: dict):
     epoch = st["epoch"]["epoch"]
 
     def eligible(trials: list[dict]) -> list[dict]:
-        # a trial breaking a prohibition (a revision tightened one since it ran) is out
+        # a trial breaking a prohibition (a revision tightened one since it ran) is out; a masked
+        # lever the round searches enters with its sampled value (the box stays a box), one it
+        # doesn't with the value it ran at
         return [m for t in trials if not _prohibited(t["levers"], st)
-                and (m := bo_study.eligible(t, space, baseline, fidelity, epoch, irrelevant, merges))]
+                and (m := bo_study.eligible(_sampled(t, space), space, baseline, fidelity, epoch,
+                                            irrelevant, merges))]
     return eligible
+
+
+def _sampled(t: dict, space: dict) -> dict:
+    """The trial with its searched masked levers at their sampled values."""
+    over = {n: v for n, v in t.get("sampled", {}).items() if n in space}
+    return {**t, "levers": {**t["levers"], **over}} if over else t
 
 
 def _prohibited(levers: dict, st: dict) -> str | None:
@@ -1274,9 +1400,10 @@ def _round_verdicts(st: dict, r: int) -> list[dict]:
 
 
 def _fresh(st: dict, h: dict, eligible) -> list[int]:
-    """Fresh sampler trials: eligible sampler trials since the hypothesis entered the search."""
-    return [t["trial"] for t in eligible(st["trials"])
-            if t["kind"] == "sampler" and t["round"] >= h["activated_round"]]
+    """Fresh sampler trials: eligible sampler trials since the hypothesis entered the search, where
+    it was effective (not masked)."""
+    return [t["trial"] for t in eligible(st["trials"]) if t["kind"] == "sampler"
+            and t["round"] >= h["activated_round"] and h["id"] not in t.get("masked", [])]
 
 
 def _schedule(h: dict) -> dict:
@@ -1639,7 +1766,10 @@ def _status(st: dict) -> dict:
             "interplay_missing": _interplay_missing(st), "review_missing": _review_missing(st),
             "generation": {"mode": run["generation"], "passes": len(st["passes"]),
                            "due": _generation_due(st)},
-            "exhaustion": _exhaustion(st), "next": _next(st)}
+            "exhaustion": _exhaustion(st), "next": _next(st),
+            "conflicts": {"rivals": _rivals(st), "masking": _masking(st),
+                          "merged": [{"id": h["id"], "into": h["merged_into"]}
+                                     for h in st["hypotheses"].values() if h["status"] == "merged"]}}
 
 
 def _suggested_delta(st: dict) -> float | None:
@@ -1683,10 +1813,10 @@ def _selected(st: dict) -> list[dict]:
     empty round). A hypothesis exclusive with one already chosen is skipped."""
     # ponytail: retained hypotheses keep their full ranges when the cap is tight; narrow the oldest
     # concentrated ones (spec: "narrowed, not frozen") if they crowd the queue out
-    # ponytail: queued hypotheses flagged as interacting join together or not at all; a revived
+    # ponytail: queued hypotheses flagged as interacting, and rivals, join together or not at all; a revived
     # version rides with its partner uncounted (spec: the same round), so it can take a round past the cap
     chosen, queue, hyps = _in_search(st), _queue(st), st["hypotheses"]
-    linked = {frozenset((hyps[x]["number"], hyps[p]["number"])) for x, p in _links(st)}
+    linked = {frozenset((hyps[x]["number"], hyps[p]["number"])) for x, p in [*_links(st), *_rivals(st)]}
     cap, dims = _dimension_cap(st), sum(len(_group(h)) for h in chosen)
     for h in queue:
         if h in chosen or any(_exclusive(h, x) for x in chosen):
@@ -1878,6 +2008,8 @@ def _revive(run_dir: Path, con, st: dict) -> list[dict]:
         if out := _outside(run_dir, st, new):  # registered at once, so checked like a registration
             elog.append(con, "hypothesis_pruned", "harness",
                         {"id": new["id"], "directive": out[0]["id"], "by": "revival", "reason": out[1]})
+        elif why := _clash(elog.load(con), new):  # a merge is the way to test it now
+            _park(con, new, why)
     return revived
 
 
@@ -2018,7 +2150,8 @@ def cmd_trials(a) -> dict:
 def _regenerate(run_dir: Path, con) -> None:
     """Rewrite every generated file from the events."""
     trials = elog.load(con)["trials"]
-    groups = {"L:": "levers", "c:": "constraints", "t:": "telemetry", "compat:": "compat"}
+    groups = {"L:": "levers", "sampled:": "sampled", "c:": "constraints", "t:": "telemetry",
+              "compat:": "compat"}
     cols = sorted({(p + k, g, k) for t in trials for p, g in groups.items() for k in t.get(g, {})})
     extra = [c for c, _, _ in cols]
     meta = ["trial", "kind", "status", "objective", "seed", "fidelity", "commit", "wall_clock_s",

@@ -247,8 +247,8 @@ def test_compat_flags_on_every_trial_and_a_revision_prunes_parks_restores_and_as
     assert bo(repo, "checkpoint", "--rationale", "the user wants to revise the directives")[0] == 0
     assert json.loads(p.communicate(timeout=60)[0])["trigger"] == "checkpoint"
     assert status_of(repo, "H2.v1")["status"] == "active"
-    # H3 fits the current limit on x (0.8), H4 is untouched by any directive
-    h3 = propose(repo, spec({"x": {**lever(high=0.6), "path": "toy.x"}}))
+    # H3 is untouched by the current directives (toy.x belongs to H2: #32), and so is H4
+    h3 = propose(repo, spec({"w": {**lever(high=0.6), "path": "toy.w"}}))
     h4 = propose(repo, spec({"z": {**lever(), "path": "toy.z"}}, mechanism="Reorder the data shards."))
     assert register(repo, h3)[0] == 0 and register(repo, h4)[0] == 0
 
@@ -268,6 +268,9 @@ def test_compat_flags_on_every_trial_and_a_revision_prunes_parks_restores_and_as
 
     reg = yaml.safe_load(REGISTRY)
     revised = [d for d in reg["directives"] if d["id"] != "no-pretrained"]  # relaxed: removed
+    revised.append({"id": "small-w", "severity": "prohibited", "statement": "keep w at or below 0.4",
+                    "reason": "larger values crash the user's cluster", "scope": "lever values",
+                    "predicate": "toy.w <= 0.4"})  # added
     for d in revised:
         if d["id"] == "small-x":
             d["predicate"] = "toy.x <= 0.4"  # tightened

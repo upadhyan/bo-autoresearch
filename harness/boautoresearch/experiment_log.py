@@ -17,7 +17,7 @@ EVENT_TYPES = {"run_started", "trial_started", "trial_finished", "trial_failed",
                "hypothesis_prioritized", "hypothesis_parked", "hypothesis_unparked", "trial_enqueued",
                "agent_trial_skipped", "checkpoint", "user_pause", "user_resume", "removal",
                "hypothesis_revived", "generation_pass", "registry_revised", "hypothesis_pruned",
-               "hypothesis_unpruned", "prohibited_check_refused"}
+               "hypothesis_unpruned", "prohibited_check_refused", "hypothesis_merged"}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -94,6 +94,8 @@ def state(events: list[dict]) -> dict:
             manifest = p["manifest"]
         elif e["type"] == "hypothesis_pruned":  # never tested
             hyps[p["id"]].update(status="pruned", pruned_by=p["directive"])
+        elif e["type"] == "hypothesis_merged":  # carried on by the merged hypothesis
+            hyps[p["id"]].update(status="merged", merged_into=p["into"])
         elif e["type"] == "hypothesis_unpruned":  # its directive was relaxed: back to its review
             hyps[p["id"]]["status"] = "proposed"
         elif e["type"] == "trial_started":

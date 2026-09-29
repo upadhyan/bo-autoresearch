@@ -3,12 +3,13 @@
 Pure functions; the CLI turns their ValueError into a refusal.
 """
 import ast
+import json
 import math
 import re
 from collections import Counter
 
 SPEC_KEYS = {"title", "rationale", "mechanism", "provenance", "source", "lens", "directives",
-             "fidelity_sensitive", "fidelity_reason", "levers", "merges", "exclusive_with"}
+             "fidelity_sensitive", "fidelity_reason", "levers", "merges", "exclusive_with", "masked_by"}
 LEVER_KEYS = {"float": {"low", "high", "log", "predicted"}, "int": {"low", "high", "log", "predicted"},
               "categorical": {"options"}, "bool": {"why_not_graded"}}
 GRADED = ("float", "int")
@@ -60,11 +61,22 @@ def validate(spec) -> None:
                                            for i in ex):
         raise ValueError("exclusive_with must list the hypotheses never to share a round with, "
                          "e.g. [\"H2\"]")
+    m = spec.get("masked_by", {})
+    if not isinstance(m, dict) or not all(re.fullmatch(r"H\d+", k) and isinstance(v, str) and v.strip()
+                                          for k, v in m.items()):
+        raise ValueError("masked_by must map each masking hypothesis to the reason it takes precedence, "
+                         "e.g. {\"H2\": \"with dropout on, the weight decay is moot\"}")
+
+
+def rules(rule) -> list[dict]:
+    """A merge mapping's rules for one of the merged hypothesis's levers: one merged lever, or a list
+    of them (exclusive mechanisms merged into one categorical lever)."""
+    return rule if isinstance(rule, list) else [rule]
 
 
 def _validate_merges(m, levers: dict) -> None:
-    """{from: [H<n>.v<k>], mapping: {own lever: {lever: H<n>.<name>, values?: [[old, new], ...]}}};
-    registering the merge itself (the merged hypotheses leaving the search) is #32's."""
+    """{from: [H<n>.v<k>], mapping: {own lever: rule | [rule, ...]}}, rule = {lever: H<n>.<name>,
+    values?: [[old, new], ...]}."""
     if not isinstance(m, dict) or set(m) != {"from", "mapping"}:
         raise ValueError("merges must be {from: [hypothesis ids], mapping: {lever: {lever, values}}}")
     if (not isinstance(m["from"], list) or not m["from"]
@@ -72,7 +84,7 @@ def _validate_merges(m, levers: dict) -> None:
         raise ValueError("merges.from must list the merged hypotheses' ids, e.g. [\"H2.v1\"]")
     if not isinstance(m["mapping"], dict) or not m["mapping"]:
         raise ValueError("merges.mapping must map at least one of this hypothesis's levers")
-    for name, rule in m["mapping"].items():
+    for name, rule in [(n, r) for n, rs in m["mapping"].items() for r in (rules(rs) or [{}])]:
         where = f"merges.mapping.{name}"
         if name not in levers:
             raise ValueError(f"{where}: not one of this hypothesis's levers")
@@ -84,6 +96,20 @@ def _validate_merges(m, levers: dict) -> None:
                 isinstance(p, list) and len(p) == 2 and in_range(p[1], levers[name]) for p in values):
             raise ValueError(f"{where}.values must list [old, new] pairs, each new value in the "
                              "lever's range (leave it out to keep the values as they are)")
+
+
+def uncovered(old: dict, new: dict, rule: dict) -> str | None:
+    """Why a merge rule doesn't carry the merged lever's whole range into the new lever (None: it does)."""
+    if old["kind"] in GRADED:
+        if "values" in rule or new["kind"] not in GRADED or (old["kind"], new["kind"]) == ("float", "int"):
+            return "a graded lever maps as itself onto a graded lever"
+        if not new["low"] <= old["low"] < old["high"] <= new["high"]:
+            return f"[{new['low']}, {new['high']}] must cover [{old['low']}, {old['high']}]"
+        return None
+    pairs = [(o, b) for o in options(old) for a, b in rule.get("values", [[o, o]]) if type(a) is type(o) and a == o]
+    if len({json.dumps(o) for o, _ in pairs}) < len(options(old)) or not all(in_range(b, new) for _, b in pairs):
+        return f"every option of {options(old)} must map to one of the new lever's values"
+    return None
 
 
 def in_range(value, lv: dict) -> bool:

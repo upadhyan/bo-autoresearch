@@ -78,6 +78,10 @@ _Avoid_: Pruning, refinement
 Declared at registration for a hypothesis whose mechanism may only pay off at higher fidelity. It can never be rejected at a proxy fidelity.
 _Avoid_: Slow-burn, long-horizon
 
+**Merge**:
+One hypothesis registered in place of others whose levers clash (a shared config path, or exclusive mechanisms of one slot), with a declared mapping from their lever values to its own that covers their ranges. The hypotheses it merges leave the loop as **merged**, without a verdict.
+_Avoid_: Combine, fold
+
 **Rival**:
 A hypothesis offering a competing explanation to another, through separate levers. Rivals are tested together, and a verdict on one says nothing about whether it explains the other.
 _Avoid_: Conflict (too broad), alternative

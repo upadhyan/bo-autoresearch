@@ -3,10 +3,11 @@
 Trials here are the state fold's trial dicts. Optuna (and torch, behind GPSampler) is imported
 only by the rounds that search, so every other command stays fast.
 """
+import json
 import warnings
 from pathlib import Path
 
-from .hypotheses import GRADED, in_range, options
+from .hypotheses import GRADED, in_range, options, rules
 
 
 def eligible(t: dict, space: dict, baseline: dict, fidelity: dict, epoch: int,
@@ -16,7 +17,7 @@ def eligible(t: dict, space: dict, baseline: dict, fidelity: dict, epoch: int,
 
     Mapping: a trial that ran a merged-away lever (not searched now) but not the lever `merges` maps
     it to takes the mapped value (`values` pairs old -> new; none = the same value), and a value the
-    mapping can't express makes it ineligible. A credibly `irrelevant` lever (rejected `irrelevant`,
+    mapping can't express makes it ineligible; a merged-away lever loses its key in every trial. A credibly `irrelevant` lever (rejected `irrelevant`,
     or frozen) out of the search loses its key, whatever its value; a lever the trial predates is
     backfilled at its baseline. Then the searched levers must lie inside their boxes (never
     clipped), every other lever at its baseline, and no lever the round doesn't know.
@@ -25,18 +26,30 @@ def eligible(t: dict, space: dict, baseline: dict, fidelity: dict, epoch: int,
         return None
     gone = set(irrelevant) - set(space)
     levers = dict(t["levers"])
-    for new, rule in merges.items():
-        old = rule["lever"]
-        if new in levers or old not in levers or old in space:
-            continue  # the trial ran the new lever, or predates the old one, or it is still searched
-        v = levers.pop(old)
-        gone.add(old)  # expressed by the new lever from here on
-        if "values" in rule:
-            hits = [b for a, b in rule["values"] if type(a) is type(v) and a == v]
-            if not hits:
-                return None
-            v = hits[0]
-        levers[new] = v
+    for new, rs in merges.items():
+        mapped = []
+        for rule in rules(rs):
+            old = rule["lever"]
+            if old in space:
+                continue  # still searched
+            gone.add(old)  # expressed by the new lever from here on
+            if new in levers or old not in levers:
+                continue  # the trial ran the new lever, or predates the old one
+            v = levers.pop(old)
+            if "values" in rule:
+                hits = [b for a, b in rule["values"] if type(a) is type(v) and a == v]
+                if not hits:
+                    return None
+                v = hits[0]
+            mapped.append(v)
+        # several merged levers (exclusive mechanisms in one categorical): those mapped to the new
+        # lever's baseline yield to the one mapped elsewhere; two mapped elsewhere can't be expressed
+        b = space[new]["baseline"]
+        on = {json.dumps(v) for v in mapped if not (type(v) is type(b) and v == b)}
+        if len(on) > 1:
+            return None
+        if mapped:
+            levers[new] = json.loads(on.pop()) if on else mapped[0]
     levers = {n: v for n, v in levers.items() if n not in gone}
     known = (set(baseline) | set(space)) - gone
     for n in known:
@@ -76,7 +89,8 @@ class Study:
 
     def _frozen(self, t: dict):
         return self._optuna.trial.create_trial(
-            params={n: t["levers"][n] for n in self.space}, distributions=self.dists,
+            # a masked lever at its sampled value, as the sampler asked for it
+            params={n: {**t["levers"], **t.get("sampled", {})}[n] for n in self.space}, distributions=self.dists,
             value=t["objective"], user_attrs={"trial": t["trial"]})
 
     def ask(self):
