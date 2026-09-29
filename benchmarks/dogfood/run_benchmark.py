@@ -7,7 +7,7 @@ with check.py.
     python run_benchmark.py --seeds 1 --sigmas 0.05 --no-free --work /tmp/df
 
 The claude caller runs `claude -p "/boautoresearch:start" --plugin-dir <this repo>` in each toy
-repository (it needs a logged-in `claude` or ANTHROPIC_API_KEY). The matrix passes when every hard
+repository (it needs a logged-in `claude` or CLAUDE_CODE_OAUTH_TOKEN). The matrix passes when every hard
 invariant holds in every run and each planted verdict is right in at least 5 of the 6 scripted runs.
 """
 import argparse
