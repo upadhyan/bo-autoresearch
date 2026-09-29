@@ -696,3 +696,8 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   threshold; its comment gives the rate measured over a wider sweep (seeds 0..19 or 0..9) and the chance the threshold fails at
   that rate (aim ≤ ~10%). A single fixed seed is only a replay seed for a mechanics test whose premise holds on (nearly) every
   seed, never a seed kept because it passes. Eligibility oracles in tests are epoch-aware.
+- #35: the skill's round-run wait loop is `pgrep -f "[/]<BO minus its leading slash> round-run"`: procps pgrep
+  (Linux, the dogfood CI) doesn't exclude its ancestors, so a plain `"boautoresearch round-run"` matched the Monitor's
+  own shell and never exited (BSD pgrep hid it on macOS); the full `BO` path also keeps one run's wait off another
+  run's round (the 7-run matrix). Headless start verified live: `claude -p "/boautoresearch:start"` on the dogfood toy
+  reaches R1 unprompted (scripted ≈5.5 min, free ≈17 min).
