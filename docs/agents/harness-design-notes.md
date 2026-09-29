@@ -790,3 +790,29 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   `deterministic: true` must turn the toy's noise off (σ̂ = 0 lets noise pass for a proxy order).
 - workers (user decision): sequential is the default (`workers: 1`) and the interview recommends it; parallel trials only
   when the user asks. Trials sharing a machine skew runtime/throughput/memory objectives, so the interview warns about that.
+- #28 limit (epoch σ; spec "σ is re-estimated", #7 resolution 2 "k runs per candidate rung"): a new epoch measures σ at once
+  only at the searched fidelity (`_new_epoch` → `_measure_sigma`, k baseline replicates, `noise_estimate` with `epoch`).
+  Every other rung is re-measured lazily, when next used: `round-run` re-measures the round's fidelity and, at a proxy,
+  the reference (drift check) before `round_started` (`_remeasure_stale`; a budget refusal there ends the run like
+  any refused trial); a ladder calibration run in a later epoch re-measures every rung first. The fold tags each rung's σ
+  with the epoch that measured it. The replicates are ordinary epoch trials at baseline, so `_pooled_noise` pools them.
+  The ladder calibration is stale once an epoch starts after it (`fidelity_calibration.epoch`, `_ladder_stale`): it
+  validates no rung, so a stalled proxy escalates straight to the reference (`hypothesis_escalated.stale_ladder`).
+  Chosen over re-calibrating (~5 configs × every rung) at the epoch boundary: cheaper, and the reference is always a
+  correct rung. The searched rung itself stays (#7 resolution 12: fidelity changes only at a round boundary, by the
+  harness); the drift check still guards it. Not re-measured before an equivalence check on a rung this epoch never
+  measured: the check's replicates run the new commit and would become the logged mean it compares against.
+- #28 limit (lock file; #12 resolution 8 "commits the updated lock or freeze file"): `add-dependency` in a project with
+  `uv.lock` runs `uv add --no-sync --python <run venv>`, with `poetry.lock` `poetry add --lock`, in the worktree: the tool
+  only updates pyproject.toml and the lock (a sync would drop the harness from the run venv); the harness then installs
+  into the run venv as before and commits pyproject.toml + the lock (no freeze file). Lock first, so a failed resolution
+  installs nothing; either failure restores the (clean) tree. uv.lock wins when both exist. A lock file whose tool is
+  missing is refused, not silently frozen. Other projects keep the freeze file. `dependency_added.lock_file` names it.
+- #28 limits (review): a rung's σ is re-measured once per epoch, tried or not (`_remeasure_stale` reads the epoch's
+  `noise_estimate`s via `baselines`, so a measurement whose replicates failed is not re-bought every round); `accept-proxy`
+  is refused on a stale ladder; `stale_ladder` is false when no ladder was calibrated. `add-dependency` checks every path
+  the lock tool actually wrote (not only pyproject.toml + the lock) against the protected paths, and a failure restores
+  the tree with checkout + clean. A requirement is taken as a local path only when it contains a path separator.
+  Residual: the harness installs the requirement on its own, so the venv can resolve versions other than the lock's
+  (the run venv comes from the user environment's freeze, not the lock); poetry locks against the project's Python
+  constraint, not the run venv's interpreter.

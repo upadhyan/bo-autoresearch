@@ -1,6 +1,7 @@
 """Warm start, epochs and code changes (#28): the mapping rules, narrowing, commit-change,
 add-dependency and the equivalence check, against the toy_bo trainer with lever code of our own."""
 import json
+import os
 import subprocess
 import sys
 import time
@@ -10,8 +11,8 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from conftest import bo, expect_all, git, round_run, register
-from test_rounds import BASE, BOWL, coded, init, make_repo, of_type, toy_env
-from test_verdicts import lever as vlever, spec as vspec, verdict_run
+from test_rounds import BASE, BOWL, FLAT, coded, init, make_repo, of_type, toy_env
+from test_verdicts import code_hypothesis, lever as vlever, spec as vspec, verdict_run
 
 SIGMA = 0.05
 
@@ -102,11 +103,11 @@ def calibrated(tmp_path, python, extra=""):
     return repo, run_dir
 
 
-def change(repo, run_dir, old, new, *flags):
+def change(repo, run_dir, old, new, *flags, env=None):
     train = run_dir / "worktree" / "train.py"
     train.write_text(train.read_text().replace(old, new))
     return bo(repo, "commit-change", "--reason", "the change under test", *flags,
-              "--rationale", "a code change", env=toy_env(sigma=SIGMA))
+              "--rationale", "a code change", env=env or toy_env(sigma=SIGMA))
 
 
 def test_a_changed_objective_fails_the_equivalence_check_and_starts_a_new_epoch(tmp_path, project_python):
@@ -227,6 +228,80 @@ def test_a_breaking_change_skips_the_check_and_restarts_burn_in(tmp_path, projec
     [r2] = [p for p in of_type(run_dir, "round_started") if p["round"] == 2]
     assert r2["epoch"] == 1 and set(r2["seeded"]) == fresh
     assert all(v["burn_in"]["fresh"] >= 20 for v in out["verdicts"])  # judged on this epoch alone
+
+
+def epoch_noise(run_dir, epoch):
+    return [p for p in of_type(run_dir, "noise_estimate") if p.get("epoch") == epoch]
+
+
+def test_a_new_epoch_at_a_proxy_re_measures_the_reference_sigma_before_the_next_round(
+        tmp_path, project_python):
+    repo = make_repo(tmp_path)
+    # one seed, the file's usual: nothing asserted here is a rate (σ's 20x jump is a sure thing, the
+    # rest is structure)
+    run_dir = init(repo, project_python, BASE + "ladder: [{epochs: 1}]\nseed: 1\n")
+    env = toy_env(sigma=SIGMA, cheap_below=2)
+    coded(repo, run_dir, tmp_path, code=FLAT, env=env)  # rejected soon: a short round
+    code, out = round_run(repo, "--rationale", "calibrate the ladder", env=env)
+    assert code == 0, out
+    if out["fidelity_calibration"]["chosen"] != {"epochs": 1}:
+        assert bo(repo, "accept-proxy", "--fidelity", '{"epochs": 1}', "--rationale", "cheap")[0] == 0
+    assert bo(repo, "set-delta", "0.1", "--rationale", "the user's effect")[0] == 0
+    r0_ref = bo(repo, "status")[1]["sigma"]  # σ at the reference
+
+    # a breaking change after which the reference is 20x noisier: σ there must be measured afresh
+    noisy = toy_env(sigma=SIGMA, cheap_below=2, ref_sigma=1.0)
+    code, out = change(repo, run_dir, "loss = 1.0 +", "loss = 1.5 +", "--breaking", env=noisy)
+    assert code == 0, out
+    epoch = out["epoch"]
+    # the new epoch measures σ at once only where the run searches (the proxy)
+    assert [p["fidelity"] for p in epoch_noise(run_dir, epoch)] == [{"epochs": 1}]
+
+    code, out = round_run(repo, "--rationale", "search the new epoch", env=noisy)
+    assert code == 0, out
+    # the round's drift check runs at the reference: σ there is re-measured before the round starts
+    [_, ref] = epoch_noise(run_dir, epoch)
+    assert ref["fidelity"] == {"epochs": 4} and ref["n"] == 3
+    started = {p["trial"]: p for p in of_type(run_dir, "trial_started")}
+    reps = [started[t] for t in ref["trials"]]
+    assert all(t["kind"] == "baseline" and t["fidelity"] == {"epochs": 4} and t["epoch"] == epoch
+               and "round" not in t for t in reps)
+    assert 0.3 < ref["sigma"] < 3  # the planted reference σ is 1 (R0's was 0.05); 3 replicates
+    status = bo(repo, "status")[1]
+    assert status["sigma"] == ref["sigma"] != r0_ref
+    assert max(ref["trials"]) < min(t for t, p in started.items() if p.get("round") == out["round"])
+
+
+def test_after_a_new_epoch_a_stalled_proxy_escalates_to_the_reference_not_a_stale_rung(
+        tmp_path, project_python):
+    repo = make_repo(tmp_path)
+    run_dir = init(repo, project_python, BASE + "ladder: [{epochs: 1}, {epochs: 2}]\ndeterministic: true\n")
+    # no noise, so no chance: 1 epoch is the cheap rung, where the fidelity-sensitive lever is flat
+    # (it fails calibration); 2 epochs rank exactly like the reference (4) and cost less (it passes)
+    env = toy_env(cheap_below=2, sleep_per_epoch=0.05)
+    assert round_run(repo, "--rationale", "calibrate", env=env)[0] == 0
+    late = vspec({"x": vlever()}, fidelity_sensitive=True, fidelity_reason="pays off late")
+    code_hypothesis(repo, run_dir, tmp_path, 1, late, '    term += 0 * lever("H1.x") if cheap else -lever("H1.x")', env)
+    code, out = round_run(repo, "--rationale", "calibrate the ladder", env=env)
+    assert code == 0, out
+    [one, two] = out["fidelity_calibration"]["rungs"]
+    assert two["passed"], two  # a validated rung the escalation would move up to in epoch 0
+    if out["fidelity_calibration"]["chosen"] != {"epochs": 1}:
+        assert bo(repo, "accept-proxy", "--fidelity", '{"epochs": 1}', "--rationale", "cheap")[0] == 0
+    assert bo(repo, "set-delta", "0.1", "--rationale", "the user's effect")[0] == 0
+    code, out = change(repo, run_dir, "loss = 1.0 +", "loss = 1.5 +", "--breaking", env=env)
+    assert code == 0, out
+    code, out = bo(repo, "accept-proxy", "--fidelity", '{"epochs": 1}', "--rationale", "cheap again")
+    assert code == 1 and "earlier epoch" in out["reason"]  # the old calibration no longer holds
+
+    for _ in range(4):  # stalled at the proxy: more replicates, then a rung up
+        code, out = round_run(repo, "--rationale", "search", env=env)
+        assert code == 0, out
+        if any(e["step"] == "rung" for e in of_type(run_dir, "hypothesis_escalated")):
+            break
+    rung = [e for e in of_type(run_dir, "hypothesis_escalated") if e["step"] == "rung"]
+    assert rung and rung[0]["fidelity"] == {"epochs": 4} and rung[0]["stale_ladder"] is True, rung
+    assert bo(repo, "status")[1]["fidelity"]["fidelity"] == {"epochs": 4}
 
 
 def test_code_changes_are_refused_mid_round_on_protected_paths_and_with_nothing_to_commit(
@@ -350,6 +425,85 @@ def imports_toydep(python):
 
 def pip_freeze(python):
     return subprocess.run([str(python), "-m", "pip", "freeze"], capture_output=True, text=True).stdout
+
+
+PYPROJECT = '[project]\nname = "toy"\nversion = "0.1"\nrequires-python = ">=3.10"\ndependencies = []\n'
+
+
+def locked(tmp_path, python, lock):
+    """toy_bo as a project locked by `lock` (uv.lock or poetry.lock), after R0."""
+    repo = make_repo(tmp_path)
+    (repo / "pyproject.toml").write_text(PYPROJECT)
+    if lock == "uv.lock":
+        subprocess.run(["uv", "lock", "-q", "--offline"], cwd=repo, check=True)
+    else:
+        (repo / lock).write_text("# locked\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-q", "-m", "locked")
+    run_dir = init(repo, python, BASE + "delta: 0.1\nseed: 1\n")
+    assert round_run(repo, "--rationale", "calibrate", env=toy_env(sigma=SIGMA))[0] == 0
+    return repo, run_dir
+
+
+def test_add_dependency_in_a_uv_project_updates_its_lock_file(tmp_path, project_python):
+    repo, run_dir = locked(tmp_path, project_python, "uv.lock")
+    worktree, whl = run_dir / "worktree", wheel(tmp_path)
+    user_env = pip_freeze(project_python)
+    code, out = bo(repo, "add-dependency", str(whl), "--rationale", "the trainer needs toydep",
+                   env={**toy_env(sigma=SIGMA), "UV_OFFLINE": "1"})
+    assert code == 0, out
+    assert imports_toydep(run_dir / "venv" / "bin" / "python")
+    assert not imports_toydep(project_python) and pip_freeze(project_python) == user_env
+    head = git(worktree, "rev-parse", "HEAD")
+    assert out["commit"] == head and git(worktree, "status", "--porcelain") == ""
+    assert sorted(git(worktree, "diff-tree", "--no-commit-id", "--name-only", "-r", head).split()) == [
+        "pyproject.toml", "uv.lock"]  # the project's own lock, not a freeze file of the harness's
+    assert "toydep" in git(worktree, "show", "HEAD:pyproject.toml")
+    assert 'name = "toydep"' in git(worktree, "show", "HEAD:uv.lock")
+    [dep] = of_type(run_dir, "dependency_added")
+    assert dep["lock_file"] == "uv.lock" and dep["commit"] == head
+    assert any(r.startswith("toydep") for r in dep["freeze"])
+    assert out["equivalence_check"]["passed"] is True
+    code, out = bo(repo, "add-dependency", str(whl), "--rationale", "again", env={**os.environ, "UV_OFFLINE": "1"})
+    assert code == 1 and "already" in out["reason"]
+
+
+def fake_poetry(d, fail=False):
+    """A `poetry` on PATH that adds the requirement to poetry.lock, or leaves a stray file and fails."""
+    bin_ = d / "bin"
+    bin_.mkdir()
+    f = bin_ / "poetry"
+    f.write_text(f"#!{sys.executable}\nimport sys\nfrom pathlib import Path\n"
+                 + ("Path('stray.txt').write_text('half done')\nsys.exit('poetry: resolution failed')\n" if fail else
+                    "Path('poetry.lock').write_text(Path('poetry.lock').read_text() + sys.argv[-1] + '\\n')\n"))
+    f.chmod(0o755)
+    return {**toy_env(sigma=SIGMA), "PATH": f"{bin_}:{os.environ['PATH']}"}
+
+
+def test_add_dependency_in_a_poetry_project_updates_its_lock_file_without_installing_through_poetry(
+        tmp_path, project_python):
+    repo, run_dir = locked(tmp_path, project_python, "poetry.lock")
+    worktree, whl = run_dir / "worktree", wheel(tmp_path)
+    code, out = bo(repo, "add-dependency", str(whl), "--rationale", "the trainer needs toydep",
+                   env=fake_poetry(tmp_path))
+    assert code == 0, out
+    # poetry locked it; the harness installed it into the run venv
+    assert imports_toydep(run_dir / "venv" / "bin" / "python")
+    assert git(worktree, "show", "HEAD:poetry.lock") == f"# locked\n{whl}"
+    assert git(worktree, "status", "--porcelain") == ""
+    assert of_type(run_dir, "dependency_added")[0]["lock_file"] == "poetry.lock"
+
+
+def test_a_failed_lock_update_installs_nothing_and_leaves_the_worktree_as_it_was(tmp_path, project_python):
+    repo, run_dir = locked(tmp_path, project_python, "poetry.lock")
+    worktree, whl = run_dir / "worktree", wheel(tmp_path)
+    head = git(worktree, "rev-parse", "HEAD")
+    code, out = bo(repo, "add-dependency", str(whl), "--rationale", "the trainer needs toydep",
+                   env=fake_poetry(tmp_path, fail=True))
+    assert code == 1 and "poetry.lock" in out["reason"] and "resolution failed" in out["reason"]
+    assert not imports_toydep(run_dir / "venv" / "bin" / "python")
+    assert git(worktree, "rev-parse", "HEAD") == head and git(worktree, "status", "--porcelain") == ""
+    assert not of_type(run_dir, "dependency_added")
 
 
 def test_add_dependency_installs_only_into_the_run_venv_and_commits_its_freeze(tmp_path, project_python):
