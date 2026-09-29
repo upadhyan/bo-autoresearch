@@ -535,3 +535,23 @@ def test_two_substitute_levers_are_never_both_rejected_at_one_round_end(tmp_path
             [applied] = [v for v in same if v["id"] in rejected]
             deferred_v = next(v for v in same if v["id"] == d["verdict"])
             assert applied["delta_stat"]["upper"] <= deferred_v["delta_stat"]["upper"]
+
+
+def test_a_reject_deferred_behind_another_flat_lever_carries_its_confirmation_to_the_next_check(tmp_path,
+                                                                                                project_python):
+    # two flat levers that are not substitutes, next to a bowl: each is `no-improvement` (the bowl leaves most
+    # of the box unexplored with them moved), both confirmed in R1, so the substitutes rule defers one. Its next
+    # check (R3 here: R2 stalls before it's due) still says reject and rejects it outright, confirming the
+    # deferred verdict, with no new pending check. Measured: a deferral in R1 in 7 of seeds 0..7, each rejected
+    # by the carried confirmation at its next check; seed 2 is one of the 7
+    bowl = (spec({"x": lever(0.2)}), '    term += 4 * (lever("H1.x") - 0.7) ** 2')
+    flat = [(spec({c: lever()}), f'    term += 0 * lever("H{n}.{c}")') for n, c in ((2, "y"), (3, "z"))]
+    run_dir, _ = verdict_run(tmp_path / "r", project_python, 2, [bowl, *flat], rounds=3)
+    [d] = of_type(run_dir, "reject_deferred")
+    assert "reason" not in d and d["round"] == 1
+    vs = records(run_dir, d["id"])
+    nxt = vs[[v["id"] for v in vs].index(d["verdict"]) + 1]
+    assert nxt["round"] > 1 and nxt["outcome"] == "reject" and nxt["confirmation"]["confirms"] == d["verdict"]
+    rejected = {p["id"]: p["verdict"] for p in of_type(run_dir, "hypothesis_rejected")}
+    other = ({"H2.v1", "H3.v1"} - {d["id"]}).pop()
+    assert rejected == {d["id"]: nxt["id"], other: rejected[other]} and rejected[other].startswith("V-R1-")

@@ -896,3 +896,16 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   reference's cap makes it inconclusive. Also: no check freezes a lever of a fidelity-sensitive hypothesis at a proxy
   fidelity (a freeze is a lever's reject; spec "can't be rejected at a proxy"); before, a 2-lever tail flat at the proxy
   fidelity was frozen there.
+- Scripted-benchmark crash (HANDOFF "BLOCKING BUG"; supersedes the M_u entry's "a deferred reject confirms nothing"): root cause is cdaab6d (the verdict GP's δ-based signal floor) ×
+  the substitutes rule in `_finalise_rejects` (one `no-improvement` reject per round end; `irrelevant` exempt). Evidence
+  (dogfood seed 1, σ 0.025, run at 10cf86b, cdaab6d^, cdaab6d, main): from cdaab6d on, R1's flat H4/H8 next to a curved
+  partner come out `no-improvement` instead of `irrelevant`, so `reject_deferred` appears for them at R1's end, and a
+  deferred reject then needed a fresh pending-reject + confirmation, which R2 didn't reach. User's choice (a), carry the
+  confirmation over: a reject the substitutes rule deferred (`reject_deferred` with no `reason`; the fold adds
+  `h["substituted"]` beside `h["deferred"]`, which still lists both kinds for reports) is re-judged at its next check
+  (the `_latest` record is that deferred reject), and if the check still says reject (same gates and condition), its
+  outcome is `reject` with `confirmation.confirms` = the deferred verdict's id, applied at that round end (still one
+  per round end, and the proxy/drift rules as before); if not, it's back on the normal path and a later reject needs
+  pending + confirm again. The "undecidable proxy fidelity" deferral keeps its fresh pending + confirm. Also c576848:
+  `benchmarks/dogfood/scripted.py` flags only interplay partners the harness accepts (status rejected / inconclusive /
+  parked), so a timing change fails a verdict criterion instead of crashing the run.

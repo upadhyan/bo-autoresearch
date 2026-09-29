@@ -2087,7 +2087,8 @@ def _verdict_checks(con, st: dict, r: int, space: dict, baseline: dict, eligible
                             "passed": len(fresh) >= sched["needed"]}, **stats.pop("gates")}
         gated = all(g["passed"] for g in gates.values())
         condition = _condition(stats, delta)
-        pending = last is not None and last["outcome"] == "pending-reject"
+        # a reject the substitutes rule deferred is still confirmed: re-judged, it needs no new pending check
+        pending = last is not None and (last["outcome"] == "pending-reject" or last["id"] in h["substituted"])
         held, reason = None, None
         late = h["spec"]["fidelity_sensitive"] and at_proxy  # this fidelity can't show its effect
         if not gates["homogeneity"]["passed"]:  # v1 models constant noise only: never a reject
@@ -2191,10 +2192,10 @@ def _finalise_rejects(con, r: int, drift: dict | None) -> None:
     confirmed = [(h, v) for h, v in last if v["round"] == r and v["outcome"] == "reject"]
     # substitutes (two levers doing the same thing) each show Δ ≈ 0, the other optimised in both terms:
     # one `no-improvement` reject per round end, the smallest upper bound of Δ first; the rest are
-    # re-judged next round (an `irrelevant` one can't be a substitute: its M_u, which sees the partner
-    # at baseline, is below δ)
-    # ponytail: k substitutes take k rounds, and a deferred reject needs a fresh pending check and its
-    # confirmation; carry the confirmation over if that proves too slow
+    # re-judged at their next check, which rejects outright if it still says reject (the confirmation
+    # carries over: `_verdict_checks`) and otherwise returns them to the normal path (an `irrelevant`
+    # one can't be a substitute: its M_u, which sees the partner at baseline, is below δ)
+    # ponytail: k substitutes still take k round ends; release more than one per round end if that proves too slow
     first = min(((v["delta_stat"]["upper"], v["id"]) for _, v in confirmed if v["condition"] == "no-improvement"),
                 default=None)
     for h, v in confirmed:
