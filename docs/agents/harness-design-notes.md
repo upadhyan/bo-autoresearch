@@ -862,3 +862,37 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   Residual: the harness installs the requirement on its own, so the venv can resolve versions other than the lock's
   (the run venv comes from the user environment's freeze, not the lock); poetry locks against the project's Python
   constraint, not the run venv's interpreter.
+- #26 limit (evidence cap; spec "at max(40·d, 80) fresh trials without a verdict, the hypothesis becomes inconclusive",
+  story 51 "so that no hypothesis consumes budget forever"): the cap no longer restarts on a rung change or a freeze.
+  `cli._evidence(st, h)` = finished sampler trials of the current epoch since the hypothesis entered the search
+  (`activated_round`), where it wasn't masked, at EVERY fidelity and whatever its group or ranges were then (eligibility
+  aside: trials a freeze or narrowing filtered out still count). The cap is max(40·d, 80) on the DECLARED levers (a
+  freeze shrinks the group, not the allowance); burn-in, spacing and `burn_in.fresh` stay per fidelity/group as before,
+  and inconclusive still fires only at a verdict check, so a hypothesis escalated a rung always gets its burn-in there
+  (measured: the stuck lever at a faithful proxy fidelity, seeds 0..19, is capped at the reference's first or second check, at
+  20–40 fresh and 80–88 sampler trials, 20/20). Record `burn_in` gains `evidence`; reason "no verdict after N sampler
+  trials" (reports' evidence-cap section keys on the prefix; the testing line shows "evidence cap N of cap"). A new
+  epoch still restarts it (its trials are stale evidence, and epochs come only from code changes). Freezes are a lever's
+  reject, so they get the rejects' downgrade: `_finalise_rejects` logs `lever_unfrozen` {id, lever, verdict, reason}
+  for each freeze of the round unless the round was at the reference or its drift check passed (reason "broken proxy
+  fidelity" | "undecidable proxy fidelity" (a deferral: re-decided at a later check) | "proxy fidelity unchecked");
+  the fold pops `h["frozen"][lever]`, so the lever is searched again and `_latest` finds the group's pre-freeze record
+  (schedule resumes). Only the round's own freezes (the spec downgrades "that round's rejects"). `_finalise_rejects`
+  and the drift check's proxy σ̂ now read the round's fidelity (`st["rounds"][r]["fidelity"]`), not the run's.
+  Residual (ponytail in `_finalise_rejects`): at a proxy fidelity that stays undecidable a freeze can recur and be
+  undone every round (ending each round early); the evidence cap, which a freeze no longer restarts, bounds that churn.
+  Review fixes: the proxy-noun wording above; the round is parsed from verdict ids by split in the test.
+- #38 limit (held hypothesis at its cap; supersedes "#38 (dogfood findings, harness): … exempt from the evidence cap"):
+  #38 exempted a fidelity-sensitive hypothesis at a proxy fidelity from the cap because its proxy trials say nothing
+  about it (an inconclusive at a proxy fidelity would remove the planted late-payoff lever before the reference ever saw
+  it); that left it unbounded until a stall or the budget. Now its cap still counts, but only at the current fidelity
+  (`_evidence`: a proxy fidelity's trials are no evidence about it at a dearer rung), and reaching it at a proxy fidelity
+  is a rung escalation instead of
+  an inconclusive (spec escalation order: replicates, a higher rung, then inconclusive; replicates can't show an effect
+  the fidelity hides, so it goes straight to the rung): the check's record stays `active` + held, and
+  `hypothesis_escalated` {id, round, step rung, fidelity (`_next_rung`), proxy, stale_ladder, verdict, reason "evidence
+  cap"} is logged; the fold moves the run up a rung, and the round loop ends the round on it, trigger `fidelity` (spec's
+  round-end "a fidelity change"; checked before `search_space`). Bounded: cap × (rungs above the proxy fidelity + 1) before the
+  reference's cap makes it inconclusive. Also: no check freezes a lever of a fidelity-sensitive hypothesis at a proxy
+  fidelity (a freeze is a lever's reject; spec "can't be rejected at a proxy"); before, a 2-lever tail flat at the proxy
+  fidelity was frozen there.

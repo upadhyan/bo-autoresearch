@@ -254,8 +254,8 @@ def stuck_run(run_dir, outs) -> bool:
     assert sum(t["kind"] == "replicate" for t in r2) / len(r2) > sum(t["kind"] == "replicate" for t in r1) / len(r1)
     [inc] = of_type(run_dir, "hypothesis_inconclusive")
     last = records(run_dir)[-1]
-    assert inc == {"id": "H1.v1", "verdict": last["id"], "reason": "no verdict after 80 fresh sampler trials"}
-    assert last["burn_in"]["fresh"] == 80 and last["outcome"] == "inconclusive"
+    assert inc == {"id": "H1.v1", "verdict": last["id"], "reason": "no verdict after 80 sampler trials"}
+    assert last["burn_in"]["fresh"] == last["burn_in"]["evidence"] == 80 and last["outcome"] == "inconclusive"
     assert outs[-1]["trigger"] == "search_space"
     assert bo(run_dir.parents[1], "status")[1]["next"] == [
         "propose and register a hypothesis",
@@ -388,19 +388,32 @@ def test_a_flat_lever_next_to_a_curved_one_is_frozen_no_improvement_and_leaves_t
         assert not of_type(run_dir, "hypothesis_rejected")
 
 
-def test_a_held_fidelity_sensitive_lever_waits_for_escalation_and_never_breaks_the_drift_check(
+def test_a_held_fidelity_sensitive_hypothesis_at_its_cap_moves_the_run_up_a_rung_and_never_breaks_the_drift_check(
         tmp_path, project_python):
-    # an 8-lever flat hypothesis burns in over 80 fresh trials, so no stall (and no escalation) comes first:
-    # the tail's proxy trials say nothing about it, so the evidence cap can't make it inconclusive there
-    late = (spec({"x": lever()}, fidelity_sensitive=True, fidelity_reason="pays off late"),
-            '    term += 0 * lever("H1.x") if cheap else -lever("H1.x")')
+    # an 8-lever flat hypothesis burns in over 80 fresh trials, so no stall (and no stall escalation) comes
+    # first. The tail's proxy trials say nothing about it: its evidence cap can't make it inconclusive there,
+    # and no check may freeze one of its levers there (a lever's reject); at the cap it escalates a rung
+    late = (spec({"x": lever(), "u": lever()}, fidelity_sensitive=True, fidelity_reason="pays off late"),
+            '    term += 0 * (lever("H1.x") + lever("H1.u")) if cheap else -lever("H1.x") - lever("H1.u")')
     names = "abcdefgh"
     wide = (spec({n: lever() for n in names}),
             "    term += 0 * (" + " + ".join(f'lever("H2.{n}")' for n in names) + ")")
     run_dir, outs = verdict_run(tmp_path / "r", project_python, 1, [late, wide], proxy=True, rounds=2)
-    at_cap = [v for v in records(run_dir) if v["burn_in"]["fresh"] >= 80 and v["fidelity"] == {"epochs": 1}]
-    assert at_cap, [v["burn_in"]["fresh"] for v in records(run_dir)]
-    assert all(v["outcome"] == "active" for v in at_cap)
+    at_proxy = [v for v in records(run_dir) if v["fidelity"] == {"epochs": 1}]
+    assert at_proxy and all(v["outcome"] == "active" and v["frozen"] == [] for v in at_proxy), at_proxy
+    assert not [f for f in of_type(run_dir, "lever_frozen") if f["id"] == "H1.v1"]
+    *before, cap = at_proxy
+    assert cap["burn_in"]["evidence"] == 80 and all(v["burn_in"]["evidence"] < 80 for v in before)
+    [esc] = [e for e in of_type(run_dir, "hypothesis_escalated") if e["id"] == "H1.v1"]
+    assert esc == {"id": "H1.v1", "round": 1, "step": "rung", "fidelity": {"epochs": 4}, "proxy": "reference",
+                   "stale_ladder": False, "verdict": cap["id"], "reason": "evidence cap"}
+    assert outs[0]["trigger"] == "fidelity"  # a fidelity change ends the round
+    [r2] = [s for s in of_type(run_dir, "round_started") if s["round"] == 2]
+    assert r2["fidelity"] == {"epochs": 4}
+    # at the reference its count restarts (the proxy fidelity's trials were no evidence about it)
+    at_ref = [v for v in records(run_dir) if v["fidelity"] == {"epochs": 4}]
+    assert at_ref and all(v["outcome"] in ("active", "retained") for v in at_ref), at_ref
+    assert all(v["burn_in"]["evidence"] == v["burn_in"]["fresh"] for v in at_ref)
     assert not [e for e in of_type(run_dir, "hypothesis_inconclusive") if e["id"] == "H1.v1"]
     # the drift check never blames the proxy fidelity for the tail it can't show: when it runs a pair, the
     # two configs differ in the other levers only and both run the incumbent's fidelity-sensitive one; here
@@ -410,6 +423,54 @@ def test_a_held_fidelity_sensitive_lever_waits_for_escalation_and_never_breaks_t
     drift = {t["trial"]: t["levers"] for t in of_type(run_dir, "trial_started") if t["kind"] == "drift"}
     pairs = [[drift[t] for t in c["trials"]] for c in checks if not c["undecidable"]]
     assert all(a["H1.x"] == b["H1.x"] and a != b for a, b in pairs)
+
+
+def test_a_freeze_made_at_a_broken_proxy_fidelity_is_undone(tmp_path, project_python):
+    # z does nothing and x's bowl ranks backwards at the proxy fidelity (scrambled): the check that freezes z
+    # there rests on a fidelity the round's drift check finds broken, so, like a reject, the freeze is
+    # downgraded: z returns to the search and H1 stays in it
+    two = (spec({"x": lever(0.2), "z": lever()}),
+           '    term += 4 * (lever("H1.x") - 0.7) ** 2 + 0 * lever("H1.z")')
+    run_dir, outs = verdict_run(tmp_path / "r", project_python, 0, [two], proxy=True, rounds=2, scramble=1,
+                                extra="deterministic: true\n", sigma=0)
+    # noise off (σ̂ = 0) so the drift check sees the reversal: over seeds 0..9, z was frozen in R1 and R1's
+    # check found the proxy fidelity broken in 9 of 10; seed 0 replays it
+    frozen = of_type(run_dir, "lever_frozen")
+    assert frozen and frozen[0]["lever"] == "H1.z" and frozen[0]["verdict"].startswith("V-R1-"), frozen
+    assert outs[0]["trigger"] == "search_space" and outs[0]["drift"]["broken"] is True
+    [r2] = [s for s in of_type(run_dir, "round_started") if s["round"] == 2]
+    assert set(r2["search_space"]) == {"H1.x", "H1.z"}
+    # every freeze stands only when its round's drift check passed (R2's may be undecidable: deferred likewise)
+    reasons = {o["round"]: None if o["drift"]["broken"] is False else "undecidable proxy fidelity"
+               if o["drift"]["undecidable"] else "broken proxy fidelity" for o in outs}
+    in_round = [(f, reasons[int(f["verdict"].split("-")[1][1:])]) for f in frozen]  # V-R<r>-H<n>.v<k>-<check>
+    assert of_type(run_dir, "lever_unfrozen") == [
+        {"id": "H1.v1", "lever": f["lever"], "verdict": f["verdict"], "reason": why} for f, why in in_round if why]
+    assert of_type(run_dir, "lever_unfrozen")[0]["reason"] == "broken proxy fidelity"
+    assert not of_type(run_dir, "hypothesis_rejected") and not of_type(run_dir, "hypothesis_inconclusive")
+
+
+@pytest.mark.slow
+def test_a_stuck_hypothesis_carries_its_evidence_up_a_rung_to_the_cap(tmp_path, project_python):
+    # the stuck lever (a gain of exactly δ, σ = 1.5δ) at a faithful proxy fidelity: a stall buys replicates,
+    # the next one the reference; its proxy trials still count, so the cap is reached there before 80 fresh
+    stuck = (spec({"x": lever()}), '    term += -0.1 * lever("H1.x")')
+    runs = repeat(tmp_path, project_python, [stuck], seeds=range(10), rounds=6, sigma=0.15, proxy=True)
+    capped = 0
+    for run_dir, outs in runs:
+        steps = [e["step"] for e in of_type(run_dir, "hypothesis_escalated")]
+        inc = of_type(run_dir, "hypothesis_inconclusive")
+        if steps != ["replicates", "rung"] or not inc:
+            continue
+        last = records(run_dir)[-1]
+        assert last["fidelity"] == {"epochs": 4} and last["outcome"] == "inconclusive"
+        assert last["burn_in"]["evidence"] >= 80 > last["burn_in"]["fresh"]
+        assert inc == [{"id": "H1.v1", "verdict": last["id"],
+                        "reason": f"no verdict after {last['burn_in']['evidence']} sampler trials"}]
+        capped += 1
+    # measured 20 of 20 over seeds 0..19 (capped at the reference at 20-40 fresh, 80-88 sampler trials in all);
+    # at a true 90%, fewer than 8 of 10 has probability ~7%
+    assert capped >= 8, capped
 
 
 @pytest.mark.slow

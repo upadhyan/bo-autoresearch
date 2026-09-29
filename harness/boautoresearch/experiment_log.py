@@ -12,7 +12,7 @@ EVENT_TYPES = {"run_started", "trial_started", "trial_finished", "trial_failed",
                "proxy_accepted_unvalidated", "hypothesis_proposed", "hypothesis_registered",
                "lever_smoke", "lever_committed", "delta_set", "hypothesis_activated",
                "trial_heartbeat", "trial_abandoned", "drift_check", "run_ended", "verdict",
-               "hypothesis_rejected", "hypothesis_inconclusive", "hypothesis_escalated", "lever_frozen", "record",
+               "hypothesis_rejected", "hypothesis_inconclusive", "hypothesis_escalated", "lever_frozen", "lever_unfrozen", "record",
                "commit_change", "dependency_added", "equivalence_check", "epoch_started", "narrowed",
                "hypothesis_prioritized", "hypothesis_parked", "hypothesis_unparked", "trial_enqueued",
                "agent_trial_skipped", "checkpoint", "user_pause", "user_resume", "removal",
@@ -217,6 +217,8 @@ def state(events: list[dict]) -> dict:
             h["spec"] = {**h["spec"], "levers": {**levers, p["lever"]: {**levers[p["lever"]], **p["after"]}}}
         elif e["type"] == "lever_frozen":
             hyps[p["id"]]["frozen"][p["lever"]] = p["condition"]
+        elif e["type"] == "lever_unfrozen":  # frozen at a proxy fidelity its drift check didn't pass
+            hyps[p["id"]]["frozen"].pop(p["lever"], None)
         elif e["type"] == "reject_deferred":
             hyps[p["id"]]["deferred"].append(p["verdict"])
         elif e["type"] == "record":
