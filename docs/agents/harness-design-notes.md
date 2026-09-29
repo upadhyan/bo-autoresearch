@@ -909,3 +909,9 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   pending + confirm again. The "undecidable proxy fidelity" deferral keeps its fresh pending + confirm. Also c576848:
   `benchmarks/dogfood/scripted.py` flags only interplay partners the harness accepts (status rejected / inconclusive /
   parked), so a timing change fails a verdict criterion instead of crashing the run.
+- Verdict-check spacing counts unseen fresh trials: a later check is due once the fresh sampler trials the last check
+  didn't see (not in its `trials`) reach max(5·d, 10); the first stays at burn-in. Before, it was due at the last check's
+  fresh count + spacing, but a freeze or no-improvement reject elsewhere filters trials out of the eligible set, so the
+  fresh count can shrink (dogfood seed 1: H2.smoothing_ramp's freeze took H8 from 40 fresh to 16, and its check waited
+  34 new trials, R2 → R6). Without shrinkage nothing changes. `confirmation.due_at` stays count + spacing (only a
+  display in reports; it overstates the count after a shrink). The planted reports fixture now reaches H1's R3 check.

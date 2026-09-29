@@ -2074,8 +2074,10 @@ def _verdict_checks(con, st: dict, r: int, space: dict, baseline: dict, eligible
     for h in _in_search(st):
         sched, group, last = _schedule(h), _group(h), _latest(h, st)
         fresh = _fresh(st, h, eligible)
-        due = last["burn_in"]["fresh"] + sched["spacing"] if last else sched["needed"]
-        if len(fresh) < due:
+        # the spacing counts the fresh trials the last check didn't see: a freeze or reject elsewhere filters
+        # trials out, so `fresh` can shrink between checks
+        seen = set(last["trials"]) if last else set()
+        if sum(t not in seen for t in fresh) < (sched["spacing"] if last else sched["needed"]):
             continue
         check = sum(v["round"] == r for v in h["verdicts"]) + 1
         vid = f"V-R{r}-{h['id']}-{check}"

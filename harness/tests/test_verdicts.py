@@ -388,6 +388,23 @@ def test_a_flat_lever_next_to_a_curved_one_is_frozen_no_improvement_and_leaves_t
         assert not of_type(run_dir, "hypothesis_rejected")
 
 
+def test_a_check_is_due_after_spacing_new_fresh_trials_even_when_a_freeze_elsewhere_shrinks_them(
+        tmp_path, project_python):
+    # H1.z is frozen `no-improvement` at R1's end (see the test above), so R2 filters out every trial that
+    # moved it: H2's fresh set shrinks. Its next check still comes after max(5·1, 10) = 10 fresh sampler
+    # trials its last check didn't see, not at the last check's count + 10 (which the shrunk set may never reach)
+    two = (spec({"x": lever(0.2), "z": lever()}), '    term += 4 * (lever("H1.x") - 0.7) ** 2 + 0 * lever("H1.z")')
+    useful = (spec({"w": lever()}), '    term += -0.3 * lever("H2.w")')
+    run_dir, _ = verdict_run(tmp_path / "r", project_python, 1, [two, useful], rounds=2)
+    assert [f["lever"] for f in of_type(run_dir, "lever_frozen")] == ["H1.z"]
+    vs = records(run_dir, "H2.v1")
+    [last] = [v for v in vs if v["round"] == 1][-1:]
+    [nxt, *_] = [v for v in vs if v["round"] == 2]
+    assert nxt["burn_in"]["fresh"] < last["burn_in"]["fresh"] + 10  # the fresh set shrank
+    sampler = {t["trial"] for r in (1, 2) for t in started_in(run_dir, r) if t["kind"] == "sampler"}
+    assert len(sampler & set(nxt["trials"]) - set(last["trials"])) == 10
+
+
 def test_a_held_fidelity_sensitive_hypothesis_at_its_cap_moves_the_run_up_a_rung_and_never_breaks_the_drift_check(
         tmp_path, project_python):
     # an 8-lever flat hypothesis burns in over 80 fresh trials, so no stall (and no stall escalation) comes
@@ -541,9 +558,10 @@ def test_a_reject_deferred_behind_another_flat_lever_carries_its_confirmation_to
                                                                                                 project_python):
     # two flat levers that are not substitutes, next to a bowl: each is `no-improvement` (the bowl leaves most
     # of the box unexplored with them moved), both confirmed in R1, so the substitutes rule defers one. Its next
-    # check (R3 here: R2 stalls before it's due) still says reject and rejects it outright, confirming the
-    # deferred verdict, with no new pending check. Measured: a deferral in R1 in 7 of seeds 0..7, each rejected
-    # by the carried confirmation at its next check; seed 2 is one of the 7
+    # check, 10 fresh trials into R2, still says reject and rejects it outright, confirming the deferred verdict,
+    # with no new pending check. Measured (before the spacing counted only unseen trials, when the check slipped
+    # to R3): a deferral in R1 in 7 of seeds 0..7, each rejected by the carried confirmation at its next check;
+    # seed 2 is one of the 7
     bowl = (spec({"x": lever(0.2)}), '    term += 4 * (lever("H1.x") - 0.7) ** 2')
     flat = [(spec({c: lever()}), f'    term += 0 * lever("H{n}.{c}")') for n, c in ((2, "y"), (3, "z"))]
     run_dir, _ = verdict_run(tmp_path / "r", project_python, 2, [bowl, *flat], rounds=3)
@@ -551,7 +569,7 @@ def test_a_reject_deferred_behind_another_flat_lever_carries_its_confirmation_to
     assert "reason" not in d and d["round"] == 1
     vs = records(run_dir, d["id"])
     nxt = vs[[v["id"] for v in vs].index(d["verdict"]) + 1]
-    assert nxt["round"] > 1 and nxt["outcome"] == "reject" and nxt["confirmation"]["confirms"] == d["verdict"]
+    assert nxt["round"] == 2 and nxt["outcome"] == "reject" and nxt["confirmation"]["confirms"] == d["verdict"]
     rejected = {p["id"]: p["verdict"] for p in of_type(run_dir, "hypothesis_rejected")}
     other = ({"H2.v1", "H3.v1"} - {d["id"]}).pop()
     assert rejected == {d["id"]: nxt["id"], other: rejected[other]} and rejected[other].startswith("V-R1-")
