@@ -1351,33 +1351,45 @@ def cmd_add_dependency(a) -> dict:
         raise Refused("the worktree has uncommitted changes: commit them with commit-change first")
     python = run_dir / "venv" / "bin" / "python"
     # a local path is the caller's: the lock tool runs in the worktree
-    req = str(Path(a.requirement).resolve()) if Path(a.requirement).exists() else a.requirement
-    lock = _lock_command(worktree, python, req)
-    _change_allowed(run_dir, st, ["pyproject.toml", lock[0]] if lock else [FREEZE_FILE])
-    if lock:  # first, so a failed resolution installs nothing
+    local = os.sep in a.requirement and Path(a.requirement).exists()
+    req = str(Path(a.requirement).resolve()) if local else a.requirement
+    lock_file, lock_cmd = _lock_command(worktree, python, req) or (FREEZE_FILE, None)
+    _change_allowed(run_dir, st, [FREEZE_FILE] if lock_cmd is None else ["pyproject.toml", lock_file])
+
+    def restore() -> None:  # the tree was clean: as it was
+        _git(worktree, "checkout", "--", ".")
+        _git(worktree, "clean", "-fdq")
+    if lock_cmd:  # first, so a failed resolution installs nothing
         try:
-            p = subprocess.run(lock[1], cwd=worktree, capture_output=True, text=True)
+            p = subprocess.run(lock_cmd, cwd=worktree, capture_output=True, text=True)
         except FileNotFoundError:
-            raise Refused(f"the project locks with {lock[0]}, but {lock[1][0]} is not on PATH")
+            raise Refused(f"the project locks with {lock_file}, but {lock_cmd[0]} is not on PATH")
         if p.returncode:
-            _git(worktree, "checkout", "--", ".")  # the tree was clean: as it was
-            raise Refused(f"adding {a.requirement} to {lock[0]} failed: {(p.stderr or p.stdout).strip()}")
+            restore()
+            raise Refused(f"adding {a.requirement} to {lock_file} failed: {(p.stderr or p.stdout).strip()}")
+        try:  # whatever the tool wrote, not only what it was expected to
+            _change_allowed(run_dir, st, _changed_paths(worktree, _worktree_tree(worktree)))
+        except Refused:
+            restore()
+            raise
     uv = shutil.which("uv")
     cmd = ([uv, "pip", "install", "-q", "--python", str(python), req] if uv else
            [str(python), "-m", "pip", "install", "-q", "--disable-pip-version-check", req])
     p = subprocess.run(cmd, capture_output=True, text=True)
     if p.returncode:  # ponytail: trusts the installer to leave the venv as it was on failure
-        _git(worktree, "checkout", "--", ".")
+        restore()
         raise Refused(f"installing {a.requirement} into the run venv failed: {p.stderr.strip()}")
+    # ponytail: installs the requirement on its own, so the venv may resolve versions other than the
+    # lock's (the run venv comes from the user's environment's freeze, not the lock); install from
+    # the lock (`uv export`, `poetry export`) if the two drift apart
     freeze = [r for r in _freeze(str(python)) if re.split(r"[=<>@ ]", r)[0].lower() != "boautoresearch"]
-    if not lock:
+    if lock_cmd is None:
         (worktree / FREEZE_FILE).write_text("".join(f"{r}\n" for r in freeze))
     if not _git(worktree, "status", "--porcelain"):
         raise Refused(f"{a.requirement} is already in the run venv: nothing changed")
     sha = _commit(worktree, f"add-dependency: {a.requirement}")
     elog.append(con, "dependency_added", a.actor, {"rationale": a.rationale, "requirement": a.requirement,
-                                                   "commit": sha, "freeze": freeze,
-                                                   "lock_file": lock[0] if lock else FREEZE_FILE})
+                                                   "commit": sha, "freeze": freeze, "lock_file": lock_file})
     return {"requirement": a.requirement, "commit": sha,
             **_after_change(run_dir, con, sha, "dependency_added")}
 
@@ -1579,16 +1591,18 @@ def _measure_sigma(run_dir: Path, con, fidelity: dict) -> None:
 
 
 def _remeasure_stale(run_dir: Path, con, fidelities: list[dict]) -> None:
-    """σ at each of these fidelities that the current epoch has not measured yet."""
+    """σ at each of these fidelities that the current epoch has not tried to measure yet (once: a
+    measurement whose replicates failed is not retried every round)."""
     st = elog.load(con)
-    for x in st["noise"]["rungs"]:
-        if x["fidelity"] in fidelities and x.get("epoch", 0) != st["epoch"]["epoch"]:
-            _measure_sigma(run_dir, con, x["fidelity"])
+    tried = [b["fidelity"] for b in st["baselines"] if b["epoch"] == st["epoch"]["epoch"]]
+    for f in dict.fromkeys(json.dumps(f, sort_keys=True) for f in fidelities):
+        if json.loads(f) not in tried:
+            _measure_sigma(run_dir, con, json.loads(f))
 
 
 def _ladder_stale(st: dict) -> bool:
     """The ladder was calibrated in an earlier epoch: its rung validations no longer count."""
-    return (st["calibration"] or {}).get("epoch", 0) != st["epoch"]["epoch"]
+    return bool(st["calibration"]) and st["calibration"].get("epoch", 0) != st["epoch"]["epoch"]
 
 
 def _workspace(run_dir: Path, st: dict) -> dict[str, str]:
@@ -2839,6 +2853,8 @@ def cmd_accept_proxy(a) -> dict:
         raise Refused(f"--fidelity must be JSON, e.g. '{{\"epochs\": 2}}': {e}")
     if not st["r0_complete"] or not st["calibration"]:
         raise Refused("accept-proxy needs a completed ladder calibration in R0")
+    if _ladder_stale(st):
+        raise Refused("the ladder was calibrated in an earlier epoch: its rung results no longer hold")
     rung = next((r for r in st["calibration"]["rungs"] if r["fidelity"] == fidelity), None)
     if rung is None:
         raise Refused(f"{a.fidelity} is not a rung of the ladder")

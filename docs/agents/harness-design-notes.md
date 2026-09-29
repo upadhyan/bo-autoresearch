@@ -802,3 +802,11 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   into the run venv as before and commits pyproject.toml + the lock (no freeze file). Lock first, so a failed resolution
   installs nothing; either failure restores the (clean) tree. uv.lock wins when both exist. A lock file whose tool is
   missing is refused, not silently frozen. Other projects keep the freeze file. `dependency_added.lock_file` names it.
+- #28 limits (review): a rung's σ is re-measured once per epoch, tried or not (`_remeasure_stale` reads the epoch's
+  `noise_estimate`s via `baselines`, so a measurement whose replicates failed is not re-bought every round); `accept-proxy`
+  is refused on a stale ladder; `stale_ladder` is false when no ladder was calibrated. `add-dependency` checks every path
+  the lock tool actually wrote (not only pyproject.toml + the lock) against the protected paths, and a failure restores
+  the tree with checkout + clean. A requirement is taken as a local path only when it contains a path separator.
+  Residual: the harness installs the requirement on its own, so the venv can resolve versions other than the lock's
+  (the run venv comes from the user environment's freeze, not the lock); poetry locks against the project's Python
+  constraint, not the run venv's interpreter.

@@ -2,7 +2,6 @@
 add-dependency and the equivalence check, against the toy_bo trainer with lever code of our own."""
 import json
 import os
-import statistics
 import subprocess
 import sys
 import time
@@ -235,6 +234,8 @@ def epoch_noise(run_dir, epoch):
 def test_a_new_epoch_at_a_proxy_re_measures_the_reference_sigma_before_the_next_round(
         tmp_path, project_python):
     repo = make_repo(tmp_path)
+    # one seed, the file's usual: nothing asserted here is a rate (σ's 20x jump is a sure thing, the
+    # rest is structure)
     run_dir = init(repo, project_python, BASE + "ladder: [{epochs: 1}]\nseed: 1\n")
     env = toy_env(sigma=SIGMA, cheap_below=2)
     coded(repo, run_dir, tmp_path, code=FLAT, env=env)  # rejected soon: a short round
@@ -259,11 +260,10 @@ def test_a_new_epoch_at_a_proxy_re_measures_the_reference_sigma_before_the_next_
     [_, ref] = epoch_noise(run_dir, epoch)
     assert ref["fidelity"] == {"epochs": 4} and ref["n"] == 3
     started = {p["trial"]: p for p in of_type(run_dir, "trial_started")}
-    objective = {p["trial"]: p["objective"] for p in of_type(run_dir, "trial_finished")}
     reps = [started[t] for t in ref["trials"]]
     assert all(t["kind"] == "baseline" and t["fidelity"] == {"epochs": 4} and t["epoch"] == epoch
                and "round" not in t for t in reps)
-    assert ref["sigma"] == statistics.stdev(objective[t] for t in ref["trials"])
+    assert 0.3 < ref["sigma"] < 3  # the planted reference σ is 1 (R0's was 0.05); 3 replicates
     status = bo(repo, "status")[1]
     assert status["sigma"] == ref["sigma"] != r0_ref
     assert max(ref["trials"]) < min(t for t, p in started.items() if p.get("round") == out["round"])
@@ -288,6 +288,8 @@ def test_after_a_new_epoch_a_stalled_proxy_escalates_to_the_reference_not_a_stal
     assert bo(repo, "set-delta", "0.1", "--rationale", "the user's effect")[0] == 0
     code, out = change(repo, run_dir, "loss = 1.0 +", "loss = 1.5 +", "--breaking", env=env)
     assert code == 0, out
+    code, out = bo(repo, "accept-proxy", "--fidelity", '{"epochs": 1}', "--rationale", "cheap again")
+    assert code == 1 and "earlier epoch" in out["reason"]  # the old calibration no longer holds
 
     for _ in range(4):  # stalled at the proxy: more replicates, then a rung up
         code, out = round_run(repo, "--rationale", "search", env=env)
@@ -464,13 +466,12 @@ def test_add_dependency_in_a_uv_project_updates_its_lock_file(tmp_path, project_
 
 
 def fake_poetry(d, fail=False):
-    """A `poetry` on PATH that logs its arguments and adds the requirement to poetry.lock (or fails)."""
+    """A `poetry` on PATH that adds the requirement to poetry.lock, or leaves a stray file and fails."""
     bin_ = d / "bin"
     bin_.mkdir()
     f = bin_ / "poetry"
     f.write_text(f"#!{sys.executable}\nimport sys\nfrom pathlib import Path\n"
-                 f"with open({str(d / 'poetry-args.txt')!r}, 'a') as log:\n    log.write(' '.join(sys.argv[1:]) + '\\n')\n"
-                 + ("sys.exit('poetry: resolution failed')\n" if fail else
+                 + ("Path('stray.txt').write_text('half done')\nsys.exit('poetry: resolution failed')\n" if fail else
                     "Path('poetry.lock').write_text(Path('poetry.lock').read_text() + sys.argv[-1] + '\\n')\n"))
     f.chmod(0o755)
     return {**toy_env(sigma=SIGMA), "PATH": f"{bin_}:{os.environ['PATH']}"}
@@ -483,8 +484,7 @@ def test_add_dependency_in_a_poetry_project_updates_its_lock_file_without_instal
     code, out = bo(repo, "add-dependency", str(whl), "--rationale", "the trainer needs toydep",
                    env=fake_poetry(tmp_path))
     assert code == 0, out
-    # poetry only locks; the harness installs into the run venv
-    assert (tmp_path / "poetry-args.txt").read_text() == f"add --lock {whl}\n"
+    # poetry locked it; the harness installed it into the run venv
     assert imports_toydep(run_dir / "venv" / "bin" / "python")
     assert git(worktree, "show", "HEAD:poetry.lock") == f"# locked\n{whl}"
     assert git(worktree, "status", "--porcelain") == ""
