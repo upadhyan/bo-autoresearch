@@ -15,12 +15,13 @@ import statistics
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 import yaml
 
-from . import calibration
+from . import calibration, hypotheses
 from . import experiment_log as elog
 
 HARNESS_SRC = Path(__file__).resolve().parents[1]  # holds pyproject.toml when run from the plugin
@@ -204,15 +205,149 @@ def _cost(trials: list[dict], fidelity: dict) -> float:
 
 
 def cmd_smoke(a) -> dict:
-    """One trial with every lever at its committed baseline, at the reference fidelity."""
+    """No hypothesis: one trial with every lever at its committed baseline, at the reference fidelity.
+
+    `smoke <H>`: the uncommitted lever code of H, one trial at baseline and one at a random
+    in-range point, at the cheapest rung. A pass is what commit-lever needs.
+    """
     run_dir, con = _open_run()
-    run = elog.state(elog.read(con))["run"]
-    return {"trial": _trial(run_dir, con, a, "smoke", _baseline(run_dir), run["reference_fidelity"])}
+    st = elog.state(elog.read(con))
+    if a.hypothesis is None:
+        return {"trial": _trial(run_dir, con, a, "smoke", _baseline(run_dir),
+                                st["run"]["reference_fidelity"])}
+    h = _uncommitted(st, a.hypothesis)
+    tree, fidelity = _worktree_tree(run_dir / "worktree"), _cheapest(st)
+    levers = h["spec"]["levers"]
+    base = {**_baseline(run_dir), **{n: lv["baseline"] for n, lv in levers.items()}}
+    rng = random.Random(f"{st['run']['run_id']}/smoke/{h['id']}/{len(st['trials'])}")
+    trials = []
+    for point, cfg in (("baseline", base), ("random", {**base, **hypotheses.random_point(levers, rng)})):
+        trials.append(_trial(run_dir, con, a, "smoke", cfg, fidelity,
+                             hypothesis=h["id"], point=point, tree=tree))
+        if trials[-1]["status"] != "finished":
+            break
+    passed = len(trials) == 2 and trials[-1]["status"] == "finished"
+    elog.append(con, "lever_smoke", "harness", {"id": h["id"], "tree": tree, "fidelity": fidelity,
+                                                "trials": [t["trial"] for t in trials], "passed": passed})
+    _regenerate(run_dir, con)
+    return {"hypothesis": h["id"], "passed": passed, "trials": trials}
+
+
+def _hypothesis(st: dict, ref: str) -> dict:
+    """`H<n>.v<k>`, or `H<n>` for its latest version."""
+    hyps = st["hypotheses"]
+    if ref in hyps:
+        return hyps[ref]
+    versions = [h for h in hyps.values() if f"H{h['number']}" == ref]
+    if not versions:
+        raise Refused(f"no hypothesis {ref}")
+    return max(versions, key=lambda h: h["version"])
+
+
+def _uncommitted(st: dict, ref: str) -> dict:
+    h = _hypothesis(st, ref)
+    if h["status"] != "registered":
+        raise Refused(f"{h['id']} is {h['status']}: register it before writing its lever code")
+    if h["commit"]:
+        raise Refused(f"{h['id']}'s lever code is already committed as {h['commit']}")
+    return h
+
+
+def _cheapest(st: dict) -> dict:
+    """The fidelity with the lowest measured mean cost; the ladder's costs come from R0."""
+    run = st["run"]
+    if run["ladder"] and not st["r0_complete"]:
+        raise Refused("smoke <H> runs at the cheapest rung, which the calibration round measures: "
+                      "run `round-run` first")
+    return min((run["reference_fidelity"], *run["ladder"]), key=lambda f: _cost(st["trials"], f))
+
+
+def _worktree_tree(worktree: Path) -> str:
+    """Hash of the worktree's full contents (untracked files included, ignored ones not)."""
+    with tempfile.TemporaryDirectory() as d:
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(d) / "index")}
+        for args in (["add", "-A"], ["write-tree"]):
+            p = subprocess.run(["git", *args], cwd=worktree, env=env, capture_output=True, text=True)
+            if p.returncode:
+                raise Refused(f"git {' '.join(args)} failed: {p.stderr.strip()}")
+    return p.stdout.strip()
+
+
+def cmd_propose(a) -> dict:
+    run_dir, con = _open_run()
+    try:
+        spec = json.loads(Path(a.file).read_text())
+        hypotheses.validate(spec)
+    except OSError as e:
+        raise Refused(f"cannot read {a.file}: {e}")
+    except ValueError as e:  # JSONDecodeError included
+        raise Refused(f"spec: {e}")
+    st = elog.state(elog.read(con))
+    n = len({h["number"] for h in st["hypotheses"].values()}) + 1
+    spec["levers"] = {f"H{n}.{name}": lv for name, lv in spec["levers"].items()}
+    hid = f"H{n}.v1"
+    elog.append(con, "hypothesis_proposed", a.actor, {
+        "rationale": a.rationale, "id": hid, "number": n, "version": 1, "spec": spec})
+    _regenerate(run_dir, con)
+    return {"hypothesis": elog.state(elog.read(con))["hypotheses"][hid]}
+
+
+def cmd_register(a) -> dict:
+    """Freeze a proposed spec: from here on only its lever code may be written."""
+    run_dir, con = _open_run()
+    h = _hypothesis(elog.state(elog.read(con)), a.hypothesis)
+    if h["status"] != "proposed":
+        raise Refused(f"{h['id']} is already {h['status']}")
+    # #27/#31 add here: refuse without a registration-reviewer record, or with ranges outside
+    # the allowed region of the prohibited directives.
+    elog.append(con, "hypothesis_registered", a.actor, {"rationale": a.rationale, "id": h["id"]})
+    _regenerate(run_dir, con)
+    return {"hypothesis": elog.state(elog.read(con))["hypotheses"][h["id"]]}
+
+
+def cmd_commit_lever(a) -> dict:
+    """The harness-made commit of H's lever code, after its smoke passed on these exact contents."""
+    run_dir, con = _open_run()
+    st = elog.state(elog.read(con))
+    h = _uncommitted(st, a.hypothesis)
+    worktree = run_dir / "worktree"
+    if not (h["smoke"] and h["smoke"]["passed"]):
+        raise Refused(f"commit-lever {h['id']} needs a passing `smoke {h['id']}` first")
+    tree = _worktree_tree(worktree)
+    if tree != h["smoke"]["tree"]:
+        raise Refused(f"the worktree changed since {h['id']}'s passing smoke: smoke it again")
+
+    def show(rev_path: str):
+        p = subprocess.run(["git", "show", rev_path], cwd=worktree, capture_output=True, text=True)
+        return p.stdout if p.returncode == 0 else None
+
+    changed = {path: (show(f"HEAD:{path}"), show(f"{tree}:{path}"))
+               for path in _git(worktree, "diff-tree", "-r", "--name-only", "HEAD", tree).split()
+               if path.endswith(".py")}
+    coded = [x for x in st["hypotheses"].values() if x["commit"]] + [h]
+    try:
+        hypotheses.check_lever_code(changed, list(h["spec"]["levers"]),
+                                    {n for x in coded for n in x["spec"]["levers"]})
+    except ValueError as e:
+        raise Refused(f"lever code: {e}")
+    baselines = {n: lv["baseline"] for x in coded for n, lv in x["spec"]["levers"].items()}
+    (worktree / "levers.json").write_text(json.dumps(baselines, indent=2, sort_keys=True) + "\n")
+    _git(worktree, "add", "-A")
+    _git(worktree, "-c", "user.name=boautoresearch", "-c", "user.email=harness@boautoresearch",
+         "commit", "-q", "--no-verify", "-m", f"{h['id']}: {h['spec']['title']}")
+    sha = _git(worktree, "rev-parse", "HEAD")
+    elog.append(con, "lever_committed", a.actor,
+                {"rationale": a.rationale, "id": h["id"], "commit": sha, "levers": baselines})
+    _regenerate(run_dir, con)
+    return {"hypothesis": h["id"], "commit": sha}
 
 
 def cmd_round_run(a) -> dict:
     run_dir, con = _open_run()
     st = elog.state(elog.read(con))
+    if _git(run_dir / "worktree", "status", "--porcelain"):
+        raise Refused("the worktree has uncommitted changes: a round runs on one commit, so commit "
+                      "lever code with `commit-lever <H>` first")
     if st["r0_complete"]:
         raise Refused("round-run for R1 is refused: no hypothesis is registered")
     return _run_r0(run_dir, con, a, st)
@@ -229,7 +364,8 @@ def _run_r0(run_dir: Path, con, a, st: dict) -> dict:
 
     trigger = "failed"
     try:
-        if not any(t.get("kind") == "smoke" and t["status"] == "finished" for t in st["trials"]):
+        if not any(t.get("kind") == "smoke" and t["status"] == "finished" and "hypothesis" not in t
+                   for t in st["trials"]):  # a smoke <H> ran uncommitted code
             smoke = _trial(run_dir, con, None, "smoke", baseline, ref, round=0)
             if smoke["status"] != "finished":
                 trigger = "smoke_failed"
@@ -293,7 +429,8 @@ def _run_trial(run_dir: Path, runner: str, trial: dict) -> dict:
     art = run_dir / trial["artifact_dir"]
     art.mkdir(parents=True)
     (art / "trial.json").write_text(json.dumps({**trial, "artifact_dir": str(art)}, indent=2))
-    env = {**os.environ, "BOAUTORESEARCH_TRIAL": str(art / "trial.json")}
+    # no __pycache__ in the worktree: it would dirty the tree a round and commit-lever pin
+    env = {**os.environ, "BOAUTORESEARCH_TRIAL": str(art / "trial.json"), "PYTHONDONTWRITEBYTECODE": "1"}
     t0 = time.monotonic()
     with open(art / "stdout.txt", "w") as out, open(art / "stderr.txt", "w") as err:
         p = subprocess.Popen([run_dir / "venv" / "bin" / "python", runner],
@@ -328,7 +465,9 @@ def _status(st: dict) -> dict:
             "trials": {"total": len(trials), **count},
             "r0_complete": st["r0_complete"], "fidelity": st["fidelity"],
             "sigma": st["noise"]["sigma"] if st["noise"] else None,
-            "replication": st["noise"]["replication"] if st["noise"] else None}
+            "replication": st["noise"]["replication"] if st["noise"] else None,
+            "hypotheses": [{"id": h["id"], "title": h["spec"]["title"], "status": h["status"],
+                            "commit": h["commit"]} for h in st["hypotheses"].values()]}
 
 
 def cmd_accept_proxy(a) -> dict:
@@ -393,7 +532,10 @@ def _parser() -> argparse.ArgumentParser:
         return s
 
     action("init", cmd_init).add_argument("run_yaml")
-    action("smoke", cmd_smoke)
+    action("smoke", cmd_smoke).add_argument("hypothesis", nargs="?")
+    action("propose", cmd_propose).add_argument("--file", required=True)
+    action("register", cmd_register).add_argument("hypothesis")
+    action("commit-lever", cmd_commit_lever).add_argument("hypothesis")
     action("round-run", cmd_round_run)
     action("accept-proxy", cmd_accept_proxy).add_argument("--fidelity", required=True)
     sub.add_parser("status").set_defaults(fn=cmd_status, action=False)
