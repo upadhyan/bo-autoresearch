@@ -7,7 +7,9 @@ The dogfood benchmark runs the plugin end to end on a toy training script whose 
 
 You need Python 3.10+, git, and [Claude Code](https://claude.com/claude-code)
 logged in (`claude auth login`; a subscription works). [uv](https://docs.astral.sh/uv/) is optional but makes
-each run's venv install (torch included) much faster.
+each run's venv install (torch included) much faster. The `python` below must be 3.10 or newer: macOS's
+built-in `python3` is 3.9, so make an environment first, e.g. `uv venv --python 3.12 .venv && source .venv/bin/activate`
+(then `uv pip install pyyaml` in place of the pip line).
 
 ```bash
 git clone https://github.com/upadhyan/bo-autoresearch && cd bo-autoresearch
