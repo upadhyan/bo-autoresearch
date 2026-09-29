@@ -218,7 +218,7 @@ def test_narrowing_drops_out_of_range_trials_and_never_clips(tmp_path, project_p
     assert of_type(run_dir, "narrowed") == [{"id": "H1.v1", "lever": "H1.x", "verdict": last["id"],
                                              "before": {"low": 0.0, "high": 1.0},
                                              "after": {"low": 0.15, "high": 0.85},
-                                             "rationale": "the posterior mass sits in the middle"}]
+                                             "round": 2, "rationale": "the posterior mass sits in the middle"}]
     epoch = bo(repo, "status")[1]["epoch"]
     trials = {n: t for n, t in finished(run_dir).items() if t["epoch"] == epoch}
     inside = {n for n, t in trials.items() if 0.15 <= t["levers"].get("H1.x", 0.2) <= 0.85}

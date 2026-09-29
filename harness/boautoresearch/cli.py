@@ -431,13 +431,13 @@ def cmd_commit_lever(a) -> dict:
     tree = _worktree_tree(worktree)
     if tree != h["smoke"]["tree"]:
         raise Refused(f"the worktree changed since {h['id']}'s passing smoke: smoke it again")
-    _change_allowed(st, _git(worktree, "diff-tree", "-r", "-z", "--name-only", "HEAD", tree).split("\0"))
+    paths = _changed_paths(worktree, tree)
+    _change_allowed(st, paths)
 
     def show(rev_path: str):
         p = subprocess.run(["git", "show", rev_path], cwd=worktree, capture_output=True, text=True)
         return p.stdout if p.returncode == 0 else None
 
-    paths = _git(worktree, "diff-tree", "-r", "-z", "--name-only", "HEAD", tree).split("\0")
     changed = {path: (show(f"HEAD:{path}"), show(f"{tree}:{path}"))
                for path in paths if path.endswith(".py")}
     coded = [x for x in st["hypotheses"].values() if x["commit"]] + [h]
@@ -456,6 +456,11 @@ def cmd_commit_lever(a) -> dict:
     # new lever code at its baseline should pass trivially: the check catches a baseline that
     # isn't really a no-op
     return {"hypothesis": h["id"], "commit": sha, **_after_change(run_dir, con, sha, "lever_committed")}
+
+
+def _changed_paths(worktree: Path, tree: str) -> list[str]:
+    """The files that differ between HEAD and the worktree tree `tree`."""
+    return [p for p in _git(worktree, "diff-tree", "-r", "-z", "--name-only", "HEAD", tree).split("\0") if p]
 
 
 def _commit(worktree: Path, message: str) -> str:
@@ -487,7 +492,7 @@ def cmd_commit_change(a) -> dict:
     if not a.reason.strip():
         raise Refused("commit-change needs a --reason")
     tree = _worktree_tree(worktree)
-    paths = [p for p in _git(worktree, "diff-tree", "-r", "-z", "--name-only", "HEAD", tree).split("\0") if p]
+    paths = _changed_paths(worktree, tree)
     if not paths:
         raise Refused("nothing to commit: the worktree has no changes")
     _change_allowed(st, paths)
@@ -515,7 +520,7 @@ def cmd_add_dependency(a) -> dict:
     cmd = ([uv, "pip", "install", "-q", "--python", str(python), a.requirement] if uv else
            [str(python), "-m", "pip", "install", "-q", "--disable-pip-version-check", a.requirement])
     p = subprocess.run(cmd, capture_output=True, text=True)
-    if p.returncode:
+    if p.returncode:  # ponytail: trusts the installer to leave the venv as it was on failure
         raise Refused(f"installing {a.requirement} into the run venv failed: {p.stderr.strip()}")
     # ponytail: writes its own freeze file, not the project's lock file (uv.lock, poetry.lock);
     # update that one when a project needs it
@@ -542,10 +547,13 @@ def cmd_narrow(a) -> dict:
         raise Refused(f"{h['id']} is {h['status']}: only a hypothesis in the search can be narrowed")
     if a.lever not in _group(h):
         raise Refused(f"{a.lever} is not one of {h['id']}'s searched levers {_group(h)}")
-    last = _latest(h, st)
+    # several levers may be narrowed at one round boundary on the same record, but a later narrowing
+    # needs a record on the narrowed ranges
+    last = _latest(h, st, narrowed=False)
+    r = max(st["rounds"]) + 1
     need = f"narrowing {h['id']} needs its latest verdict record's gates to pass (the importance gates and the surrogate fit)"
-    if last is None:
-        raise Refused(f"{need}: it has no verdict record yet")
+    if last is None or last["round"] < h.get("narrowed_round", 0) < r:
+        raise Refused(f"{need}: it has no verdict record " + ("on its narrowed ranges yet" if last else "yet"))
     if failed := [g for g, v in last["gates"].items() if not v["passed"]]:
         raise Refused(f"{need}: {last['id']} failed {failed}")
     lv = h["spec"]["levers"][a.lever]
@@ -578,7 +586,8 @@ def cmd_narrow(a) -> dict:
     else:
         raise Refused(f"{a.lever} is a bool lever: it has nothing to narrow")
     elog.append(con, "narrowed", a.actor, {"rationale": a.rationale, "id": h["id"], "lever": a.lever,
-                                           "before": before, "after": after, "verdict": last["id"]})
+                                           "before": before, "after": after, "verdict": last["id"],
+                                           "round": r})
     _regenerate(run_dir, con)
     return {"hypothesis": h["id"], "lever": a.lever, "range": after, **_status(elog.load(con))}
 
@@ -617,8 +626,8 @@ def _equivalence_check(run_dir: Path, con, sha: str, change: str) -> dict:
         runs = []
         try:
             for _ in range(2):
-                runs.append(_trial(run_dir, con, None, "equivalence", levers, fidelity,
-                                   equivalence_of=name))
+                runs.append(_trial(run_dir, con, None, "equivalence", levers, fidelity, equivalence_of=name,
+                                   **({"replicate_of": inc["trial"]} if name == "incumbent" and inc else {})))
         except BudgetRefused as e:  # the run can't go on anyway: no round fits either
             refused = str(e)
             break
@@ -645,6 +654,8 @@ def _new_epoch(run_dir: Path, con, sha: str, change: str, breaking: bool) -> dic
     payload = {"epoch": st["epoch"]["epoch"] + 1, "round": max(st["rounds"]) + 1, "commit": sha,
                "change": change, "breaking": breaking}
     elog.append(con, "epoch_started", "harness", payload)
+    # ponytail: re-measures σ at the current fidelity only; other rungs (and the ladder calibration)
+    # keep the earlier epoch's until a code change's effect on them needs re-measuring too
     done = []
     try:
         for _ in range(1 if run["deterministic"] else run["replicates_k"]):
@@ -834,8 +845,9 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
 def _eligibility(st: dict, space: dict, baseline: dict, fidelity: dict):
     """The round's warm start: its eligible trials, rewritten into its levers (study.eligible)."""
     hyps = st["hypotheses"].values()
-    dropped = frozenset(n for h in hyps for n in h["frozen"]) | frozenset(
-        n for h in hyps if h["status"] == "rejected" and h["condition"] == "irrelevant"
+    latest = [h for h in hyps if h["version"] == max(x["version"] for x in hyps if x["number"] == h["number"])]
+    irrelevant = frozenset(n for h in latest for n in h["frozen"]) | frozenset(
+        n for h in latest if h["status"] == "rejected" and h["condition"] == "irrelevant"
         for n in h["spec"]["levers"])
 
     merges = {n: rule for h in hyps for n, rule in h["spec"].get("merges", {}).get("mapping", {}).items()
@@ -844,7 +856,7 @@ def _eligibility(st: dict, space: dict, baseline: dict, fidelity: dict):
 
     def eligible(trials: list[dict]) -> list[dict]:
         return [m for t in trials if (m := bo_study.eligible(t, space, baseline, fidelity, epoch,
-                                                             dropped, merges))]
+                                                             irrelevant, merges))]
     return eligible
 
 
@@ -852,10 +864,12 @@ def _in_search(st: dict) -> list[dict]:
     return [h for h in st["hypotheses"].values() if h["status"] in ("active", "retained")]
 
 
-def _latest(h: dict, st: dict) -> dict | None:
-    """The hypothesis's last verdict record on its current group at the run's fidelity."""
+def _latest(h: dict, st: dict, narrowed: bool = True) -> dict | None:
+    """The hypothesis's last verdict record on its current group at the run's fidelity, in this
+    epoch and (unless `narrowed` is False) on its current, possibly narrowed, ranges."""
+    start = max(st["epoch"]["round"], h.get("narrowed_round", 0) if narrowed else 0)
     past = [v for v in h["verdicts"] if v["fidelity"] == st["fidelity"]["fidelity"]
-            and v["group"] == _group(h) and v["round"] >= st["epoch"]["round"]]
+            and v["group"] == _group(h) and v["round"] >= start]
     return past[-1] if past else None
 
 

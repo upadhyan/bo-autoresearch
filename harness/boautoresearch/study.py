@@ -9,24 +9,23 @@ from pathlib import Path
 from .hypotheses import GRADED, in_range, options
 
 
-def eligible(t: dict, space: dict, baseline: dict, fidelity: dict, epoch: int = 0,
-             dropped: frozenset = frozenset(), merges: dict | None = None) -> dict | None:
+def eligible(t: dict, space: dict, baseline: dict, fidelity: dict, epoch: int,
+             irrelevant: frozenset, merges: dict) -> dict | None:
     """THE eligibility rule, for the sampler and the verdict GP: same epoch, same fidelity, in range
     after the warm-start mapping. Returns the trial rewritten into the round's levers, or None.
 
     Mapping: a trial that ran a merged-away lever (not searched now) but not the lever `merges` maps
     it to takes the mapped value (`values` pairs old -> new; none = the same value), and a value the
-    mapping can't express makes it ineligible. A `dropped` lever (credibly irrelevant: rejected `irrelevant`, or frozen) out of the
-    search loses its key, whatever its value; a lever the trial predates is backfilled at its
-    baseline. Then the searched levers must
-    lie inside their boxes (never clipped), every other lever at its baseline, and no lever the round
-    doesn't know.
+    mapping can't express makes it ineligible. A credibly `irrelevant` lever (rejected `irrelevant`,
+    or frozen) out of the search loses its key, whatever its value; a lever the trial predates is
+    backfilled at its baseline. Then the searched levers must lie inside their boxes (never
+    clipped), every other lever at its baseline, and no lever the round doesn't know.
     """
     if t["status"] != "finished" or t["fidelity"] != fidelity or t.get("epoch", 0) != epoch:
         return None
-    gone = set(dropped) - set(space)
+    gone = set(irrelevant) - set(space)
     levers = dict(t["levers"])
-    for new, rule in (merges or {}).items():
+    for new, rule in merges.items():
         old = rule["lever"]
         if new in levers or old not in levers or old in space:
             continue  # the trial ran the new lever, or predates the old one, or it is still searched

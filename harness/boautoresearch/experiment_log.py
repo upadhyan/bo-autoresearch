@@ -124,8 +124,9 @@ def state(events: list[dict]) -> dict:
             hyps[p["id"]].update(status="rejected", condition=p["condition"])
         elif e["type"] == "hypothesis_inconclusive":
             hyps[p["id"]].update(status="inconclusive", reason=p["reason"])
-        elif e["type"] == "narrowed":  # the new range, from the next round on
+        elif e["type"] == "narrowed":  # the new range, from the next round on (its checks restart)
             h = hyps[p["id"]]
+            h["narrowed_round"] = p["round"]
             levers = h["spec"]["levers"]
             h["spec"] = {**h["spec"], "levers": {**levers, p["lever"]: {**levers[p["lever"]], **p["after"]}}}
         elif e["type"] == "lever_frozen":
