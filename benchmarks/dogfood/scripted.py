@@ -76,17 +76,21 @@ class Caller:
         self.cli("commit-lever", hid, "--rationale", "touches: train.py; smoke passed")
 
     def interplay(self, m, st):
-        """The interplay reviewer: flags exactly the planted partners (expected.yaml)."""
+        """The interplay reviewer: flags exactly the planted partners (expected.yaml), and only those the
+        harness accepts (a removal's partner untested, a newcomer's removed), so a timing change fails a
+        verdict criterion instead of crashing the run."""
         ids, flags = self.ids(st), []
         who = m.get("removed") or m.get("newcomer")
         title = next(h["title"] for h in st["hypotheses"] if h["id"] == who)
         untested = {h["id"] for h in st["hypotheses"] if h["status"] in ("proposed", "registered")}
+        removed_ids = {h["id"] for h in st["hypotheses"] if h["status"] in ("rejected", "inconclusive", "parked")}
         for case in EXPECTED["cases"]:
             main, partner = case["hypotheses"]["main"], case["hypotheses"].get("partner")
-            if "removed" in m and case.get("revived") == "removal" and title == main and ids.get(partner) in untested:
+            if ("removed" in m and case.get("revived") == "removal" and title == main and ids.get(partner) in untested
+                    and (v := self.cli("verdict", who)["records"])):
                 flags.append({"partner": ids[partner], "reason": "the pair acts on one term: the EMA is the teacher",
-                              "cites": [self.cli("verdict", who)["records"][-1]["id"]]})
-            if "newcomer" in m and case.get("revived") == "newcomer" and title == partner and main in ids:
+                              "cites": [v[-1]["id"]]})
+            if "newcomer" in m and case.get("revived") == "newcomer" and title == partner and ids.get(main) in removed_ids:
                 removed = ids[main]
                 if (v := self.cli("verdict", removed)["records"]):
                     flags.append({"partner": removed, "reason": "clipping only pays when the steps are larger",
