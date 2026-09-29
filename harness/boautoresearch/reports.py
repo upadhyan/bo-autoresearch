@@ -228,7 +228,7 @@ def _sign(st: dict) -> int:
     return 1 if st["run"]["direction"] == "minimize" else -1
 
 
-def _narrowings(st: dict, r: int) -> list[str]:
+def _narrowing_lines(st: dict, r: int) -> list[str]:
     """The suggested narrowings of round r: lines, each with the command."""
     out = []
     for n in narrowings(st, r):
@@ -387,7 +387,7 @@ def round_summary(st: dict, status: dict, r: int) -> str:
         "Budget": [f"- the round's trials: {sum(t['wall_clock_s'] for t in this):.1f}s; by its end {spent:.1f}s "
                    f"used, {run['budget_s'] - spent:.1f}s of {run['budget_s']:.1f}s remaining"],
         "Discouraged directives": _honouring(st, r),
-        "Suggested narrowings": _narrowings(st, r) if r else [],
+        "Suggested narrowings": _narrowing_lines(st, r) if r else [],
         "Expected versus actual verdicts": exp,
         "Rivals": rivals,
         "Proposed directives": _proposed_directives(st, r),

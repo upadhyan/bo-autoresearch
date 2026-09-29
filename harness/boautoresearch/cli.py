@@ -2374,14 +2374,20 @@ def _selection(st: dict) -> tuple[list[dict], list[dict]]:
     # version rides with its partner uncounted (spec: the same round), so it can take a round past the cap
     chosen, queue, hyps = _in_search(st), _queue(st), st["hypotheses"]
     linked = {frozenset((hyps[x]["number"], hyps[p]["number"])) for x, p in [*_links(st), *_rivals(st)]}
+    # ponytail: context levers are still GP dimensions, so the searched space (status `dimensions`)
+    # can pass the cap; count context at a fraction of a dimension if rounds grow too wide to burn in
     cap, dims = _dimension_cap(st), sum(len(_group(h)) - len(_context(h)) for h in chosen)
-    windows: dict[str, list[dict]] = {}  # the last round's suggested narrowings of levers not yet context
+    # the last round's suggested narrowings of levers not yet context, on the record `narrow` would
+    # read (its latest on the current fidelity, epoch, group and ranges: one narrowed at this
+    # boundary already has none)
+    # ponytail: none when the last round was interrupted before a record; the cap then stays exceeded
+    windows: dict[str, list[dict]] = {}
     for n in reports.narrowings(st, max(st["rounds"])) if st["r0_complete"] else []:
-        if n["lever"] in set(_group(hyps[n["id"]])) - _context(hyps[n["id"]]):  # (not frozen since)
+        h = hyps[n["id"]]
+        if n["lever"] not in _context(h) and (v := _latest(h, st)) is not None and v["id"] == n["verdict"]:
             windows.setdefault(n["id"], []).append(n)
-    # oldest first (one narrowed at this boundary already has its window's evidence spent)
-    spare = sorted((h for h in chosen if h["status"] == "retained" and h["id"] in windows
-                    and h.get("narrowed_round") != _upcoming(st)), key=lambda h: h["registered"])
+    spare = sorted((h for h in chosen if h["status"] == "retained" and h["id"] in windows),
+                   key=lambda h: h["registered"])  # oldest first
     narrowed: list[dict] = []
     for h in queue:
         if h in chosen or any(_exclusive(h, x) for x in chosen):
@@ -2419,6 +2425,8 @@ def _agent_trials(st: dict) -> dict:
     """The next round's agent-chosen trials: max(1, 6 − R) per round (so the loop is never worse
     than plain BO), the user's run.yaml seeds counting against R1's."""
     r = _upcoming(st)
+    # (trials carried from an interrupted round count too, so `used` may pass the cap once: each was
+    # admitted under its own round's)
     used = (len(st["run"]["seeds"]) if r == 1 else 0) + len(_queued(st, r))
     return {"round": r, "cap": max(1, 6 - r), "used": used}
 
@@ -2455,7 +2463,10 @@ def cmd_enqueue(a) -> dict:
         cfg = json.loads(a.config)
     except json.JSONDecodeError as e:
         raise Refused(f"--config must be JSON, e.g. '{{\"H1.x\": 0.5}}': {e}")
-    if why := _config_error(cfg, _space(_selected(st))):
+    selected, narrowing = _selection(st)
+    space = _space(selected)  # with the narrowings the round start will log
+    space.update({n["lever"]: {**space[n["lever"]], **n["after"]} for n in narrowing})
+    if why := _config_error(cfg, space):
         raise Refused(f"--config: {why}")
     q = _agent_trials(st)
     if q["used"] >= q["cap"]:

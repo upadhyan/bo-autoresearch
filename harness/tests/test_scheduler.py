@@ -370,8 +370,11 @@ def test_a_tight_dimension_cap_narrows_the_oldest_concentrated_retained_hypothes
         [n] = s["narrowing"]
         assert h1["status"] == "retained" and (n["id"], n["lever"]) == ("H1.v1", "H1.x")
         lo, hi = n["after"]["low"], n["after"]["high"]
-        assert 0 <= lo <= 0.4 < hi <= 1 and hi - lo <= 0.5 and lo <= 0.7 <= hi
+        assert 0 < lo <= 0.4 < hi <= 1 and hi - lo <= 0.5 and lo <= 0.7 <= hi
         assert s["selected"] == ["H1.v1", "H2.v1"] and s["context"] == ["H1.v1"]
+        # an agent-chosen trial is judged against the narrowed range the round will search
+        code, out = enqueue(repo, {"H1.x": lo / 2})
+        assert code != 0 and "range" in out["reason"]
         pause_after(repo, run_dir, 2, 1)
         [e] = [e for e in events(run_dir) if e["type"] == "narrowed"]
         assert e["actor"] == "harness" and e["payload"]["after"] == n["after"] and e["payload"]["cap"]

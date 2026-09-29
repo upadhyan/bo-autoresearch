@@ -184,6 +184,7 @@ def state(events: list[dict]) -> dict:
             hyps[p["id"]]["priority"] = p["priority"]
         elif e["type"] == "hypothesis_parked":  # no verdict: it returns as the same version
             hyps[p["id"]].update(status="parked", parked_from=p["from"], park_reason=p["reason"])
+            hyps[p["id"]].pop("context", None)  # it returns afresh
         elif e["type"] == "hypothesis_unparked":  # back to the queue (a proposal to its review)
             h = hyps[p["id"]]
             h.update(status="proposed" if h["parked_from"] == "proposed" else "registered", unselected=0,
@@ -201,6 +202,8 @@ def state(events: list[dict]) -> dict:
             h["verdicts"].append(p)
             if p["outcome"] == "retained" or h["status"] == "retained":
                 h["status"] = "retained" if p["outcome"] == "retained" else "active"
+            if h["status"] != "retained":  # undecided again: its levers count against the cap
+                h.pop("context", None)
         elif e["type"] == "hypothesis_rejected":
             hyps[p["id"]].update(status="rejected", condition=p["condition"])
         elif e["type"] == "hypothesis_inconclusive":

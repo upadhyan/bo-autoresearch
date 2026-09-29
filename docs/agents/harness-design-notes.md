@@ -754,3 +754,9 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   this boundary already (by `narrow`) is not narrowed again. status.schedule gains `narrowing` (pending) and `context`
   (ids). Kept: in-search dims can still exceed the cap when nothing retained is concentrated (unconcentrated retained
   and active hypotheses are never narrowed or frozen for the cap).
+- #29 limit (review): a window counts only when its verdict is the hypothesis's `_latest` record (current fidelity,
+  epoch, group and ranges: what `narrow` reads; this also skips one narrowed at this boundary). `context` is cleared when
+  the hypothesis stops being retained (a verdict makes it active again, or it is parked), so its levers count again.
+  `enqueue` judges configs against the space with the pending windows applied. CONTEXT.md's Narrowing now covers
+  retained hypotheses and context. Kept (ponytail in `_selection`): context levers are still GP dimensions, so status
+  `dimensions` can pass `dimension_cap`; no window when the last round was interrupted before a record.
