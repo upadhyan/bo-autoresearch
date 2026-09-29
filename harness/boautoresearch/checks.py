@@ -68,35 +68,39 @@ def write_refusal(p: Path, root: Path, runner: str, globs: list[str], round_runn
             "run venv under .bo-research/): only `boautoresearch` commands write there")
 
 
-def _heredocs_removed(cmd: str) -> str:
-    """The command without heredoc bodies (stdin data, never run)."""
-    out: list[str] = []
-    ends: list[str] = []
-    for line in cmd.split("\n"):
-        if ends:
-            if line.strip() == ends[0]:
-                ends.pop(0)
-            continue
-        out.append(line)
-        ends += [m.group(2) for m in re.finditer(r"(?<!<)<<-?(?!<)\s*(['\"]?)(\w+)\1", line)]
-    return "\n".join(out)
+def _lex(text: str) -> list[str]:
+    lex = shlex.shlex(text, posix=True, punctuation_chars=True)
+    lex.whitespace_split = True
+    return list(lex)
+
+
+def _command_text(cmd: str) -> str:
+    """The command as the shell runs it: a trailing heredoc's body (stdin data, e.g. a record) left
+    out — only when the first line opens one heredoc whose delimiter is the last line and no other."""
+    first, _, rest = cmd.partition("\n")
+    try:
+        toks = _lex(first)
+    except ValueError:
+        return cmd
+    ends = [toks[i + 1].lstrip("-") for i, t in enumerate(toks[:-1]) if t in ("<<", "<<-")]
+    lines = [ln.strip() for ln in rest.split("\n")]
+    return first if len(ends) == 1 and rest and lines[-1] == ends[0] and lines.count(ends[0]) == 1 else cmd
 
 
 def _segments(cmd: str) -> list[tuple[list[str], list[str]]]:
     """Simple commands as (words, output-redirect targets); ValueError when it won't parse."""
-    lex = shlex.shlex(_heredocs_removed(cmd).replace("\n", " ; "), posix=True, punctuation_chars=True)
-    lex.whitespace_split = True
+    toks = _lex(_command_text(cmd).replace("\n", " ; "))
     segs: list[tuple[list[str], list[str]]] = []
     words: list[str] = []
     targets: list[str] = []
-    toks = list(lex)
     i = 0
     while i < len(toks):
         t = toks[i]
         if t and set(t) <= set("();<>|&"):
-            if ">" in t and not t.endswith("&"):  # an output redirect (`>&` duplicates a descriptor)
-                if i + 1 < len(toks):
-                    targets.append(toks[i + 1])
+            if ">" in t:  # an output redirect, unless it duplicates a descriptor (`2>&1`, `>&-`)
+                nxt = toks[i + 1] if i + 1 < len(toks) else ""
+                if not (t.endswith("&") and re.match(r"^(\d+|-)$", nxt)):
+                    targets.append(nxt)
                 i += 2
                 continue
             if "<" in t or ">" in t:  # an input redirect / descriptor: its word is not a command word
@@ -112,6 +116,8 @@ def _segments(cmd: str) -> list[tuple[list[str], list[str]]]:
     for words, targets in segs:
         while words and (re.match(r"^\w+=", words[0]) or os.path.basename(words[0]) in PREFIXES):
             words = words[1:]
+            while words and words[0].startswith("-"):  # the prefix's own flags (`env -i`)
+                words = words[1:]
         if words or targets:
             out.append((words, targets))
     return out
@@ -137,8 +143,15 @@ def _written(prog: str, args: list[str]) -> list[str]:
     return []
 
 
+RAW_READ = ("the orchestrator reads the run through probes (`boautoresearch status|summary|trials|verdict`) "
+            "or asks the round analyst, never the raw log.db or artifacts: a long-lived context doesn't "
+            "fill up with raw logs")
+
+
 def bash_refusal(cmd: str, cwd: Path, agent: str, bo: Path, probes: set[str], write_check) -> str | None:
     """Why `cmd` is refused for this agent, else None. `write_check(path) -> reason | None`."""
+    # ponytail: obvious forms only (python -c, xargs, find -delete, perl -i, globbed names slip through);
+    # the protected-path manifest catches the writes at the next round or commit
     try:
         segs = _segments(cmd)
     except ValueError as e:
@@ -154,6 +167,10 @@ def bash_refusal(cmd: str, cwd: Path, agent: str, bo: Path, probes: set[str], wr
         if prog == "cd":
             cwd = resolve(cwd, args[0]) if args else Path.home()
             continue
+        inner = (" ".join(args) if prog == "eval" else args[args.index("-c") + 1]
+                 if prog in ("bash", "sh", "zsh") and "-c" in args[:-1] else None)
+        if inner is not None and (why := bash_refusal(inner, cwd, agent, bo, probes, write_check)):
+            return why
         plain = [prog, *(a for a in args if not a.startswith("-"))]
         if tuple(plain[:2]) in INSTALLS or tuple(plain[:3]) in INSTALLS:
             return ("installs go through the harness: `boautoresearch add-dependency <requirement>` "
@@ -170,24 +187,21 @@ def bash_refusal(cmd: str, cwd: Path, agent: str, bo: Path, probes: set[str], wr
             if i < len(args) and args[i] in HISTORY and ".bo-research" in where.parts:
                 return (f"`git {args[i]}` in a run worktree is refused: commits go through the harness "
                         "(commit-lever, commit-change, add-dependency); read-only git (diff, log, show) is fine")
-        if prog == "boautoresearch" and args[:1] == ["record"] and r != "orchestrator" and (
+        if prog == "boautoresearch" and args[:1] == ["record"] and (
                 {"--agent-id", "--actor"} & {a.split("=")[0] for a in args}):
-            return "leave out --agent-id and --actor: the hook adds this subagent's own"
+            return ("leave out --agent-id and --actor: the hook adds a subagent's own (the orchestrator "
+                    "records as itself), so no one records in another agent's name")
         if r == "orchestrator" and prog != "boautoresearch" and any(
                 raw_read(resolve(cwd, w), bo) for w in args + targets):
             return RAW_READ
     return None
 
 
-RAW_READ = ("the orchestrator reads the run through probes (`boautoresearch status|summary|trials|verdict`) "
-            "or asks the round analyst, never the raw log.db or artifacts: a long-lived context doesn't "
-            "fill up with raw logs")
-
-
 def with_agent_id(cmd: str, agent_id: str, agent: str) -> str | None:
     """A subagent's `boautoresearch record …` with its agent id and role added (so SubagentStop can
     find its record), else None."""
+    text = _command_text(cmd)  # never inside a heredoc body (a record may quote the command)
     new = re.sub(r"(\bboautoresearch\s+record)(?=\s)",
                  lambda m: f"{m.group(1)} --agent-id {shlex.quote(agent_id)} --actor {shlex.quote(role(agent))}",
-                 cmd)
-    return new if new != cmd else None
+                 text, count=1)
+    return new + cmd[len(text):] if new != text else None

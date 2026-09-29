@@ -7,6 +7,7 @@ closed: a check that crashes, times out or answers nonsense blocks (exit 2, the 
 from __future__ import annotations  # the system python3 may be 3.9
 
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -41,15 +42,17 @@ def command(hook: dict) -> list[str] | None:
         return ["next"] if "boautoresearch" in ti.get("command", "") else None
     if event == "Stop":
         return ["check", "stop"]
-    if event == "SubagentStop" or tool == "SubagentHandback":
-        return ["check", "recorded", "--agent", agent, "--", agent_id or ""]
+    if event == "SubagentStop" or tool == "SubagentHandback":  # no agent_type: held like a recording role
+        return ["check", "recorded", *(["--agent", hook["agent_type"]] if hook.get("agent_type") else []),
+                "--", agent_id or ""]
     if tool in ("Edit", "Write", "NotebookEdit"):
         return ["check", "write", "--agent", agent, "--", ti.get("file_path") or ti.get("notebook_path") or ""]
     if tool == "Bash":
         return ["check", "bash", "--agent", agent, *(["--agent-id", agent_id] if agent_id else []),
                 "--", ti.get("command", "")]
-    if tool in ("Read", "Grep", "Glob"):
-        return ["check", "read", "--agent", agent, "--", ti.get("file_path") or ti.get("path") or "."]
+    if tool in ("Read", "Grep", "Glob"):  # a Glob pattern or Grep glob is part of what is read
+        where = ti.get("file_path") or os.path.join(ti.get("path") or ".", ti.get("pattern" if tool == "Glob" else "glob") or "")
+        return ["check", "read", "--agent", agent, "--", where]
     return None
 
 
@@ -64,21 +67,21 @@ def main() -> int:
         if p.returncode:  # a refusal (JSON) or a crash (a traceback)
             raise RuntimeError(p.stdout.strip() or p.stderr.strip())
         out = json.loads(p.stdout)
-    except Exception as e:  # fail closed: during a run, a check that can't answer blocks
+        if args[0] == "status":  # SessionStart: stdout becomes context
+            print(f"boautoresearch run status (the harness's `next` list is what to do):\n{p.stdout}")
+        elif args[0] == "next":
+            print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse",
+                                                     "additionalContext": f"boautoresearch next: {json.dumps(out['next'])}"}}))
+        elif out["allow"] is not True:
+            print(out["reason"], file=sys.stderr)
+            return 2
+        elif "updated_command" in out:  # the permission flow still applies to the rewritten call
+            print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": {
+                **hook["tool_input"], "command": out["updated_command"]}}}))
+        return 0
+    except Exception as e:  # fail closed: during a run, a check that can't answer (or answers nonsense) blocks
         print(f"boautoresearch hook failed, so it blocks: {type(e).__name__}: {e}", file=sys.stderr)
         return 2
-    if args[0] == "status":  # SessionStart: stdout becomes context
-        print(f"boautoresearch run status (the harness's `next` list is what to do):\n{p.stdout}")
-    elif args[0] == "next":
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse",
-                                                 "additionalContext": f"boautoresearch next: {json.dumps(out['next'])}"}}))
-    elif not out["allow"]:
-        print(out["reason"], file=sys.stderr)
-        return 2
-    elif "updated_command" in out:  # the permission flow still applies to the rewritten call
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
-                                                 "updatedInput": {**hook["tool_input"], "command": out["updated_command"]}}}))
-    return 0
 
 
 if __name__ == "__main__":

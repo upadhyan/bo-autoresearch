@@ -134,6 +134,15 @@ BASH_CASES = [
     ("orchestrator", "REPO", "boautoresearch trials", True, None),
     ("orchestrator", "REPO", "cat RUN/SUMMARY.md", True, None),
     ("boautoresearch:round-analyst", "RUN", "boautoresearch trials", True, None),
+    # forms that once slipped past the parser
+    ("boautoresearch:lever-coder", "WT", "echo '<<X'\nrm levers.json\nX", False, "protected path"),
+    ("boautoresearch:lever-coder", "WT", "cat <<X\nhi\nX\nrm levers.json\nX", False, "protected path"),
+    ("boautoresearch:lever-coder", "WT", "echo x >& runner.py", False, "protected path"),
+    ("boautoresearch:lever-coder", "WT", "env -i rm levers.json", False, "protected path"),
+    ("boautoresearch:lever-coder", "WT", "bash -c 'rm levers.json'", False, "protected path"),
+    ("boautoresearch:lever-coder", "WT", "eval git commit -m x", False, "through the harness"),
+    ("orchestrator", "REPO", "boautoresearch record review --file r.json --agent-id rr --actor registration-reviewer",
+     False, "another agent's name"),
 ]
 
 
@@ -164,6 +173,12 @@ def test_a_subagents_record_comes_back_carrying_its_agent_id_and_role(guarded):
                 "boautoresearch record proposal --file p.json --agent-id rr")
     assert_blocked(guarded, out, "bash", "boautoresearch:hypothesis-generator",
                    "boautoresearch record proposal --file p.json --agent-id rr", "the hook adds")
+
+
+def test_the_record_rewrite_leaves_the_heredoc_body_alone(guarded):
+    cmd = "boautoresearch record narrative --file - <<'EOF'\n{\"text\": \"ran boautoresearch record expected\"}\nEOF"
+    out = check(guarded.parents[1], "bash", "--agent", "boautoresearch:round-analyst", "--agent-id", "an1", "--", cmd)
+    assert out["updated_command"] == cmd.replace("record narrative", "record --agent-id an1 --actor round-analyst narrative")
 
 
 def test_the_rewritten_record_logs_the_subagents_record_from_a_heredoc(guarded, tmp_path):
@@ -313,7 +328,14 @@ def test_the_adapter_maps_allow_to_exit_0_and_block_to_exit_2_with_the_reason(in
                         agent_id="an1", tool_input={"message": "done"})
     assert code == 2 and "record" in err
     assert hook(repo, "SubagentStop", agent_type="Explore", agent_id="e1")[0] == 0
-    assert [b["check"] for b in blocks(run_dir)] == ["write", "read", "read", "bash", "stop", "recorded", "recorded"]
+    assert hook(repo, "SubagentStop", agent_id="x1")[0] == 2  # no agent type: held, not taken for the orchestrator
+    code, _, err = hook(repo, "PreToolUse", tool_name="Glob", tool_input={"pattern": ".bo-research/*/log.db"})
+    assert code == 2 and "probes" in err
+    code, _, err = hook(repo, "PreToolUse", tool_name="Grep", tool_input={"pattern": "x", "glob": ".bo-research/**"})
+    assert code == 2 and "probes" in err
+    assert hook(repo, "PreToolUse", tool_name="Glob", tool_input={"pattern": "**/*.py"})[0] == 0
+    assert [b["check"] for b in blocks(run_dir)] == ["write", "read", "read", "bash", "stop", "recorded", "recorded",
+                                                     "recorded", "read", "read"]
 
 
 def test_the_adapter_rewrites_a_subagents_record_and_injects_status_and_next(guarded):
@@ -357,6 +379,8 @@ def test_the_adapter_fails_closed_when_the_check_crashes(tmp_path):
     code, _, err = hook(repo, "Stop")
     assert code == 2 and "boom" in err
     (run_dir / "venv" / "bin" / "boautoresearch").write_text("#!/bin/sh\necho not json\n")
+    assert hook(repo, "Stop")[0] == 2
+    (run_dir / "venv" / "bin" / "boautoresearch").write_text("#!/bin/sh\necho '{}'\n")  # JSON, but no answer
     assert hook(repo, "Stop")[0] == 2
     (run_dir / "venv" / "bin" / "boautoresearch").unlink()  # the run venv is gone mid-run
     assert hook(repo, "Stop")[0] == 2
