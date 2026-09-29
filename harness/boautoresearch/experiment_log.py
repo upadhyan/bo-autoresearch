@@ -18,7 +18,7 @@ EVENT_TYPES = {"run_started", "trial_started", "trial_finished", "trial_failed",
                "agent_trial_skipped", "checkpoint", "user_pause", "user_resume", "removal",
                "hypothesis_revived", "generation_pass", "registry_revised", "hypothesis_pruned",
                "hypothesis_unpruned", "prohibited_check_refused", "hypothesis_merged", "round_summary",
-               "hook_blocked", "wrapup_started", "distill_committed", "verification", "wrapup_finished",
+               "hook_blocked", "reject_deferred", "wrapup_started", "distill_committed", "verification", "wrapup_finished",
                "cleaned"}
 
 _SCHEMA = """
@@ -68,7 +68,7 @@ def load(con: sqlite3.Connection) -> dict:
 
 def _fresh() -> dict:
     """What a new hypothesis version starts with: no smoke, verdicts, freezes or escalations."""
-    return {"smoke": None, "verdicts": [], "frozen": [], "escalations": [], "priority": 0, "unselected": 0}
+    return {"smoke": None, "verdicts": [], "frozen": {}, "deferred": [], "escalations": [], "priority": 0, "unselected": 0}
 
 
 def state(events: list[dict]) -> dict:
@@ -209,7 +209,9 @@ def state(events: list[dict]) -> dict:
             levers = h["spec"]["levers"]
             h["spec"] = {**h["spec"], "levers": {**levers, p["lever"]: {**levers[p["lever"]], **p["after"]}}}
         elif e["type"] == "lever_frozen":
-            hyps[p["id"]]["frozen"].append(p["lever"])
+            hyps[p["id"]]["frozen"][p["lever"]] = p["condition"]
+        elif e["type"] == "reject_deferred":
+            hyps[p["id"]]["deferred"].append(p["verdict"])
         elif e["type"] == "record":
             # `round`: the next round to start, the one an expected verdict is for
             records.append({**p, "actor": e["actor"], "seq": e["seq"], "round": max(rounds, default=-1) + 1})

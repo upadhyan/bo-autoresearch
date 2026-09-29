@@ -1,6 +1,8 @@
 """The fixed reject form's statistics: a noise-aware verdict GP (numpy/scipy, outside Optuna), and
-from its joint posterior samples √V_T (unnormalised group total-order Sobol variance, Jansen) and Δ
-(best with the group free minus best with it at baseline, the other levers optimised in both).
+from its joint latent posterior sample paths Δ (best with the group free minus best with it at
+baseline, the other levers optimised in both), M_u (the total-effect range: the largest change in
+the objective as the group moves, over settings of the other levers) and, as telemetry, √V_T
+(unnormalised group total-order Sobol variance, Jansen).
 
 Inputs are scaled to [0, 1] (log levers in log space, categoricals by option index); the output is
 oriented so larger is better and standardised. Everything is seeded by the caller.
@@ -15,6 +17,11 @@ from scipy.stats import qmc
 from .hypotheses import options
 
 N_SOBOL, N_CANDIDATES, N_SAMPLES, RESTARTS = 128, 128, 256, 3
+# M_u's grid: N_GRID + 2 settings of the other levers × N_GRID + 1 of the group
+# ponytail: a fixed 16 × 16 grid (plus each candidate against its baseline slice) under-reads a range
+# confined to a corner; refine locally from the top rows if `irrelevant` labels prove too generous
+N_GRID = 16
+N_GRID_POINTS = (N_GRID + 2) * (N_GRID + 1)
 FIT_MAX_Z2, HOMOGENEITY_MAX, HOMOGENEITY_MIN_TRIALS = 2.0, 3.0, 8
 
 
@@ -50,8 +57,10 @@ def _snap(space: dict, U: np.ndarray) -> np.ndarray:
 
 
 def _kernel(A, B, ls, var):
-    d = np.sqrt(np.maximum(((A[:, None, :] - B[None, :, :]) / ls) ** 2, 0).sum(-1))
-    s = math.sqrt(5) * d
+    d2 = np.zeros((len(A), len(B)))
+    for j in range(A.shape[1]):  # one lever at a time: no (len A, len B, D) array
+        d2 += ((A[:, None, j] - B[None, :, j]) / ls[j]) ** 2
+    s = math.sqrt(5) * np.sqrt(d2)
     return var * (1 + s + s * s / 3) * np.exp(-s)
 
 
@@ -122,8 +131,9 @@ def _bounds(xs: np.ndarray) -> dict:
 
 def judge(space: dict, baseline: dict, group: list[str], trials: list[dict], sign: int,
           sigma: float, fresh_sampler: list[int], seed: int) -> dict:
-    """The statistics and gates of one verdict check. `trials` are the eligible trials; √V_T, Δ and
-    the per-lever √V_T come back in objective units, larger = better."""
+    """The statistics and gates of one verdict check. `trials` are the eligible trials. Δ, M_u and
+    √V_T (telemetry), for the group and (d ≥ 2) each lever, come back in objective units, larger =
+    better, all from the same latent posterior sample paths."""
     rng = np.random.default_rng(seed)
     names = list(space)
     gi = [names.index(g) for g in group]
@@ -134,38 +144,41 @@ def judge(space: dict, baseline: dict, group: list[str], trials: list[dict], sig
     gp = GP(X, (obj - mu) / sd, sigma**2 / sd**2, rng)
     base = np.array([encode(space[n], baseline[n]) for n in names])
 
-    # Sobol (Jansen): V_T(G) = E[(f(A) - f(A_B^G))²] / 2 over the in-search box
+    ls, var, _ = gp._parts(gp.theta)
+    # the candidates: quasi-random points, the trials and the baseline (Δ and M_u share them)
+    C = np.vstack([_snap(space, qmc.Sobol(len(names), seed=rng).random(N_CANDIDATES)), X, base])
+    best = C[int(np.argmax(_kernel(C, X, ls, var) @ gp.alpha))]  # the best posterior-mean point
+
+    # Sobol (Jansen), telemetry: V_T(G) = E[(f(A) - f(A_B^G))²] / 2 over the in-search box
     sob = qmc.Sobol(2 * len(names), seed=rng)
     AB = _snap({**space, **{f"{n}#": space[n] for n in names}}, sob.random(N_SOBOL))
     A, B = AB[:, :len(names)], AB[:, len(names):]
     sets = [gi] + ([[j] for j in gi] if len(gi) > 1 else [])
-    ABs = []
+    blocks = [A]
     for s in sets:
         M = A.copy()
         M[:, s] = B[:, s]
-        ABs.append(M)
-    # Δ: candidates = quasi-random points, the trials and the baseline; the same with the group at
-    # baseline (the other levers stay free, so the max optimises them in both)
-    C = np.vstack([_snap(space, qmc.Sobol(len(names), seed=rng).random(N_CANDIDATES)), X, base])
-    Cb = C.copy()
-    Cb[:, gi] = base[gi]
-    P = np.vstack([A, *ABs, C, Cb])
-    F = gp.samples(P, N_SAMPLES, rng) * sd  # objective units (the mean offset cancels)
+        # Δ: the same candidates with s at baseline (the other levers stay free, so the max
+        # optimises them in both terms)
+        Cb = C.copy()
+        Cb[:, s] = base[s]
+        blocks += [M, Cb, _grid(C, base, best, s)]
+    F = gp.samples(np.vstack([*blocks, C]), N_SAMPLES, rng) * sd  # latent paths, objective units
     nA, nC = len(A), len(C)
-    fA = F[:, :nA]
-    vt = []
-    for k in range(len(sets)):
-        fM = F[:, nA * (k + 1):nA * (k + 2)]
-        vt.append(np.sqrt(0.5 * ((fA - fM) ** 2).mean(1)))
-    off = nA * (len(sets) + 1)
-    fC, fCb = F[:, off:off + nC], F[:, off + nC:]
-    delta = np.maximum(fC.max(1), fCb.max(1)) - fCb.max(1)  # the free max covers the baseline set
+    fA, fC = F[:, :nA], F[:, -nC:]
+    stats, vts, at = [], [], nA
+    for s in sets:
+        fM, fCb = F[:, at:at + nA], F[:, at + nA:at + nA + nC]
+        fG = F[:, at + nA + nC:at + nA + nC + N_GRID_POINTS].reshape(len(F), -1, N_GRID + 1)
+        at += nA + nC + N_GRID_POINTS
+        vt = np.sqrt(0.5 * ((fA - fM) ** 2).mean(1))
+        vts.append(vt)
+        free = np.maximum(fC.max(1), fCb.max(1))  # the free max covers the baseline set
+        # M_s: the largest range over s at any setting of the others: the grid's rows, and each
+        # candidate against itself with s at baseline (Δ's maximisers, so Δ ≤ M_s on every path)
+        m = np.maximum((fG.max(2) - fG.min(2)).max(1), np.abs(fC - fCb).max(1))
+        stats.append({"sqrt_vt": _bounds(vt), "delta_stat": _bounds(free - fCb.max(1)), "m_u": _bounds(m)})
     total = fA.var(1)
-
-    # the best posterior point, for the prediction flag
-    ls, var, _ = gp._parts(gp.theta)
-    mean_C = _kernel(C, X, ls, var) @ gp.alpha
-    best = C[int(np.argmax(mean_C))]
     best_point = {n: decode(space[n], float(best[j])) for j, n in enumerate(names) if n in group}
 
     resid, loo_var = gp.loo()
@@ -177,14 +190,23 @@ def judge(space: dict, baseline: dict, group: list[str], trials: list[dict], sig
         "homogeneity": _homogeneity(X, resid / np.sqrt(loo_var), names),
     }
     return {
-        "sqrt_vt": _bounds(vt[0]), "delta_stat": _bounds(delta),
-        "levers": {group[i]: _bounds(v) for i, v in enumerate(vt[1:])},
-        "sobol_index": float(np.median(vt[0] ** 2 / np.maximum(total, 1e-300))),
+        **stats[0], "levers": {group[i]: x for i, x in enumerate(stats[1:])},
+        "sobol_index": float(np.median(vts[0] ** 2 / np.maximum(total, 1e-300))),
         "best_point": best_point, "gates": gates,
         "gp": {"lengthscales": [float(x) for x in np.exp(gp.theta[:len(names)])],
                "signal_var": float(var), "noise_var": float(math.exp(gp.theta[-1])),
                "noise_floor": float(sigma**2 / sd**2)},
     }
+
+
+def _grid(C: np.ndarray, base: np.ndarray, best: np.ndarray, s: list[int]) -> np.ndarray:
+    """Rows = settings of the other levers (N_GRID candidates, the baseline, the best point), each
+    with s moved over N_GRID other candidates' values and its baseline: the ICE curves M_s reads."""
+    rows = np.vstack([C[:N_GRID], base, best])
+    cols = np.vstack([C[N_GRID:2 * N_GRID], base])
+    G = np.repeat(rows, len(cols), axis=0)
+    G[:, s] = np.tile(cols[:, s], (len(rows), 1))
+    return G
 
 
 def _coverage(space: dict, group: list[str], xs: list, names: list[str]) -> dict:

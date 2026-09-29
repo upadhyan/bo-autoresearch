@@ -200,7 +200,7 @@ def test_sensitivity_reports_the_verdict_gp_telemetry(tmp_path, project_python):
     assert code == 0 and out["hypothesis"] == "H1.v1" and out["telemetry"] is True, out
     assert [r["id"] for r in out["records"]] == [r["id"] for r in v["records"]] != []
     last, rec = out["records"][-1], v["records"][-1]
-    assert last["sqrt_vt"] == rec["sqrt_vt"] and last["levers"] == rec["levers"]
+    assert last["m_u"] == rec["m_u"] and last["sqrt_vt"] == rec["sqrt_vt"] and last["levers"] == rec["levers"]
     assert last["sobol_index"] == rec["sobol_index"]
 
 

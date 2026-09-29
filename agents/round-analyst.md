@@ -12,7 +12,7 @@ Your prompt gives you `BO` (the absolute path of the run's `boautoresearch` comm
 ## 1. Gather
 
 - `BO status` — the run's state; `BO summary` — the summary as it stands, round sections included.
-- For every hypothesis the round tested: `BO verdict <H>` (its verdict records: outcome, gates, `sqrt_vt`, `delta_stat`, `best_point`, `prediction`, `burn_in`) and `BO sensitivity <H>`.
+- For every hypothesis the round tested: `BO verdict <H>` (its verdict records: outcome, gates, `delta_stat` (Δ: the best gain the group adds), `m_u` (M_u: the largest change the group makes anywhere, in objective units), `best_point`, `prediction`, `burn_in`; `sqrt_vt` and `sobol_index` are telemetry, never a verdict) and `BO sensitivity <H>`.
 - `BO trials` — the trials with their telemetry and curves, for diagnostics.
 
 Done when every verdict record of round R has been read.
@@ -21,7 +21,7 @@ Done when every verdict record of round R has been read.
 
 - **text** — the narrative: what the round showed, hypothesis by hypothesis, each claim citing its verdict record id (`V-R2-H3.v1-1`).
 - **cites** — every verdict record the text rests on; all of round R's records when it has any.
-- **quotes** — every decimal anywhere in text, diagnostics or suggestions, as `{"record", "field", "value"}` copied exactly from a cited record (`field` is a dotted path, e.g. `sqrt_vt.upper`, `best_point.H1.x`). The harness refuses an unquoted decimal or a quote that differs from its record. Integers need no quote.
+- **quotes** — every decimal anywhere in text, diagnostics or suggestions, as `{"record", "field", "value"}` copied exactly from a cited record (`field` is a dotted path, e.g. `delta_stat.lower`, `best_point.H1.x`). The harness refuses an unquoted decimal or a quote that differs from its record. Integers need no quote.
 - **diagnostics** — per hypothesis, what the evidence shows about the test itself: a best point at the edge of its range, a failed gate, a contradicted predicted direction, a noise shift, a stalled burn-in.
 - **suggestions** — actions: narrow or widen a lever (with the range), a follow-up mechanism for the generators, a rival explanation for a contradicted prediction.
 - **generation** — `true` when the round opened new ground a generation pass should build on (a retain, a surprising interaction, a contradicted prediction); else `false`.
@@ -33,9 +33,9 @@ Your last act is `record narrative`. The harness refuses with the failing field;
 ```bash
 BO record narrative --file - --rationale "round 2 narrative" <<'EOF'
 {"round": 2,
- "text": "H3 was retained (V-R2-H3.v1-2): its lever matters, with sqrt_vt lower bound 0.21 above delta.",
+ "text": "H3 was retained (V-R2-H3.v1-2): its lever helps, with a delta_stat lower bound of 0.21 above delta.",
  "cites": ["V-R2-H3.v1-2"],
- "quotes": [{"record": "V-R2-H3.v1-2", "field": "sqrt_vt.lower", "value": 0.21}],
+ "quotes": [{"record": "V-R2-H3.v1-2", "field": "delta_stat.lower", "value": 0.21}],
  "diagnostics": ["H3: the best point sits at the top of its range."],
  "suggestions": ["Widen H3.warmup_frac above its current high.", "Generators: a schedule that decays after warmup."],
  "generation": true}

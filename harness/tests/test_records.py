@@ -63,12 +63,12 @@ def narrative(v, text, quotes, **kw):
 
 def test_a_narrative_quoting_its_verdict_record_exactly_is_accepted(run):
     v = verdict_record(run)
-    vt, dl = v["sqrt_vt"]["upper"], v["delta_stat"]["upper"]
-    quotes = [{"record": v["id"], "field": "sqrt_vt.upper", "value": vt},
+    mu, dl = v["m_u"]["upper"], v["delta_stat"]["upper"]
+    quotes = [{"record": v["id"], "field": "m_u.upper", "value": mu},
               {"record": v["id"], "field": "delta_stat.upper", "value": dl},
               {"record": v["id"], "field": "delta", "value": 0.1},
               {"record": v["id"], "field": "best_point.H1.x", "value": v["best_point"]["H1.x"]}]
-    text = (f"H1 matters (√V_T upper {vt:.3f}) but only hurts: Δ's upper bound {dl:.4g} "
+    text = (f"H1 matters (M_u upper {mu:.3f}) but only hurts: Δ's upper bound {dl:.4g} "
             f"is below δ = 0.1, so it was rejected ({v['id']}).")
     code, out = record(run, "narrative", narrative(v, text, quotes), agent="an1")
     assert code == 0, out

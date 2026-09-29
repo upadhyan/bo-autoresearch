@@ -92,6 +92,8 @@ def test_a_useless_lever_is_rejected_irrelevant_after_burn_in_and_a_confirming_c
         # the next ones every max(5·1, 10) = 10
         assert [v["burn_in"]["fresh"] for v in vs] == [20 + 10 * i for i in range(len(vs))]
         for v in vs:
+            if v["condition"] == "irrelevant":  # a sub-case of no-improvement, in every record
+                assert v["m_u"]["upper"] < DELTA and v["delta_stat"]["upper"] < DELTA
             upto = [t["trial"] for t in sampler][:v["burn_in"]["fresh"]]
             assert set(upto) <= set(v["trials"])
             assert v["id"] == f"V-R1-H1.v1-{v['check']}" and v["delta"] == DELTA
@@ -102,13 +104,14 @@ def test_a_useless_lever_is_rejected_irrelevant_after_burn_in_and_a_confirming_c
             # the confirming check: the check before fired too, max(5·d, 10) sampler trials earlier
             assert before[-1]["outcome"] == "pending-reject" and before[-1]["condition"] is not None
             assert last["confirmation"]["confirms"] == before[-1]["id"]
-            assert last["sqrt_vt"]["upper"] < DELTA
+            # `irrelevant` is a sub-case of `no-improvement`: Δ's upper bound is below δ too
+            assert last["m_u"]["upper"] < DELTA and last["delta_stat"]["upper"] < DELTA
             assert out["trigger"] == "search_space"
             assert bo(run_dir.parents[1], "status")[1]["hypotheses"][0]["status"] == "rejected"
 
 
 FIELDS = {"id", "hypothesis", "round", "check", "group", "outcome", "condition", "held", "reason",
-          "sqrt_vt", "delta_stat", "levers", "sobol_index", "best_point", "gp", "delta", "gates",
+          "sqrt_vt", "delta_stat", "m_u", "levers", "sobol_index", "best_point", "gp", "delta", "gates",
           "burn_in", "confirmation", "fidelity", "proxy", "prediction", "frozen", "trials", "context"}
 
 
@@ -123,15 +126,16 @@ def test_verdict_records_hold_every_field_and_the_probe_shows_them(tmp_path, pro
         assert set(v["gates"]) == {"trials", "coverage", "fit", "homogeneity"}
         assert all("passed" in g for g in v["gates"].values())
         assert set(v["gates"]["trials"]) == {"sampler", "agent", "passed"}
-        for stat in ("sqrt_vt", "delta_stat"):
+        for stat in ("sqrt_vt", "delta_stat", "m_u"):
             assert v[stat]["lower"] <= v[stat]["estimate"] <= v[stat]["upper"]
         assert v["fidelity"] == {"epochs": 4} and v["proxy"] == "reference"
         assert v["context"] == {"retained": [], "co_active": []}
         assert v["prediction"]["flag"] is None
-    # harmful: the lever matters (√V_T above δ) but only hurts, so Δ's upper bound is below δ
+    # harmful: the lever matters (its range M_u, 2, is above δ) but only hurts, so Δ's upper bound is below δ
     [rej] = of_type(run_dir, "hypothesis_rejected")
     assert rej["condition"] == "no-improvement" and rej["frozen"] == ["H1.x"]
-    assert vs[-1]["sqrt_vt"]["lower"] > DELTA and vs[-1]["delta_stat"]["upper"] < DELTA
+    assert vs[-1]["m_u"]["lower"] > DELTA and vs[-1]["delta_stat"]["upper"] < DELTA
+    assert vs[-1]["delta_stat"]["upper"] <= vs[-1]["m_u"]["upper"]
     code, probe = bo(repo, "verdict", "H1")
     assert code == 0 and probe["status"] == "rejected" and probe["records"] == vs
     assert bo(repo, "verdict", "H9")[1]["refused"]
@@ -166,7 +170,7 @@ def test_a_useful_lever_is_retained(tmp_path, project_python):
         assert out["trigger"] == "stall"  # a retain does not end the round
         for v in records(run_dir):
             if v["outcome"] == "retained":
-                assert v["sqrt_vt"]["lower"] > DELTA and v["delta_stat"]["lower"] > DELTA
+                assert v["delta_stat"]["lower"] > DELTA and v["m_u"]["lower"] > DELTA
                 assert v["prediction"] == {"flag": None, "contradicted": []}
 
 
@@ -183,11 +187,13 @@ def test_a_contradicted_prediction_flags_a_retain_without_changing_it(tmp_path, 
                                            "contradicted": ["H1.x"]}
 
 
-def test_a_lever_that_helps_only_with_a_co_active_one_is_never_rejected(tmp_path, project_python):
-    # H1.a does nothing alone; with H2.b both up the loss drops by 2
+def test_a_lever_that_helps_only_with_a_co_active_one_is_retained_never_rejected(tmp_path, project_python):
+    # H1.a does nothing alone; with H2.b both up the loss drops by 2 (a product: √V_T is 2/6 per lever)
     alone = (spec({"a": lever()}), '    term += 0 * lever("H1.a")')
     together = (spec({"b": lever()}), '    term += -2 * lever("H1.a") * lever("H2.b")')
     runs = repeat(tmp_path, project_python, [alone, together], rounds=2)
+    status = [[h["status"] for h in bo(run_dir.parents[1], "status")[1]["hypotheses"]] for run_dir, _ in runs]
+    assert status.count(["retained", "retained"]) >= 2, status
     for run_dir, outs in runs:
         assert len(outs) == 2
         assert not of_type(run_dir, "hypothesis_rejected")
@@ -216,8 +222,8 @@ def test_noise_that_differs_by_region_is_inconclusive_not_a_reject(tmp_path, pro
 
 
 def test_a_stuck_hypothesis_escalates_then_is_inconclusive_at_the_evidence_cap(tmp_path, project_python):
-    # √V_T of a linear effect of 0.346 over the range is 0.1 = δ: with σ = 0.15 no check decides it
-    stuck = (spec({"x": lever()}), '    term += -0.346 * lever("H1.x")')
+    # a linear gain of exactly δ over the range: with σ = 0.15 Δ's interval keeps straddling δ
+    stuck = (spec({"x": lever()}), '    term += -0.1 * lever("H1.x")')
     run_dir, outs = verdict_run(tmp_path / "r", project_python, 1, [stuck], rounds=8, sigma=0.15)
     assert outs[0]["trigger"] == "stall"
     esc = of_type(run_dir, "hypothesis_escalated")
@@ -277,13 +283,14 @@ def test_a_single_lever_below_delta_is_frozen_and_leaves_the_search(tmp_path, pr
            '    term += 4 * (lever("H1.x") - 0.7) ** 2 + 0 * lever("H1.z")')
     runs = repeat(tmp_path, project_python, [two], rounds=2)
     frozen = [of_type(run_dir, "lever_frozen") for run_dir, _ in runs]
-    assert sum(f == [{"id": "H1.v1", "lever": "H1.z", "verdict": f[0]["verdict"]}] if f else False
-               for f in frozen) >= 2, frozen
+    assert sum(f == [{"id": "H1.v1", "lever": "H1.z", "verdict": f[0]["verdict"], "condition": "irrelevant"}]
+               if f else False for f in frozen) >= 2, frozen
     for (run_dir, outs), f in zip(runs, frozen):
         if not f:
             continue
         v = next(v for v in records(run_dir) if v["id"] == f[0]["verdict"])
-        assert v["levers"]["H1.z"]["upper"] < DELTA and v["frozen"] == ["H1.z"]
+        z = v["levers"]["H1.z"]
+        assert z["delta_stat"]["upper"] < DELTA and z["m_u"]["upper"] < DELTA and v["frozen"] == ["H1.z"]
         assert outs[0]["trigger"] == "search_space"  # a freeze changes the search space
         [r2] = [s for s in of_type(run_dir, "round_started") if s["round"] == 2]
         assert set(r2["search_space"]) == {"H1.x"}
@@ -314,3 +321,62 @@ def test_a_held_fidelity_sensitive_lever_waits_for_escalation_and_never_breaks_t
     drift = {t["trial"]: t["levers"] for t in of_type(run_dir, "trial_started") if t["kind"] == "drift"}
     pairs = [[drift[t] for t in c["trials"]] for c in of_type(run_dir, "drift_check")]
     assert pairs and all(a["H1.x"] == b["H1.x"] and a != b for a, b in pairs)
+
+
+def test_a_linear_lever_worth_twice_delta_is_retained_not_rejected_irrelevant(tmp_path, project_python):
+    # the regression behind the #21 amendment: end to end the lever gains 0.2 = 2δ, but its √V_T is
+    # 0.2/√12 ≈ 0.06 < δ, so the old form rejected it `irrelevant`; its range M_u is 0.2
+    linear = (spec({"x": lever()}), '    term += -0.2 * lever("H1.x")')
+    runs = repeat(tmp_path, project_python, [linear])
+    status = [bo(run_dir.parents[1], "status")[1]["hypotheses"][0]["status"] for run_dir, _ in runs]
+    assert status.count("retained") >= 2, status
+    for run_dir, _ in runs:
+        assert not of_type(run_dir, "hypothesis_rejected")
+        for v in records(run_dir):
+            if v["outcome"] == "retained":
+                assert v["delta_stat"]["lower"] > DELTA and v["m_u"]["lower"] > DELTA
+
+
+def test_a_single_lever_is_frozen_by_its_own_delta_one_per_check(tmp_path, project_python):
+    # z hurts (Δ_z ≈ 0 but its range is 2): frozen `no-improvement`, its trials filtered to its baseline;
+    # w gains 0.2 = 2δ linearly (√V_T_w ≈ 0.06 < δ, what the old form froze on): never frozen
+    three = (spec({"x": lever(0.2), "z": lever(), "w": lever()}),
+             '    term += 4 * (lever("H1.x") - 0.7) ** 2 + 2 * lever("H1.z") - 0.2 * lever("H1.w")')
+    runs = repeat(tmp_path, project_python, [three], rounds=2)
+    frozen = [of_type(run_dir, "lever_frozen") for run_dir, _ in runs]
+    assert sum([(f["lever"], f["condition"]) for f in fs] == [("H1.z", "no-improvement")]
+               for fs in frozen) >= 2, frozen
+    for (run_dir, outs), fs in zip(runs, frozen):
+        assert "H1.w" not in [f["lever"] for f in fs]
+        assert len({f["verdict"] for f in fs}) == len(fs)  # at most one freeze per verdict check
+        if [f["lever"] for f in fs] != ["H1.z"]:
+            continue
+        v = next(v for v in records(run_dir) if v["id"] == fs[0]["verdict"])
+        assert v["levers"]["H1.z"]["delta_stat"]["upper"] < DELTA <= v["levers"]["H1.z"]["m_u"]["upper"]
+        [r2] = [s for s in of_type(run_dir, "round_started") if s["round"] == 2]
+        r1 = [t for t in started_in(run_dir, 1) if t["status"] == "finished"]
+        # no-improvement: only the trials that ran z at its baseline seed R2
+        assert {t["trial"] for t in r1 if t["levers"]["H1.z"] == 0.0} == {t["trial"] for t in r1} & set(r2["seeded"])
+        assert any(t["levers"]["H1.z"] != 0.0 for t in r1)
+
+
+def test_two_substitute_levers_are_never_both_rejected_at_one_round_end(tmp_path, project_python):
+    # H1.a alone gains 0.3, H2.b alone gains 0.3, both together still 0.3: each one's Δ is ≈ 0 because
+    # the other is optimised in both terms, so both can reach a confirmed no-improvement reject at once
+    a = (spec({"a": lever()}), '    term += 0 * lever("H1.a")')
+    b = (spec({"b": lever()}), '    term += -0.3 * max(lever("H1.a"), lever("H2.b"))')
+    runs = repeat(tmp_path, project_python, [a, b], rounds=3, seeds=(1, 2, 3, 4))
+    for run_dir, _ in runs:
+        rounds = [int(p["verdict"].split("-")[1][1:]) for p in of_type(run_dir, "hypothesis_rejected")]
+        assert len(rounds) == len(set(rounds)), of_type(run_dir, "hypothesis_rejected")
+        assert len(rounds) <= 1  # the survivor carries the gain, and its Δ shows it once the other is frozen
+    deferred = [of_type(run_dir, "reject_deferred") for run_dir, _ in runs]
+    assert any(deferred), deferred
+    for (run_dir, _), ds in zip(runs, deferred):
+        for d in ds:
+            same = [v for h in ("H1.v1", "H2.v1") for v in records(run_dir, h)
+                    if v["round"] == d["round"] and v["outcome"] == "reject"]
+            rejected = [p["verdict"] for p in of_type(run_dir, "hypothesis_rejected")]
+            [applied] = [v for v in same if v["id"] in rejected]
+            deferred_v = next(v for v in same if v["id"] == d["verdict"])
+            assert applied["delta_stat"]["upper"] <= deferred_v["delta_stat"]["upper"]

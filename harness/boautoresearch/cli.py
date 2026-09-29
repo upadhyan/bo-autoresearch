@@ -1753,9 +1753,11 @@ def _eligibility(st: dict, space: dict, baseline: dict, fidelity: dict):
     """The round's warm start: its eligible trials, rewritten into its levers (study.eligible)."""
     hyps = st["hypotheses"].values()
     latest = [h for h in hyps if h["version"] == max(x["version"] for x in hyps if x["number"] == h["number"])]
-    irrelevant = frozenset(n for h in latest for n in h["frozen"]) | frozenset(
+    # credibly irrelevant (their keys go): levers frozen as irrelevant, and the rest of a group rejected
+    # `irrelevant` (a lever frozen before as no-improvement stays filtered to its baseline)
+    irrelevant = frozenset(n for h in latest for n, c in h["frozen"].items() if c == "irrelevant") | frozenset(
         n for h in latest if h["status"] == "rejected" and h["condition"] == "irrelevant"
-        for n in h["spec"]["levers"])
+        for n in h["spec"]["levers"] if n not in h["frozen"])
 
     merges = {n: rule for h in hyps for n, rule in h["spec"].get("merges", {}).get("mapping", {}).items()
               if n in space}
@@ -1843,9 +1845,7 @@ def _verdict_checks(con, st: dict, r: int, space: dict, baseline: dict, eligible
                                                                  for t in trials),
                             "passed": len(fresh) >= sched["needed"]}, **stats.pop("gates")}
         gated = all(g["passed"] for g in gates.values())
-        vt, dl = stats["sqrt_vt"], stats["delta_stat"]
-        condition = ("irrelevant" if vt["upper"] < delta else
-                     "no-improvement" if dl["upper"] < delta else None)
+        condition = _condition(stats, delta)
         pending = last is not None and last["outcome"] == "pending-reject"
         held, reason = None, None
         late = h["spec"]["fidelity_sensitive"] and at_proxy  # this fidelity can't show its effect
@@ -1855,7 +1855,7 @@ def _verdict_checks(con, st: dict, r: int, space: dict, baseline: dict, eligible
             outcome, held = "active", "fidelity-sensitive: never rejected at a proxy fidelity"
         elif gated and condition:
             outcome = "reject" if pending else "pending-reject"
-        elif gated and vt["lower"] > delta and dl["lower"] > delta:
+        elif gated and stats["delta_stat"]["lower"] > delta:  # LB(M_u) ≥ LB(Δ): implied
             outcome = "retained"
         else:
             outcome = "active"
@@ -1866,8 +1866,11 @@ def _verdict_checks(con, st: dict, r: int, space: dict, baseline: dict, eligible
             outcome, reason = "inconclusive", f"no verdict after {len(fresh)} fresh sampler trials"
         frozen = []
         if gated and outcome in ("active", "retained") and len(group) > 1:
-            frozen = [n for n, b in stats["levers"].items() if b["upper"] < delta]
-            frozen = frozen if len(frozen) < len(group) else []  # the whole group: that's a reject
+            # one lever per check, the least helpful first: two substitutes each show Δ_i ≈ 0 (the
+            # other is optimised in both terms), so freezing both at once would lose their gain
+            low = [(b["delta_stat"]["upper"], n, c) for n, b in stats["levers"].items()
+                   if (c := _condition(b, delta))]
+            frozen = [min(low)[1:]] if low else []
         contradicted = [n for n in group if h["spec"]["levers"][n].get("predicted") and
                         _against(h["spec"]["levers"][n], stats["best_point"][n])]
         record = {
@@ -1883,20 +1886,29 @@ def _verdict_checks(con, st: dict, r: int, space: dict, baseline: dict, eligible
             "prediction": {"flag": "retained-against-prediction"
                            if outcome == "retained" and contradicted else None,
                            "contradicted": contradicted},
-            "frozen": frozen, "trials": [t["trial"] for t in trials],
+            "frozen": [n for n, _ in frozen], "trials": [t["trial"] for t in trials],
             "context": {"retained": [x["id"] for x in _in_search(st)
                                      if x["status"] == "retained" and x["id"] != h["id"]],
                         "co_active": [x["id"] for x in _in_search(st) if x["id"] != h["id"]]},
         }
         elog.append(con, "verdict", "harness", record)
-        for n in frozen:
-            elog.append(con, "lever_frozen", "harness", {"id": h["id"], "lever": n, "verdict": vid})
+        for n, c in frozen:
+            elog.append(con, "lever_frozen", "harness", {"id": h["id"], "lever": n, "verdict": vid, "condition": c})
         if outcome == "inconclusive":
             elog.append(con, "hypothesis_inconclusive", "harness",
                         {"id": h["id"], "verdict": vid, "reason": reason})
             _removal(con, h["id"], "inconclusive", reason)
         checked.append(record)
     return checked
+
+
+def _condition(stats: dict, delta: float) -> str | None:
+    """The reject form on one set of statistics (a group's or a lever's): `no-improvement` when Δ's
+    upper bound is below δ, `irrelevant` when M_u's is too (Δ ≤ M_u on every path, so `irrelevant`
+    is a sub-case: it changes the label and the warm start, never whether it's a reject)."""
+    if stats["delta_stat"]["upper"] >= delta:
+        return None
+    return "irrelevant" if stats["m_u"]["upper"] < delta else "no-improvement"
 
 
 def _sigma(st: dict, fidelity: dict) -> float:
@@ -1915,9 +1927,19 @@ def _finalise_rejects(con, r: int, drift: dict | None) -> None:
     passed; a broken (or unchecked) proxy fidelity logs them as inconclusive instead."""
     st = elog.load(con)
     at_proxy = st["fidelity"]["fidelity"] != st["run"]["reference_fidelity"]
-    for h in _in_search(st):
-        v = h["verdicts"][-1] if h["verdicts"] else None
-        if not v or v["round"] != r or v["outcome"] != "reject":
+    last = [(h, h["verdicts"][-1]) for h in _in_search(st) if h["verdicts"]]
+    confirmed = [(h, v) for h, v in last if v["round"] == r and v["outcome"] == "reject"]
+    # substitutes (two levers doing the same thing) each show Δ ≈ 0, the other optimised in both terms:
+    # one `no-improvement` reject per round end, the smallest upper bound of Δ first; the rest are
+    # re-judged next round (an `irrelevant` one can't be a substitute: its M_u, which sees the partner
+    # at baseline, is below δ)
+    # ponytail: k substitutes take k rounds, and a deferred reject needs a fresh pending check and its
+    # confirmation; carry the confirmation over if that proves too slow
+    first = min(((v["delta_stat"]["upper"], v["id"]) for _, v in confirmed if v["condition"] == "no-improvement"),
+                default=None)
+    for h, v in confirmed:
+        if v["condition"] == "no-improvement" and (v["delta_stat"]["upper"], v["id"]) != first:
+            elog.append(con, "reject_deferred", "harness", {"id": h["id"], "verdict": v["id"], "round": r})
             continue
         if at_proxy and not (drift and drift["broken"] is False):
             reason = "broken proxy fidelity" if drift and drift["broken"] else "proxy fidelity unchecked"
@@ -2602,15 +2624,15 @@ def cmd_untested(a) -> dict:
 
 
 def cmd_sensitivity(a) -> dict:
-    """Telemetry from the verdict GP, per verdict record: the group's and each lever's √V_T, the
-    normalised Sobol index, Δ and the best point. Never a verdict."""
+    """Telemetry from the verdict GP, per verdict record: the group's and each lever's Δ, M_u and
+    √V_T, the normalised Sobol index and the best point. Never a verdict."""
     # ponytail: read from the verdict records; partial-dependence curves need a GP refit, add when
     # the round analyst asks for them
     _, con = _open_run(recover=False)
     h = _hypothesis(elog.load(con), a.hypothesis)
     return {"hypothesis": h["id"], "telemetry": True,
-            "records": [{k: r.get(k) for k in ("id", "round", "check", "group", "sqrt_vt", "levers",
-                                                "sobol_index", "delta_stat", "best_point")}
+            "records": [{k: r.get(k) for k in ("id", "round", "check", "group", "delta_stat", "m_u", "sqrt_vt",
+                                                "levers", "sobol_index", "best_point")}
                         for r in h["verdicts"]]}
 
 

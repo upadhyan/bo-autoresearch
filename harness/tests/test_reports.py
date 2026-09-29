@@ -143,7 +143,7 @@ def test_summary_says_where_the_run_is_and_what_works_in_words_that_match_the_st
     assert h1 == (f"- H1.v1 The bowl has a better bottom: Δ {last['estimate']:.3g} "
                   f"[{last['lower']:.3g}, {last['upper']:.3g}]")
     assert s["Not working"] == ["- H2.v1 A lever that does nothing: doesn't matter",
-                                "- H3.v1 A lever that only hurts: matters, but doesn't help"]
+                                "- H3.v1 A lever that only hurts: doesn't help, and may matter"]
     assert s["Still testing"] == ["- none"]
     assert s["Set aside"] == ["- H4.v1 A lever set aside: parked: the user wants it later"]
     assert s["Up next"] == ["- 0 queued"]
@@ -191,7 +191,7 @@ def test_hypotheses_csv_has_a_row_per_version_keeping_irrelevant_and_no_improvem
     repo, run_dir, *_ = planted
     table = rows(run_dir, "hypotheses.csv")
     assert list(table[0]) == ["id", "title", "lens", "provenance", "mechanism", "state", "reason",
-                              "sqrt_vt_lower", "sqrt_vt_upper", "delta_lower", "delta_upper", "trials_used",
+                              "m_u_lower", "m_u_upper", "delta_lower", "delta_upper", "trials_used",
                               "expected_right", "revived_from", "prediction_flag"]
     by = {r["id"]: r for r in table}
     assert list(by) == ["H1.v1", "H2.v1", "H3.v1", "H4.v1"]
@@ -203,12 +203,12 @@ def test_hypotheses_csv_has_a_row_per_version_keeping_irrelevant_and_no_improvem
     for h in ("H1.v1", "H2.v1", "H3.v1"):
         last = [v for v in of_type(run_dir, "verdict") if v["hypothesis"] == h][-1]
         r = by[h]
-        assert [float(r[k]) for k in ("sqrt_vt_lower", "sqrt_vt_upper", "delta_lower", "delta_upper")] == [
-            last["sqrt_vt"]["lower"], last["sqrt_vt"]["upper"], last["delta_stat"]["lower"], last["delta_stat"]["upper"]]
+        assert [float(r[k]) for k in ("m_u_lower", "m_u_upper", "delta_lower", "delta_upper")] == [
+            last["m_u"]["lower"], last["m_u"]["upper"], last["delta_stat"]["lower"], last["delta_stat"]["upper"]]
         assert int(r["trials_used"]) == len(last["trials"])
-    assert float(by["H2.v1"]["sqrt_vt_upper"]) < 0.1 < float(by["H3.v1"]["sqrt_vt_upper"])
+    assert float(by["H2.v1"]["m_u_upper"]) < 0.1 < float(by["H3.v1"]["m_u_upper"])
     assert float(by["H3.v1"]["delta_upper"]) < 0.1 < float(by["H1.v1"]["delta_lower"])
-    assert by["H4.v1"]["sqrt_vt_lower"] == by["H4.v1"]["trials_used"] == ""  # never tested
+    assert by["H4.v1"]["m_u_lower"] == by["H4.v1"]["trials_used"] == ""  # never tested
     # expected retain / reject before R1 (right), then `undecided` for H1 in R2 and R3 and H3 in R1
     assert [r["expected_right"] for r in table] == ["1/3", "1/1", "0/1", ""]
     assert [r["revived_from"] for r in table] == ["", "", "", ""]

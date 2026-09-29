@@ -30,7 +30,7 @@ def render(st: dict, view: dict) -> dict[str, str]:
 
 CAP = 10  # lines per SUMMARY.md section
 MORE = "see exports/hypotheses.csv and rounds/"
-IN_WORDS = {"irrelevant": "doesn't matter", "no-improvement": "matters, but doesn't help"}
+IN_WORDS = {"irrelevant": "doesn't matter", "no-improvement": "doesn't help, and may matter"}
 RUN_END = {"budget_spent": "the budget is spent", "user_stop": "the user stopped it",
            "target_reached": "the target is reached and confirmed", "exhausted": "the hypothesis list is exhausted",
            "max_trials": "the trial ceiling is reached"}
@@ -167,20 +167,21 @@ def trials_csv(trials: list[dict]) -> str:
     return _csv([CSV_NAMES.get(k, k) for k in META] + [c for c, _, _ in cols], out)
 
 
-HYP_COLS = ["id", "title", "lens", "provenance", "mechanism", "state", "reason", "sqrt_vt_lower",
-            "sqrt_vt_upper", "delta_lower", "delta_upper", "trials_used", "expected_right", "revived_from",
+HYP_COLS = ["id", "title", "lens", "provenance", "mechanism", "state", "reason", "m_u_lower",
+            "m_u_upper", "delta_lower", "delta_upper", "trials_used", "expected_right", "revived_from",
             "prediction_flag"]
 
 
 def _actual(st: dict, hid: str, r: int) -> str:
     """H's verdict at the end of round r, in an expected record's words: retain, reject or undecided
-    (a reject a proxy fidelity's drift check turned inconclusive is undecided)."""
+    (a reject a proxy fidelity's drift check turned inconclusive, or one deferred behind a co-active
+    reject, is undecided)."""
     past = [v for v in st["hypotheses"][hid]["verdicts"] if v["round"] == r]
     if not past:
         return "undecided"
     v = past[-1]
     if v["outcome"] == "reject" and not any(x["removal"] == "inconclusive" and x["verdict"] == v["id"]
-                                            for x in st["removals"]):
+                                            for x in st["removals"]) and v["id"] not in st["hypotheses"][hid]["deferred"]:
         return "reject"
     return "retain" if v["outcome"] == "retained" else "undecided"
 
@@ -211,7 +212,7 @@ def hypotheses_csv(st: dict) -> str:
         s, last = h["spec"], h["verdicts"][-1] if h["verdicts"] else None
         mine = [(r, v) for (i, r), v in expected.items() if i == h["id"]]
         right = sum(v == _actual(st, h["id"], r) for r, v in mine)
-        bounds = ([last["sqrt_vt"]["lower"], last["sqrt_vt"]["upper"], last["delta_stat"]["lower"],
+        bounds = ([last["m_u"]["lower"], last["m_u"]["upper"], last["delta_stat"]["lower"],
                    last["delta_stat"]["upper"], len(last["trials"])] if last else [""] * 5)
         out.append([h["id"], s["title"], s["lens"], s["provenance"], s["mechanism"], h["status"], _reason(h),
                     *bounds, f"{right}/{len(mine)}" if mine else "", h.get("revived_from", ""),
@@ -328,14 +329,18 @@ def round_summary(st: dict, status: dict, r: int) -> str:
             f"Fidelity {fid}, epoch {rnd.get('epoch', 0)}, commit {rnd['commit'][:12]}"
             + (f", testing {', '.join(rnd['hypotheses'])}." if rnd.get("hypotheses") else ".")]
 
+    deferred = {i for h in hyps.values() for i in h["deferred"]}
+
     def record(v: dict) -> str:
         failed = [g for g, x in v["gates"].items() if not x["passed"]]
         why = v["condition"] or v["reason"] or v["held"]
         return (f"- {v['id']}: {v['outcome']}" + (f" ({why})" if why else "")
-                + f"; √V_T {_interval(v['sqrt_vt'])}, Δ {_interval(v['delta_stat'])}, δ {_num(v['delta'])}; "
+                + f"; Δ {_interval(v['delta_stat'])}, M_u {_interval(v['m_u'])}, δ {_num(v['delta'])}; "
                 + (f"gates failed: {', '.join(failed)}" if failed else "gates passed")
                 + f"; {v['burn_in']['fresh']} fresh sampler trials"
-                + (f"; {v['prediction']['flag']}" if v["prediction"]["flag"] else ""))
+                + (f"; {v['prediction']['flag']}" if v["prediction"]["flag"] else "")
+                + ("; deferred: one no-improvement reject per round end, re-judged next round"
+                   if v["id"] in deferred else ""))
 
     if r == 0:
         noise = [f"- σ at {json.dumps(x['fidelity'], sort_keys=True)}: {_num(x['sigma'])} from {x['n']} baseline "

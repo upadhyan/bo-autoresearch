@@ -31,7 +31,7 @@ Make the requested number of proposals from **your lens** (the wildcard lens pro
 - `levers` — short names (the harness prefixes `H<n>.`). Prefer graded ranges: `float`/`int` with `low`, `high`, optional `log`, and `predicted` (`higher` or `lower`: the side of the baseline where the objective improves); `categorical` with `options`; `bool` only with `why_not_graded`. Every lever has a `baseline` inside its range at which the code does exactly what it does today. Add `path` (the config path the lever controls) whenever there is one — conflict and directive checks use it.
 - Optional: `masked_by: {"H<m>": reason}` when another hypothesis switches this mechanism off, `exclusive_with: ["H<m>"]` when both can't be on together.
 
-Size ranges so the effect could plausibly exceed δ across them: a lever whose whole range moves the objective less than about 3.5·δ can only be rejected.
+Size ranges so the gain could plausibly exceed δ across them: a lever that can't improve the objective by more than δ anywhere in its range can only be rejected.
 
 ## 3. Record
 
