@@ -321,9 +321,9 @@ def cmd_commit_lever(a) -> dict:
         p = subprocess.run(["git", "show", rev_path], cwd=worktree, capture_output=True, text=True)
         return p.stdout if p.returncode == 0 else None
 
+    paths = _git(worktree, "diff-tree", "-r", "-z", "--name-only", "HEAD", tree).split("\0")
     changed = {path: (show(f"HEAD:{path}"), show(f"{tree}:{path}"))
-               for path in _git(worktree, "diff-tree", "-r", "--name-only", "HEAD", tree).split()
-               if path.endswith(".py")}
+               for path in paths if path.endswith(".py")}
     coded = [x for x in st["hypotheses"].values() if x["commit"]] + [h]
     try:
         hypotheses.check_lever_code(changed, list(h["spec"]["levers"]),
