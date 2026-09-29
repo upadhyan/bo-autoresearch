@@ -710,3 +710,45 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   (linear) still allows it at σ = δ/10 (20/20). Rejects are unaffected; the label and the warm start's key drop are.
   OPEN (user decision, likely a #21 amendment): this breaks the Seam 2 "useless → `irrelevant`" case and leaves 5 tests
   red (test_verdicts: broken proxy, single lever frozen `irrelevant` next to a bowl; test_reports: 3 on the planted H2).
+- #35: the skill's round-run wait loop is `pgrep -f "[/]<BO minus its leading slash> round-run"`: procps pgrep
+  (Linux, the dogfood CI) doesn't exclude its ancestors, so a plain `"boautoresearch round-run"` matched the Monitor's
+  own shell and never exited (BSD pgrep hid it on macOS); the full `BO` path also keeps one run's wait off another
+  run's round (the 7-run matrix). Headless start verified live: `claude -p "/boautoresearch:start"` on the dogfood toy
+  reaches R1 unprompted (scripted ≈5.5 min, free ≈17 min).
+- #34 follow-up (orchestrator raw reads, no parser): the orchestrator's Bash may compute no words (`$(`, backticks,
+  `$'`, `<(`/`>(` outside a trailing heredoc → `checks.COMPUTED`); a command not only `boautoresearch`/`cd` may not
+  name `log.db`/`artifacts/trial-` in its raw text (inline code, heredoc bodies) or its shlex words; and every word,
+  in Bash or as a Read/Grep/Glob path, is refused if as a glob (braces, `$VAR` glued to text → `*`; `*` crosses `/`)
+  resolved from its cwd it fnmatches a `checks.raw_paths` entry (bo dir, run dirs, log.db*, artifacts, a stand-in
+  trial-0, every file under artifacts). Names over parsing: every route must carry one. Known false positives
+  (orchestrator only): a lone `*` word (`ls *`, `-m '* fix'`), a user file named log.db. Residual: names built in code
+  (`'lo'+'g.db'`), a script file outside the repo, recursive reads naming nothing (`grep -r x .`).
+- #37 follow-up (distilled branch, dynamic loads): `harness_imports` returns a Counter of sites (static harness imports,
+  `import builtins`, loaders `__import__`/`import_module`/`run_module`/`run_path`/`exec_module`/`load_module`, bare
+  `exec`/`eval`, `builtins|sys.<exec|eval|modules|__import__>`, any str matching `\bboautoresearch\b`); refused when
+  added against the base (Counter difference). Not "verify with the harness unimportable": the harness runner imports
+  it in-process. Residual: a subprocess, a .pth file.
+- workers (parallel trials, #21 story 16): a BO round (R1+) keeps up to `workers` trials in flight; everything else (R0, ladder
+  calibration, smoke, equivalence, drift, wrap-up) stays one at a time (ponytail: their trials are few). `cli._start` (gates +
+  trial_started) and `cli._outcome` (trial_finished/failed) run on the main thread; only the subprocess wait (`_run_trial`,
+  heartbeats on its own connection) runs in a `ThreadPoolExecutor` worker, so the log and the Optuna study have one writer.
+  Pending points: GPSampler (Optuna 5) already conditions asks on RUNNING trials (qLogEI, Kriging believer), and an ask
+  is RUNNING until told, so no constant liar is added; an ask equal to an in-flight ask is told FAIL and the round waits
+  for a landing. Budget: the gate charges running trials their estimated cost (`_in_flight`, 0 serially), and so does
+  the round cap (which now also exempts only the first trial: `spent > 0 or flight`). Budget stays summed per-trial
+  wall-clock (spec), so W workers spend it ~W× faster in real time. Triggers with trials in flight: a stall is judged
+  only with nothing in flight (wait for a landing, re-evaluate: a trial still running may be a new incumbent owed
+  confirmations); every other trigger (search_space, cap, target, user_stop/checkpoint, prohibited, and a budget/ceiling
+  refusal) stops launching, lets the in-flight trials finish, and records them in the round before round_ended. Landed
+  trials are logged in trial order within one wait; "new incumbent"/owed confirmations replay in trial (start) order as
+  before. A verdict check may see up to `workers` trials past its due count. Replicate-floor picks count in-flight
+  replicates. A crash leaves every in-flight trial running with a dead pid: recovery abandons and killpgs each (no
+  change); a main-thread exception killpgs the in-flight runners. Timing makes parallel runs non-replayable (the log
+  still rebuilds every file). workers: 1 takes the same path with at most one trial in flight (same events).
+- workers (review): the in-flight estimate never ends the run: `launch` (in `_run_round`) checks `_headroom` first, and while
+  trials are in flight and the next would not fit, it lands one and asks again; only the ledger (nothing in flight) refuses,
+  so budget_spent means spent. A worker error in a landing (also during the budget/ceiling end) goes through
+  `_abort_round` (killpg the in-flight runners, round_ended failed). Kept: confirmations owed by a trial that landed after
+  a round-ending trigger are not carried to the next round (the stall window and owed list restart per round; serial
+  rounds already dropped them on a cap); an unknown cost (0) charges nothing, so a round at a never-measured fidelity could
+  start `workers` trials uncharged (R1+ fidelities are always measured by R0 or ladder calibration).
