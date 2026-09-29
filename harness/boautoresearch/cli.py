@@ -24,14 +24,14 @@ from pathlib import Path
 
 import yaml
 
-from . import calibration, hypotheses, records, verdict
+from . import calibration, directives, hypotheses, records, verdict
 from . import study as bo_study
 from . import experiment_log as elog
 
 HARNESS_SRC = Path(__file__).resolve().parents[1]  # holds pyproject.toml when run from the plugin
 RUN_KEYS = {"objective", "direction", "budget_s", "runner", "reference_fidelity", "python",
             "ladder", "deterministic", "replicates_k", "delta", "seed", "checkpoint", "target",
-            "max_trials", "seeds", "generation", "fixtures"}
+            "max_trials", "seeds", "generation", "fixtures", "brief", "directives", "protected_paths"}
 CONFIRMATIONS = 2  # replicates of every new incumbent before it counts as the best
 ROUND_CAP = 0.25  # a round may spend this share of the budget remaining at its start
 REPLICATE_SHARE, ESCALATED_SHARE = 0.1, 0.3  # the replicate floor, raised for a stuck hypothesis
@@ -47,6 +47,10 @@ class TrialRefused(Refused):
     def __init__(self, message: str, reason: str = "budget_spent"):
         super().__init__(message)
         self.reason = reason
+
+
+class ProhibitedRefused(Refused):
+    """The trial's resolved config breaks a prohibited directive's predicate: it never runs."""
 
 
 class _Parser(argparse.ArgumentParser):
@@ -171,6 +175,10 @@ def _load_run_yaml(path: Path) -> dict:
         cfg["fixtures"] = str((path.parent / fixtures).resolve())
     elif fixtures is not None:
         raise Refused("run.yaml: fixtures are served only with generation: scripted")
+    try:
+        cfg["registry"] = directives.validate({k: cfg.pop(k, None) for k in directives.REGISTRY_KEYS})
+    except ValueError as e:
+        raise Refused(f"run.yaml: {e}")
     cfg["python"] = str(cfg.get("python") or sys.executable)
     return cfg
 
@@ -253,6 +261,10 @@ def cmd_init(a) -> dict:
         "target": cfg["target"], "max_trials": cfg["max_trials"], "seeds": cfg["seeds"],
         "generation": cfg["generation"], "fixtures": cfg["fixtures"],
     })
+    # the directive registry, protected paths and brief, owned by the harness from here on
+    elog.append(con, "registry_revised", "harness", {
+        "version": 1, **cfg["registry"],
+        "manifest": _manifest(run_dir, cfg["runner"], cfg["registry"]["protected_paths"])})
     _regenerate(run_dir, con)
     return {"run_dir": str(run_dir), "worktree": str(run_dir / "worktree"),
             "venv": str(run_dir / "venv"), **_status(elog.load(con))}
@@ -274,6 +286,12 @@ def _trial(run_dir: Path, con, a, kind: str, levers: dict, fidelity: dict, **ext
     """
     st = elog.load(con)
     run, n = st["run"], len(st["trials"]) + 1
+    if d := directives.violated(st["registry"]["directives"], levers, elog.lever_paths(st["hypotheses"])):
+        elog.append(con, "prohibited_check_refused", "harness", {
+            "kind": kind, "levers": levers, "fidelity": fidelity, "directive": d["id"], **extra})
+        _regenerate(run_dir, con)
+        raise ProhibitedRefused(f"a {kind} trial at {json.dumps(levers, sort_keys=True)} breaks prohibited "
+                                f"directive {d['id']} ({d['predicate']}): it never runs")
     remaining = _remaining(st)
     estimate = _cost(st["trials"], fidelity)
     if run["max_trials"] is not None and n > run["max_trials"]:
@@ -328,8 +346,14 @@ def cmd_smoke(a) -> dict:
     levers = h["spec"]["levers"]
     base = {**_baseline(run_dir), **{n: lv["baseline"] for n, lv in levers.items()}}
     rng = _rng(st["run"], "smoke", h["id"], len(st["trials"]))
+    # ponytail: 100 draws for a point inside the allowed region (the trial check refuses one outside);
+    # sample inside the region directly if a narrow one ever defeats it
+    for _ in range(100):
+        rand = {**base, **hypotheses.random_point(levers, rng)}
+        if not _prohibited(rand, st):
+            break
     trials = []
-    for point, cfg in (("baseline", base), ("random", {**base, **hypotheses.random_point(levers, rng)})):
+    for point, cfg in (("baseline", base), ("random", rand)):
         trials.append(_trial(run_dir, con, a, "smoke", cfg, fidelity,
                              hypothesis=h["id"], point=point, tree=tree))
         if trials[-1]["status"] != "finished":
@@ -388,6 +412,25 @@ def _worktree_stamp(worktree: Path) -> dict:
     return {f: (worktree / f).stat().st_mtime_ns for f in files if f and (worktree / f).exists()}
 
 
+def _manifest(run_dir: Path, runner: str, globs: list[str]) -> dict:
+    """sha256 of every worktree file the protected globs match (untracked included, ignored not)."""
+    worktree = run_dir / "worktree"
+    files = [f for f in _git(worktree, "ls-files", "-z", "-co", "--exclude-standard").split("\0")
+             if f and (worktree / f).is_file()]
+    return directives.manifest(worktree, directives.protected(worktree, files, runner, globs))
+
+
+def _check_manifest(run_dir: Path, st: dict) -> None:
+    """Before every round and every commit: the protected paths are as the harness last recorded
+    them, whatever wrote to them (an Edit, a shell redirect, `python -c`, a commit)."""
+    if (recorded := st["manifest"]) is None:
+        return
+    now = _manifest(run_dir, st["run"]["runner"], st["registry"]["protected_paths"])
+    if changed := sorted(f for f in set(recorded) | set(now) if recorded.get(f) != now.get(f)):
+        raise Refused(f"protected paths changed since the harness recorded their hashes: {changed}; "
+                      "restore them (the research may never change how the score is measured)")
+
+
 def _read_json(path: str, what: str, validate) -> dict:
     try:
         body = json.loads(Path(path).read_text())
@@ -428,11 +471,15 @@ def cmd_record(a) -> dict:
     run_dir, con = _open_run()
     st = elog.load(con)
     body = _read_json(a.file, a.kind, lambda r: records.validate(a.kind, r, st))
+    if a.kind == "review" and st["hypotheses"][body["hypothesis"]]["status"] in ("active", "retained"):
+        _between_rounds(st, "a hypothesis in the search is reviewed")  # its verdict may park it
     ids = ([_propose(run_dir, con, s, a.actor, a.rationale) for s in body["hypotheses"]]
            if a.kind == "proposal" else [])
     elog.append(con, "record", a.actor, {"rationale": a.rationale, "kind": a.kind,
                                          "agent_id": a.agent_id, "record": body,
                                          **({"hypotheses": ids} if ids else {})})
+    if a.kind == "review":
+        _apply_review(con, body)
     _regenerate(run_dir, con)
     return {"recorded": a.kind, "agent_id": a.agent_id, **({"hypotheses": ids} if ids else {})}
 
@@ -443,15 +490,86 @@ def cmd_check_recorded(a) -> dict:
     return {"recorded": any(r["agent_id"] == a.agent_id for r in elog.load(con)["records"])}
 
 
+def _apply_review(con, r: dict) -> None:
+    """A review's verdict: prune prunes a hypothesis not yet tested (parks one in the search), and
+    off-intent parks it. Taste never prunes; stretch and deprioritize only lower its priority."""
+    h = elog.load(con)["hypotheses"][r["hypothesis"]]
+    if h["status"] not in ("proposed", "registered", "active", "retained"):
+        return
+    if r["directive_verdict"] == "prune" and h["status"] in records.UNTESTED:
+        elog.append(con, "hypothesis_pruned", "harness", {"id": h["id"], "directive": r["directive"],
+                                                          "by": "review", "reason": r["rationale"]})
+    elif r["directive_verdict"] == "prune" or r["intent"] == "off-intent":
+        _park(con, h, (f"prohibited: {r['directive']}: " if r["directive_verdict"] == "prune"
+                       else "off-intent: ") + r["rationale"])
+
+
+def _park(con, h: dict, reason: str) -> None:
+    """The harness parks H (a review's verdict, or a revision): a removal like any park."""
+    elog.append(con, "hypothesis_parked", "harness", {"id": h["id"], "reason": reason, "from": h["status"]})
+    _removal(con, h["id"], "parked", reason)
+
+
+def _review(st: dict, h: dict) -> dict | None:
+    """H's latest registration review since the registry's latest revision (a revision asks for a
+    re-review of every hypothesis)."""
+    return next((x["record"] for x in reversed(st["records"]) if x["kind"] == "review"
+                 and x["record"]["hypothesis"] == h["id"] and x["seq"] > st["registry"]["seq"]), None)
+
+
+def _review_missing(st: dict) -> list[str]:
+    """The hypotheses in the loop (queued or in the search) with no review since the registry's
+    latest version: revived versions, and every one after a revision."""
+    return [h["id"] for h in st["hypotheses"].values()
+            if h["status"] in ("registered", "active", "retained") and _review(st, h) is None]
+
+
+def _priority(st: dict, h: dict) -> int:
+    """H's priority: the orchestrator's (`prioritize`), less the harness's penalty."""
+    return h["priority"] - _penalty(st, h)
+
+
+def _penalty(st: dict, h: dict) -> int:
+    """How far the harness lowers H's priority: a stretch intent verdict, and a deprioritize verdict
+    or a discouraged directive declared (recomputed when the registry is revised)."""
+    r = _review(st, h) or {}
+    discouraged = {d["id"] for d in st["registry"]["directives"] if d["severity"] == "discouraged"}
+    return (r.get("intent") == "stretch") + (r.get("directive_verdict") == "deprioritize"
+                                             or bool(discouraged & set(h["spec"]["directives"])))
+
+
+def _outside(run_dir: Path, st: dict, h: dict) -> tuple[dict, str] | None:
+    """The prohibited directive whose allowed region H's lever box leaves, and why (None: it stays
+    inside), checked on a grid with every other lever at its baseline."""
+    levers = h["spec"]["levers"]
+    base = {**_baseline(run_dir), **{n: lv["baseline"] for n, lv in levers.items()}}
+    paths = elog.lever_paths(st["hypotheses"])
+    for point in directives.grid(levers):
+        if d := directives.violated(st["registry"]["directives"], {**base, **point}, paths):
+            return d, (f"{h['id']}'s levers leave the allowed region of prohibited directive {d['id']} "
+                       f"({d['statement']}: {d['predicate']}) at {json.dumps(point, sort_keys=True)}")
+    return None
+
+
 def cmd_register(a) -> dict:
-    """Freeze a proposed spec: from here on only its lever code may be written."""
+    """Freeze a proposed spec, once the registration reviewer has reviewed it: from here on only its
+    lever code may be written."""
     run_dir, con = _open_run()
-    h = _hypothesis(elog.load(con), a.hypothesis)
+    st = elog.load(con)
+    h = _hypothesis(st, a.hypothesis)
     if h["status"] != "proposed":
         raise Refused(f"{h['id']} is already {h['status']}")
-    # #31 adds here: refuse without a `review` record for H (st["records"], #27), or with ranges
-    # outside the allowed region of the prohibited directives.
-    elog.append(con, "hypothesis_registered", a.actor, {"rationale": a.rationale, "id": h["id"]})
+    if (r := _review(st, h)) is None:
+        raise Refused(f"register {h['id']} needs a `review` record from the registration reviewer "
+                      f"(directive, intent and conflict verdicts) against registry version "
+                      f"{st['registry']['version']}")
+    if out := _outside(run_dir, st, h):
+        raise Refused(f"{out[1]}: propose a version whose ranges and options stay inside it")
+    lowered = _penalty(st, h)
+    elog.append(con, "hypothesis_registered", a.actor, {
+        "rationale": a.rationale, "id": h["id"], "review": {k: r[k] for k in ("directive_verdict", "intent")},
+        # a stretch or deprioritize verdict is tested only with a stated reason: the rationale
+        **({"lowered": {"by": lowered, "reason": a.rationale}} if lowered else {})})
     _regenerate(run_dir, con)
     return {"hypothesis": elog.load(con)["hypotheses"][h["id"]]}
 
@@ -480,10 +598,14 @@ def cmd_checkpoint(a) -> dict:
     run_dir, con = _open_run()
     st = elog.load(con)
     _not_ended(st)
+    if a.revise:
+        if a.resume or not st["paused"]:
+            raise Refused("the registry is revised only while the run is paused (a checkpoint or a user "
+                          "pause): `checkpoint`, then `checkpoint --revise <file>`, then `checkpoint --resume`")
+        return _revise(run_dir, con, a, st)
     if a.resume:
         if not st["paused"]:
             raise Refused("the run is not paused: nothing to resume")
-        # #31 adds here: directive revisions, made during the pause, take effect from the next round
         elog.append(con, "user_resume", a.actor, {"rationale": a.rationale})
     else:
         if st["paused"]:
@@ -491,6 +613,49 @@ def cmd_checkpoint(a) -> dict:
         elog.append(con, "user_pause", a.actor, {"rationale": a.rationale})
     _regenerate(run_dir, con)
     return _status(elog.load(con))
+
+
+def _revise(run_dir: Path, con, a, st: dict) -> dict:
+    """A new registry version (brief, directives and protected paths; keys left out stay). It takes
+    effect before the next round: a prohibition breaking a hypothesis's lever box prunes it
+    (registered) or parks it (in the search), violating trials leave the warm start, a pruned
+    hypothesis whose directive changed goes back to proposed, compat flags and priorities are
+    recomputed, and every hypothesis needs a fresh review."""
+    _between_rounds(st, "the registry is revised")
+    _check_manifest(run_dir, st)  # else re-hashing would launder a tampered file
+    try:
+        body = yaml.safe_load(Path(a.revise).read_text())
+    except (OSError, yaml.YAMLError) as e:
+        raise Refused(f"cannot read {a.revise}: {e}")
+    if not isinstance(body, dict) or not body or set(body) - directives.REGISTRY_KEYS:
+        raise Refused(f"a revision states some of {sorted(directives.REGISTRY_KEYS)}")
+    old = st["registry"]
+    try:
+        new = directives.validate({k: body.get(k, old[k]) for k in directives.REGISTRY_KEYS})
+    except ValueError as e:
+        raise Refused(f"revision: {e}")
+    version = old["version"] + 1
+    elog.append(con, "registry_revised", a.actor, {
+        "rationale": a.rationale, "version": version, **new,
+        "manifest": _manifest(run_dir, st["run"]["runner"], new["protected_paths"])})
+    before = {d["id"]: d for d in old["directives"]}
+    after = {d["id"]: d for d in new["directives"]}
+    for h in [h for h in st["hypotheses"].values() if h["status"] == "pruned"]:
+        if before.get(h["pruned_by"]) != after.get(h["pruned_by"]):  # relaxed (or reworded): re-review
+            elog.append(con, "hypothesis_unpruned", "harness",
+                        {"id": h["id"], "directive": h["pruned_by"], "version": version})
+    st = elog.load(con)
+    for h in [h for h in st["hypotheses"].values() if h["status"] in ("registered", "active", "retained")]:
+        if (out := _outside(run_dir, st, h)) is None:
+            continue
+        d, why = out
+        if h["status"] == "registered":
+            elog.append(con, "hypothesis_pruned", "harness",
+                        {"id": h["id"], "directive": d["id"], "by": "revision", "reason": why})
+        else:
+            _park(con, h, f"prohibited: {d['id']} (directives version {version}): {why}")
+    _regenerate(run_dir, con)
+    return {"registry": version, **_status(elog.load(con))}
 
 
 def cmd_park(a) -> dict:
@@ -524,7 +689,13 @@ def cmd_unpark(a) -> dict:
         raise Refused(f"{h['id']} was revived as {latest['id']}: that version carries it on")
     if not a.reason.strip():
         raise Refused("unpark needs a --reason")
-    # #31 adds here: the registration reviewer re-reviews a returning hypothesis
+    # the user's call overrides a taste verdict (off-intent), never a prohibition
+    if out := _outside(run_dir, st, h):
+        raise Refused(f"{out[1]}: it can't return while the prohibition stands")
+    if (r := _review(st, h)) and r["directive_verdict"] == "prune":
+        raise Refused(f"{h['id']}'s review prunes it under {r['directive']}: it returns only after the "
+                      "directives are revised and a new review allows it")
+    # it keeps its review unless the registry was revised since (then round-run asks for a new one)
     elog.append(con, "hypothesis_unparked", a.actor, {"rationale": a.rationale, "id": h["id"], "reason": a.reason})
     _regenerate(run_dir, con)
     return _status(elog.load(con))
@@ -552,7 +723,7 @@ def cmd_commit_lever(a) -> dict:
     if tree != h["smoke"]["tree"]:
         raise Refused(f"the worktree changed since {h['id']}'s passing smoke: smoke it again")
     paths = _changed_paths(worktree, tree)
-    _change_allowed(st, paths)
+    _change_allowed(run_dir, st, paths, tree)
 
     def show(rev_path: str):
         p = subprocess.run(["git", "show", rev_path], cwd=worktree, capture_output=True, text=True)
@@ -572,7 +743,9 @@ def cmd_commit_lever(a) -> dict:
     (worktree / "levers.json").write_text(json.dumps(baselines, indent=2, sort_keys=True) + "\n")
     sha = _commit(worktree, f"{h['id']}: {h['spec']['title']}")
     elog.append(con, "lever_committed", a.actor,
-                {"rationale": a.rationale, "id": h["id"], "commit": sha, "levers": baselines})
+                {"rationale": a.rationale, "id": h["id"], "commit": sha, "levers": baselines,
+                 # the harness rewrote levers.json, a protected path: its hash moves on with it
+                 "manifest": _manifest(run_dir, st["run"]["runner"], st["registry"]["protected_paths"])})
     # new lever code at its baseline should pass trivially: the check catches a baseline that
     # isn't really a no-op
     return {"hypothesis": h["id"], "commit": sha, **_after_change(run_dir, con, sha, "lever_committed")}
@@ -602,12 +775,27 @@ def _between_rounds(st: dict, what: str) -> None:
                       "and one search space); do it once the round has ended")
 
 
-def _change_allowed(st: dict, paths: list[str]) -> None:
-    """Code changes only between rounds, and never on protected paths."""
+def _change_allowed(run_dir: Path, st: dict, paths: list[str], tree: str | None = None) -> None:
+    """Code changes only between rounds, never on protected paths, with the protected-path manifest
+    intact, and (the diff to the worktree tree `tree`) with no prohibited directive's forbidden
+    pattern in an added line."""
     _between_rounds(st, "code changes")
-    # #31 adds here: run.yaml protected_paths globs and the hash-manifest check
-    if hit := sorted({st["run"]["runner"], "levers.json"} & set(paths)):
-        raise Refused(f"the change touches protected paths {hit}: the harness owns them")
+    _check_manifest(run_dir, st)
+    worktree = run_dir / "worktree"
+    if hit := directives.protected(worktree, paths, st["run"]["runner"], st["registry"]["protected_paths"]):
+        raise Refused(f"the change touches protected paths {hit}: the research may never change them")
+    if tree is None:
+        return
+    added, path = [], None
+    for ln in _git(worktree, "diff-tree", "-p", "-r", "--no-color", "HEAD", tree).splitlines():
+        if ln.startswith("+++ "):
+            path = ln[len("+++ b/"):]
+        elif ln.startswith("+") and path:
+            added.append((path, ln[1:]))
+    if found := directives.forbidden(st["registry"]["directives"], added):
+        d, where, line = found
+        raise Refused(f"{where} adds `{line.strip()}`, a forbidden pattern of prohibited directive "
+                      f"{d['id']} ({d['statement']}): the commit is refused")
 
 
 def cmd_commit_change(a) -> dict:
@@ -620,7 +808,7 @@ def cmd_commit_change(a) -> dict:
     paths = _changed_paths(worktree, tree)
     if not paths:
         raise Refused("nothing to commit: the worktree has no changes")
-    _change_allowed(st, paths)
+    _change_allowed(run_dir, st, paths, tree)
     sha = _commit(worktree, f"commit-change: {a.reason}")
     elog.append(con, "commit_change", a.actor, {"rationale": a.rationale, "reason": a.reason,
                                                 "commit": sha, "paths": paths, "breaking": a.breaking})
@@ -639,7 +827,7 @@ def cmd_add_dependency(a) -> dict:
         raise Refused("add-dependency takes one requirement (a name, specifier, path or URL), not options")
     if _git(worktree, "status", "--porcelain"):
         raise Refused("the worktree has uncommitted changes: commit them with commit-change first")
-    _change_allowed(st, [FREEZE_FILE])
+    _change_allowed(run_dir, st, [FREEZE_FILE])
     python = run_dir / "venv" / "bin" / "python"
     uv = shutil.which("uv")
     cmd = ([uv, "pip", "install", "-q", "--python", str(python), a.requirement] if uv else
@@ -799,6 +987,11 @@ def _new_epoch(run_dir: Path, con, sha: str, change: str, breaking: bool) -> dic
 def cmd_round_run(a) -> dict:
     run_dir, con = _open_run()
     st = elog.load(con)
+    _check_manifest(run_dir, st)  # before every round, R0 included
+    made = {st["run"]["base_commit"], *(e["commit"] for e in st["commits"])}
+    if (head := _git(run_dir / "worktree", "rev-parse", "HEAD")) not in made:
+        raise Refused(f"the worktree's HEAD {head[:12]} was not committed by the harness: commits go "
+                      "through commit-lever, commit-change or add-dependency (their diffs are checked)")
     if _git(run_dir / "worktree", "status", "--porcelain"):
         raise Refused("the worktree has uncommitted changes: a round runs on one commit, so commit "
                       "lever code with `commit-lever <H>` first")
@@ -820,6 +1013,9 @@ def cmd_round_run(a) -> dict:
                           "verdict (retain, reject or undecided, one-line reason) for every hypothesis it tests")
         return selected
 
+    if unreviewed := _review_missing(st):
+        raise Refused(f"record review {', '.join(unreviewed)} first: the registration reviewer reviews every "
+                      "hypothesis at registration, at revival, and after a registry revision")
     if missing := _interplay_missing(st):
         raise Refused(f"record interplay for {', '.join(_who(m) for m in missing)} first: every removal "
                       "is weighed against the untested list, and every newcomer against past removals")
@@ -829,7 +1025,7 @@ def cmd_round_run(a) -> dict:
         elog.append(con, "run_ended", "harness", {"reason": "exhausted", "exhaustion": conditions})
         _regenerate(run_dir, con)
         return _status(elog.load(con))
-    if revived := _revive(con, st):  # into the round the partner joins, shown before it runs
+    if revived := _revive(run_dir, con, st):  # into the round the partner joins, shown before it runs
         _regenerate(run_dir, con)
         return {"revived": revived, **_status(elog.load(con))}
     selected = ready_selection(st)
@@ -929,7 +1125,7 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
         the round started: it ends at its next step."""
         return "user_stop" if st["run_ended"] else "checkpoint" if st["paused"] else None
 
-    inc, trigger, noise, drift = best(st["trials"]), None, None, None
+    inc, trigger, noise, drift, refusals = best(st["trials"]), None, None, None, 0
     stall_after = max(5 * len(space), 20)
     share = ESCALATED_SHARE if any(e["step"] == "replicates" for h in selected
                                    for e in h["escalations"]) else REPLICATE_SHARE
@@ -942,7 +1138,7 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
         for kind, cfg, extra in chosen:
             if trigger := user_trigger(elog.load(con)):
                 break
-            if why := _config_error(cfg, space):  # bounds-checked again against the round's space
+            if why := _config_error(cfg, space) or _prohibited({**baseline, **cfg}, st):  # checked again
                 elog.append(con, "agent_trial_skipped", "harness",
                             {"round": r, "kind": kind, "config": cfg, "reason": why, **extra})
                 continue
@@ -996,7 +1192,14 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
                     study.add(t)
             else:
                 asked = study.ask()
-                t = _trial(run_dir, con, None, "sampler", {**baseline, **asked.params}, fidelity, round=r)
+                try:
+                    t = _trial(run_dir, con, None, "sampler", {**baseline, **asked.params}, fidelity, round=r)
+                except ProhibitedRefused:  # a point between the grid registration checked
+                    t, refusals = {"status": "refused"}, refusals + 1
+                    # ponytail: ends the round after 10 refused asks (the sampler learns nothing from
+                    # a FAIL); reparameterise the region into a box if a hypothesis keeps hitting it
+                    if refusals >= 10:
+                        trigger = "prohibited"
                 study.tell(asked, t)
         st = elog.load(con)
         inc = best(st["trials"])
@@ -1039,9 +1242,16 @@ def _eligibility(st: dict, space: dict, baseline: dict, fidelity: dict):
     epoch = st["epoch"]["epoch"]
 
     def eligible(trials: list[dict]) -> list[dict]:
-        return [m for t in trials if (m := bo_study.eligible(t, space, baseline, fidelity, epoch,
-                                                             irrelevant, merges))]
+        # a trial breaking a prohibition (a revision tightened one since it ran) is out
+        return [m for t in trials if not _prohibited(t["levers"], st)
+                and (m := bo_study.eligible(t, space, baseline, fidelity, epoch, irrelevant, merges))]
     return eligible
+
+
+def _prohibited(levers: dict, st: dict) -> str | None:
+    """Why this resolved config lies outside the allowed region (None: it doesn't)."""
+    d = directives.violated(st["registry"]["directives"], levers, elog.lever_paths(st["hypotheses"]))
+    return f"outside the allowed region of prohibited directive {d['id']} ({d['predicate']})" if d else None
 
 
 def _in_search(st: dict) -> list[dict]:
@@ -1326,8 +1536,9 @@ def _estimate_noise(run_dir: Path, con, baseline: dict) -> None:
 def _calibrate_ladder(run_dir: Path, con, noise: dict, space: dict) -> dict:
     """Ladder calibration: ~5 diverse configs over the selected hypotheses' levers at every rung."""
     run = elog.load(con)["run"]
-    cfgs = calibration.configs(space, _baseline(run_dir),
-                               _rng(run, "calibration"))
+    # a quasi-random point can fall in a hole of a region that isn't box-shaped: it never runs
+    cfgs = [c for c in calibration.configs(space, _baseline(run_dir), _rng(run, "calibration"))
+            if not _prohibited(c, elog.load(con))]
     rows = [{"fidelity": r["fidelity"], "sigma": r["sigma"], "objectives": [], "trials": []}
             for r in noise["rungs"]]
     for i, cfg in enumerate(cfgs):
@@ -1422,10 +1633,10 @@ def _status(st: dict) -> dict:
             "delta": st["delta"], "suggested_delta": _suggested_delta(st), "run_ended": st["run_ended"],
             "epoch": st["epoch"]["epoch"],
             "hypotheses": [{"id": h["id"], "title": h["spec"]["title"], "status": h["status"],
-                            "commit": h["commit"], "priority": h["priority"]}
+                            "commit": h["commit"], "priority": _priority(st, h)}
                            for h in st["hypotheses"].values()],
             "schedule": _schedule_status(st), "paused": st["paused"],
-            "interplay_missing": _interplay_missing(st),
+            "interplay_missing": _interplay_missing(st), "review_missing": _review_missing(st),
             "generation": {"mode": run["generation"], "passes": len(st["passes"]),
                            "due": _generation_due(st)},
             "exhaustion": _exhaustion(st), "next": _next(st)}
@@ -1445,7 +1656,7 @@ def _delta_duty(st: dict) -> str:
 def _queue(st: dict) -> list[dict]:
     """The registered hypotheses, by priority (highest first), then registration order."""
     return sorted((h for h in st["hypotheses"].values() if h["status"] == "registered"),
-                  key=lambda h: (-h["priority"], h["registered"]))
+                  key=lambda h: (-_priority(st, h), h["registered"]))
 
 
 def _dimension_cap(st: dict) -> int | None:
@@ -1573,6 +1784,8 @@ def _next(st: dict) -> list[str]:
         duties.append("propose and register a hypothesis")
     if st["delta"] is None:
         duties.append(_delta_duty(st))
+    duties += [f"record review {h} (the registration reviewer: directive, intent and conflict verdicts)"
+               for h in _review_missing(st)]
     duties += [f"record interplay: review {m['removed']}'s removal against the untested list"
                if "removed" in m else f"record interplay: review newcomer {m['newcomer']} against past removals"
                for m in _interplay_missing(st)]
@@ -1644,12 +1857,12 @@ def _pending_links(st: dict) -> list[tuple[dict, str]]:
     return out
 
 
-def _revive(con, st: dict) -> list[dict]:
+def _revive(run_dir: Path, con, st: dict) -> list[dict]:
     """Each flagged removal whose partner the next round selects comes back as a new linked version,
     its code already in place (same lever names) and its verdict schedule fresh; the scheduler
     places it in its partner's round."""
-    # ponytail: revived without its own registration review; #31's review gate covers a revived
-    # version like a newcomer (it is logged before the round's refusals run)
+    # the revived version registers at once; round-run then refuses until the registration reviewer
+    # has reviewed it (_review_missing)
     selected = {h["id"] for h in _selected(st) if h["status"] == "registered"}
     revived: list[dict] = []
     for old, partner in _pending_links(st):
@@ -1661,6 +1874,10 @@ def _revive(con, st: dict) -> list[dict]:
                    "round": _upcoming(st)}
         elog.append(con, "hypothesis_revived", "harness", payload)
         revived.append(payload)
+        new = elog.load(con)["hypotheses"][payload["id"]]
+        if out := _outside(run_dir, st, new):  # registered at once, so checked like a registration
+            elog.append(con, "hypothesis_pruned", "harness",
+                        {"id": new["id"], "directive": out[0]["id"], "by": "revival", "reason": out[1]})
     return revived
 
 
@@ -1801,8 +2018,9 @@ def cmd_trials(a) -> dict:
 def _regenerate(run_dir: Path, con) -> None:
     """Rewrite every generated file from the events."""
     trials = elog.load(con)["trials"]
-    groups = {"L:": "levers", "c:": "constraints", "t:": "telemetry"}
-    extra = sorted({p + k for t in trials for p, g in groups.items() for k in t.get(g, {})})
+    groups = {"L:": "levers", "c:": "constraints", "t:": "telemetry", "compat:": "compat"}
+    cols = sorted({(p + k, g, k) for t in trials for p, g in groups.items() for k in t.get(g, {})})
+    extra = [c for c, _, _ in cols]
     meta = ["trial", "kind", "status", "objective", "seed", "fidelity", "commit", "wall_clock_s",
             "peak_mem_mb", "exit_code", "artifact_dir"]
     buf = io.StringIO()
@@ -1811,7 +2029,7 @@ def _regenerate(run_dir: Path, con) -> None:
     for t in trials:
         row = [json.dumps(t["fidelity"], sort_keys=True) if k == "fidelity" else t.get(k, "")
                for k in meta]
-        w.writerow(row + [t.get(groups[c[:2]], {}).get(c[2:], "") for c in extra])
+        w.writerow(row + [t.get(g, {}).get(k, "") for _, g, k in cols])
     (run_dir / "exports").mkdir(exist_ok=True)
     (run_dir / "exports" / "trials.csv").write_text(buf.getvalue())
 
@@ -1841,7 +2059,9 @@ def _parser() -> argparse.ArgumentParser:
         pk = action(name, fn)
         pk.add_argument("hypothesis")
         pk.add_argument("--reason", required=True)
-    action("checkpoint", cmd_checkpoint).add_argument("--resume", action="store_true")
+    cp = action("checkpoint", cmd_checkpoint)
+    cp.add_argument("--resume", action="store_true")
+    cp.add_argument("--revise")  # a YAML revision of the registry: brief, directives, protected_paths
     pr = action("prioritize", cmd_prioritize)
     pr.add_argument("hypothesis")
     pr.add_argument("priority", type=int)

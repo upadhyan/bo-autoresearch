@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from conftest import bo, events, expect_all, ready, round_run, write_run_yaml
+from conftest import bo, events, expect_all, ready, round_run, write_run_yaml, register
 from test_rounds import BASE, coded, init, make_repo, of_type, toy_env
 from test_verdicts import code_hypothesis, lever, spec
 
@@ -17,7 +17,7 @@ def propose(repo, d, n, levers, **extra):
     f.write_text(json.dumps(spec({k: lever() for k in levers}, **extra)))
     code, out = bo(repo, "propose", "--file", str(f), "--rationale", "idea")
     assert code == 0, out
-    assert bo(repo, "register", f"H{n}", "--rationale", "reviewed")[0] == 0
+    assert register(repo, f"H{n}")[0] == 0
 
 
 def schedule(repo):

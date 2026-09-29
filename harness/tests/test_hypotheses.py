@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import bo, events, git, round_run, write_run_yaml
+from conftest import bo, events, git, round_run, write_run_yaml, register
 
 TOY = Path(__file__).parent / "toy_lever"
 BEFORE = 3.0 * (1 + 1 / 4)  # the toy's planted loss at the reference fidelity, before any lever
@@ -132,7 +132,7 @@ def registered(cwd, tmp_path, spec=SPEC):
     code, out = propose(cwd, spec, tmp_path)
     assert code == 0, out
     hid = out["hypothesis"]["id"]
-    code, out = bo(cwd, "register", hid, "--rationale", "reviewed")
+    code, out = register(cwd, hid)
     assert code == 0, out
     return hid
 
@@ -140,7 +140,7 @@ def registered(cwd, tmp_path, spec=SPEC):
 def test_register_freezes_the_spec_once(lever_repo, lever_run, tmp_path):
     run_dir = lever_run()
     propose(lever_repo, SPEC, tmp_path)
-    code, out = bo(lever_repo, "register", "H1", "--rationale", "reviewed")
+    code, out = register(lever_repo, "H1")
     assert code == 0, out
     assert out["hypothesis"]["status"] == "registered"
     code, out = bo(lever_repo, "register", "H1.v1", "--rationale", "again")

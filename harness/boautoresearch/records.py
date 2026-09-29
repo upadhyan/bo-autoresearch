@@ -5,7 +5,7 @@ Pure functions; the CLI turns their ValueError into a refusal.
 import re
 from decimal import Decimal
 
-from . import hypotheses
+from . import directives, hypotheses
 
 # a decimal in prose; a leading '-' is its sign only after a non-word character ("0.1-0.5" is a range)
 # ponytail: version-like text ("Python 3.11") reads as a decimal too; exempt it if analysts trip on it
@@ -80,7 +80,29 @@ def _review(r: dict, st: dict) -> list[str]:
     _text(r, "rationale", "")
     if not isinstance(r.get("strict"), bool):
         raise ValueError("strict must be true or false: whether this is a strict re-review")
+    registry = {d["id"]: d for d in st["registry"]["directives"]}
+    if r.get("directive") is not None:
+        d = registry.get(r["directive"])
+        if d is None:
+            raise ValueError(f"directive: no directive {r['directive']!r} in the registry")
+        need = {"prune": "prohibited", "deprioritize": "discouraged"}.get(r["directive_verdict"])
+        if need and d["severity"] != need:
+            raise ValueError(f"directive: a {r['directive_verdict']} verdict names a {need} directive, "
+                             f"and {d['id']} is {d['severity']}")
+    if (hits := similar_to(hyps[h], st)) and not r["strict"]:
+        raise ValueError(f"strict: {h}'s mechanism is similar to {', '.join(hits)}: laundering is "
+                         "caught by mechanism, so this needs a strict re-review (strict: true)")
     return []
+
+
+def similar_to(h: dict, st: dict) -> list[str]:
+    """Prohibited directives and pruned hypotheses (other numbers) whose statement or mechanism is
+    close to H's mechanism."""
+    mech = h["spec"]["mechanism"]
+    return ([f"prohibited directive {d['id']}" for d in st["registry"]["directives"]
+             if d["severity"] == "prohibited" and directives.similar(mech, d["statement"])]
+            + [f"pruned {x['id']}" for x in st["hypotheses"].values() if x["status"] == "pruned"
+               and x["number"] != h["number"] and directives.similar(mech, x["spec"]["mechanism"])])
 
 
 def _interplay(r: dict, st: dict) -> list[str]:

@@ -7,7 +7,7 @@ import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 
-from conftest import bo, expect_all, git, round_run
+from conftest import bo, expect_all, git, round_run, register
 from test_rounds import BASE, BOWL, coded, init, make_repo, of_type, toy_env
 from test_verdicts import lever as vlever, spec as vspec, verdict_run
 
@@ -61,7 +61,7 @@ def removal_run(d, python, seed, line):
     f = d / "h2.json"
     f.write_text(json.dumps(vspec({"y": vlever()})))
     assert bo(repo, "propose", "--file", str(f), "--rationale", "next idea")[0] == 0
-    assert bo(repo, "register", "H2", "--rationale", "reviewed")[0] == 0
+    assert register(repo, "H2")[0] == 0
     return run_dir
 
 
@@ -251,7 +251,7 @@ def test_a_merge_keeps_the_trials_its_mapping_expresses(tmp_path, project_python
     code, out = bo(repo, "propose", "--file", str(f), "--rationale", "one norm lever")
     assert code == 0, out
     assert out["hypothesis"]["spec"]["merges"]["mapping"] == {"H2.norm": merged["merges"]["mapping"]["norm"]}
-    assert bo(repo, "register", "H2", "--rationale", "reviewed")[0] == 0
+    assert register(repo, "H2")[0] == 0
 
     trials = finished(run_dir)
     ran = {n: t["levers"].get("H1.mode") for n, t in trials.items()}

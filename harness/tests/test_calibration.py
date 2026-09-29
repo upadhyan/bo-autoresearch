@@ -7,7 +7,7 @@ import statistics
 
 import pytest
 
-from conftest import SPARE, bo, events, round_run, write_run_yaml
+from conftest import SPARE, bo, events, round_run, write_run_yaml, register
 
 SHIFT = {  # a hypothesis shifting the toy's scale: its box is what the ladder is calibrated over
     "title": "Shift the scale", "rationale": "r", "mechanism": "m", "provenance": "novel",
@@ -38,7 +38,7 @@ def calibrate(repo, run_dir, env=None):
     f = run_dir / "shift.json"
     f.write_text(json.dumps(SHIFT))
     assert bo(repo, "propose", "--file", str(f), "--rationale", "idea")[0] == 0
-    assert bo(repo, "register", "H2", "--rationale", "reviewed")[0] == 0
+    assert register(repo, "H2")[0] == 0
     train = run_dir / "worktree" / "train.py"
     anchor = '    scale, cheap = lever("H1.scale"), epochs < _env("CHEAP_BELOW")\n'
     train.write_text(train.read_text().replace(anchor, anchor + '    scale += lever("H2.shift")\n'))

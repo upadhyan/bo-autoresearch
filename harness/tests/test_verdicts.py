@@ -6,7 +6,7 @@ effect on the loss is the planted truth. δ = 0.1 and the toy's noise σ = 0.05 
 import json
 from concurrent.futures import ThreadPoolExecutor
 
-from conftest import bo, ready, round_run
+from conftest import bo, ready, round_run, register
 from test_rounds import BASE, init, make_repo, of_type, started_in, toy_env
 
 DELTA, SIGMA = 0.1, 0.05
@@ -28,7 +28,7 @@ def code_hypothesis(repo, run_dir, d, n, s, line, env):
     f = d / f"spec{n}.json"
     f.write_text(json.dumps(s))
     assert bo(repo, "propose", "--file", str(f), "--rationale", "idea")[0] == 0
-    assert bo(repo, "register", f"H{n}", "--rationale", "reviewed")[0] == 0
+    assert register(repo, f"H{n}")[0] == 0
     train = run_dir / "worktree" / "train.py"
     src = train.read_text().replace("import fidelity, seed", "import fidelity, lever, seed")
     train.write_text(src.replace("    term = 0.0\n", f"    term = 0.0\n{line}\n"))

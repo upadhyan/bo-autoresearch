@@ -4,6 +4,8 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import directives as dirs
+
 SCHEMA_VERSION = 1
 EVENT_TYPES = {"run_started", "trial_started", "trial_finished", "trial_failed", "trial_refused",
                "round_started", "round_ended", "noise_estimate", "fidelity_calibration",
@@ -14,7 +16,8 @@ EVENT_TYPES = {"run_started", "trial_started", "trial_finished", "trial_failed",
                "commit_change", "dependency_added", "equivalence_check", "epoch_started", "narrowed",
                "hypothesis_prioritized", "hypothesis_parked", "hypothesis_unparked", "trial_enqueued",
                "agent_trial_skipped", "checkpoint", "user_pause", "user_resume", "removal",
-               "hypothesis_revived", "generation_pass"}
+               "hypothesis_revived", "generation_pass", "registry_revised", "hypothesis_pruned",
+               "hypothesis_unpruned", "prohibited_check_refused"}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -79,10 +82,20 @@ def state(events: list[dict]) -> dict:
     passes: list[dict] = []  # generation passes; a proposal belongs to the latest one
     noise = calib = proxy = delta = ended = escalated = paused = None
     epoch = {"epoch": 0, "round": 0}  # the first round whose trials the epoch's evidence counts
+    commits: list[dict] = []  # the harness-made commits of the worktree
+    registry: dict = {"version": 0, "brief": None, "directives": [], "protected_paths": [], "seq": 0}
+    manifest = None  # the protected paths' hashes, as the harness last wrote them
     for e in events:
         p = {k: v for k, v in e["payload"].items() if k != "rationale"}
         if e["type"] == "run_started":
             run, delta = p, p.get("delta")
+        elif e["type"] == "registry_revised":
+            registry = {**p, "seq": e["seq"]}
+            manifest = p["manifest"]
+        elif e["type"] == "hypothesis_pruned":  # never tested
+            hyps[p["id"]].update(status="pruned", pruned_by=p["directive"])
+        elif e["type"] == "hypothesis_unpruned":  # its directive was relaxed: back to its review
+            hyps[p["id"]]["status"] = "proposed"
         elif e["type"] == "trial_started":
             trials[p["trial"]] = {**p, "status": "running"}
         elif e["type"] == "trial_heartbeat":
@@ -150,6 +163,10 @@ def state(events: list[dict]) -> dict:
             hyps[p["id"]]["smoke"] = p
         elif e["type"] == "lever_committed":
             hyps[p["id"]]["commit"] = p["commit"]
+            manifest = p.get("manifest", manifest)  # the harness rewrote levers.json
+            commits.append(p)
+        elif e["type"] in ("commit_change", "dependency_added"):
+            commits.append(p)
         elif e["type"] == "verdict":  # a retain holds only until a check says otherwise
             h = hyps[p["hypothesis"]]
             h["verdicts"].append(p)
@@ -186,8 +203,24 @@ def state(events: list[dict]) -> dict:
     else:
         fidelity = {"fidelity": run.get("reference_fidelity"), "proxy": "reference"}
     fidelity = escalated or fidelity  # a stuck hypothesis moved the run up a rung
-    return {"run": run, "trials": [trials[n] for n in sorted(trials)], "rounds": rounds,
+    ordered = [trials[n] for n in sorted(trials)]
+    if any(d["severity"] == "discouraged" for d in registry["directives"]):
+        # derived from the current registry, so a revision recomputes them
+        paths = lever_paths(hyps)
+        declared: dict[str, dict] = {}  # directive id -> {lever: baseline} of the hypotheses declaring it
+        for h in hyps.values():
+            for i in h["spec"]["directives"]:
+                declared.setdefault(i, {}).update({n: lv["baseline"] for n, lv in h["spec"]["levers"].items()})
+        for t in ordered:
+            t["compat"] = dirs.compat(registry["directives"], t["levers"], paths, declared)
+    return {"run": run, "trials": ordered, "rounds": rounds,
             "noise": noise, "calibration": calib, "hypotheses": hyps, "r0_complete": r0_complete,
             "fidelity": fidelity, "delta": delta, "run_ended": ended, "epoch": epoch,
             "records": records, "paused": paused, "queue": queue, "removals": removals,
-            "passes": passes}
+            "passes": passes, "registry": registry, "manifest": manifest,
+            "commits": commits}
+
+
+def lever_paths(hyps: dict) -> dict:
+    """The config path each declared lever controls (a predicate may name either)."""
+    return {n: lv["path"] for h in hyps.values() for n, lv in h["spec"]["levers"].items() if "path" in lv}

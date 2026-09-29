@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import bo, events, expect_all, git, ready, round_run, write_run_yaml
+from conftest import bo, events, expect_all, git, ready, round_run, write_run_yaml, register
 
 TOY = Path(__file__).parent / "toy_bo"
 OPT = {"H1.x": 0.7, "H1.y": 0.3}  # the planted optimum
@@ -78,7 +78,7 @@ def coded(repo, run_dir, tmp_path, code=BOWL, env=None, spec=SPEC):
     f = tmp_path / "spec.json"
     f.write_text(json.dumps(spec))
     assert bo(repo, "propose", "--file", str(f), "--rationale", "idea")[0] == 0
-    assert bo(repo, "register", "H1", "--rationale", "reviewed")[0] == 0
+    assert register(repo, "H1")[0] == 0
     train = run_dir / "worktree" / "train.py"
     src = train.read_text().replace("import fidelity, seed", "import fidelity, lever, seed")
     train.write_text(src.replace("    term = 0.0\n", code))
@@ -450,7 +450,7 @@ def test_round_run_is_refused_until_the_selected_hypotheses_have_committed_code(
     f = tmp_path / "spec.json"
     f.write_text(json.dumps(SPEC))
     assert bo(bo_repo, "propose", "--file", str(f), "--rationale", "idea")[0] == 0
-    assert bo(bo_repo, "register", "H1", "--rationale", "reviewed")[0] == 0
+    assert register(bo_repo, "H1")[0] == 0
     before = events(run_dir)
     code, out = bo(bo_repo, "round-run", "--rationale", "too early")
     assert code != 0 and "H1.v1" in out["reason"] and "commit-lever" in out["reason"]

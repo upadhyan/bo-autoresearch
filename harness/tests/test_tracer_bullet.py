@@ -23,8 +23,12 @@ def test_init_creates_worktree_venv_and_run_folder_and_logs_run_started(repo, ru
     venv_python = run_dir / "venv" / "bin" / "python"
     subprocess.run([venv_python, "-c", "import boautoresearch"], check=True)
 
-    [started] = events(run_dir)
+    [started, registry] = events(run_dir)
     assert started["type"] == "run_started"
+    # the directive registry (empty here) and the protected paths' hashes, written by the harness
+    assert registry["type"] == "registry_revised" and registry["actor"] == "harness"
+    assert registry["payload"]["version"] == 1 and registry["payload"]["directives"] == []
+    assert sorted(registry["payload"]["manifest"]) == ["levers.json", "runner.py"]
     assert started["actor"] == "orchestrator"
     p = started["payload"]
     assert p["rationale"] == "start the toy run"
@@ -60,7 +64,7 @@ def test_events_are_append_only(run_dir):
     with pytest.raises(sqlite3.DatabaseError):
         con.execute("DELETE FROM events")
     con.close()
-    assert len(events(run_dir)) == 1
+    assert len(events(run_dir)) == 2
 
 
 def test_status_is_rebuilt_from_events_alone(repo, run_dir, tmp_path):
@@ -82,10 +86,11 @@ def test_baseline_trial_runs_as_a_subprocess_in_the_run_venv(repo, run_dir):
 
     evs = events(run_dir)
     # the heartbeat at spawn records the runner's pid, for recovery to kill if the harness dies
-    assert [e["type"] for e in evs] == ["run_started", "trial_started", "trial_heartbeat", "trial_finished"]
-    started, finished = evs[1]["payload"], evs[3]["payload"]
-    assert evs[1]["actor"] == "orchestrator" and started["rationale"] == "check the runner"
-    assert evs[3]["actor"] == "harness"
+    assert [e["type"] for e in evs] == ["run_started", "registry_revised", "trial_started", "trial_heartbeat",
+                                        "trial_finished"]
+    started, finished = evs[2]["payload"], evs[4]["payload"]
+    assert evs[2]["actor"] == "orchestrator" and started["rationale"] == "check the runner"
+    assert evs[4]["actor"] == "harness"
     assert started["levers"] == {"H1.scale": 2.0}  # the committed baselines
     assert started["fidelity"] == {"epochs": 4}
     assert started["commit"] == git(run_dir / "worktree", "rev-parse", "HEAD")
@@ -133,10 +138,10 @@ def test_actions_require_a_rationale_and_log_their_actor(repo, run_dir):
         assert code != 0 and out["refused"] and "rationale" in out["reason"]
     code, out = bo(repo, "smoke", "--rationale", "why", "--actor", "harness")
     assert code != 0 and out["refused"] and "reserved" in out["reason"]
-    assert len(events(run_dir)) == 1
+    assert len(events(run_dir)) == 2
 
     assert bo(repo, "smoke", "--rationale", "why", "--actor", "user")[0] == 0
-    assert events(run_dir)[1]["actor"] == "user"
+    assert events(run_dir)[2]["actor"] == "user"
 
 
 def test_probes_are_not_logged(repo, run_dir):

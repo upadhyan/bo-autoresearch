@@ -30,10 +30,35 @@ def bo(cwd, *args, env=None):
         raise AssertionError(f"non-JSON output:\n{p.stdout}\n{p.stderr}")
 
 
+def review(cwd, ref, **verdict):
+    """A registration reviewer's `review` record for H (its latest version when ref is H<n>);
+    allow / fits / no conflict unless `verdict` says otherwise."""
+    hid = ref if ".v" in ref else max((h["id"] for h in bo(cwd, "status")[1]["hypotheses"]
+                                       if h["id"].split(".")[0] == ref), key=lambda i: int(i.split(".v")[1]))
+    body = {"hypothesis": hid, "directive_verdict": "allow", "intent": "fits", "conflict": "none",
+            "conflict_with": [], "rationale": "nothing in the registry or the brief speaks against it",
+            "strict": False, **verdict}
+    f = Path(cwd).parent / f"review-{len(list(Path(cwd).parent.glob('review-*')))}.json"
+    f.write_text(json.dumps(body))
+    return bo(cwd, "record", "review", "--file", str(f), "--agent-id", "rr", "--actor",
+              "registration-reviewer", "--rationale", "the registration review")
+
+
+def register(cwd, ref, rationale="reviewed", **verdict):
+    """`register`, its review recorded first; -> (code, out)."""
+    code, out = review(cwd, ref, **verdict)
+    assert code == 0, out
+    return bo(cwd, "register", ref, "--rationale", rationale)
+
+
 def expect_all(cwd):
-    """Settle the routine duties before a round: an interplay review flagging nothing for each one
+    """Settle the routine duties before a round: an `allow` review of each hypothesis owed one, an
+    interplay review flagging nothing for each one
     owed, a generation pass when one is due, and an `undecided` expected verdict for each hypothesis
     the next round still lacks one for."""
+    for h in bo(cwd, "status")[1]["review_missing"]:
+        code, out = review(cwd, h)
+        assert code == 0, out
     status = bo(cwd, "status")[1]
     for m in status["interplay_missing"]:
         f = Path(cwd).parent / f"interplay-{len(list(Path(cwd).parent.glob('interplay-*')))}.json"
@@ -65,7 +90,7 @@ SPARE = {"title": "A spare proposal", "rationale": "Any valid spec will do.",
 def ready(out):
     """Nothing but routine duties (expected verdicts, interplay reviews, a generation pass) stands
     before round-run."""
-    return out["next"] == ["round-run"] or all(d.startswith(("record expected", "record interplay", "generate"))
+    return out["next"] == ["round-run"] or all(d.startswith(("record expected", "record interplay", "record review", "generate"))
                                                for d in out["next"])
 
 

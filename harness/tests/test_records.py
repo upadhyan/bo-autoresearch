@@ -15,7 +15,9 @@ from test_verdicts import lever, spec, verdict_run
 def run(tmp_path_factory, project_python):
     d = tmp_path_factory.mktemp("records")
     harmful = (spec({"x": lever()}), '    term += 2 * lever("H1.x")')
-    run_dir, _ = verdict_run(d / "r", project_python, 1, [harmful])
+    d1 = ("directives:\n- {id: D1, severity: discouraged, statement: slow schedules, reason: time,"
+          " scope: mechanism}\n")
+    run_dir, _ = verdict_run(d / "r", project_python, 1, [harmful], extra=d1)
     return run_dir
 
 
