@@ -265,6 +265,19 @@ def test_a_fidelity_sensitive_lever_is_never_rejected_at_a_proxy(tmp_path, proje
         assert at_ref and all(v["outcome"] in ("active", "retained") for v in at_ref)
 
 
+def test_a_hypothesis_escalated_up_a_rung_cant_be_parked_before_it_is_judged_there(tmp_path, project_python):
+    """The escalation ladder is the harness's: parking a hypothesis the harness just moved to a higher
+    rung would withdraw it before the test that can decide it (the dogfood run lost its late payoff so)."""
+    late = (spec({"x": lever()}, fidelity_sensitive=True, fidelity_reason="pays off late"),
+            '    term += 0 * lever("H1.x") if cheap else -lever("H1.x")')
+    run_dir, outs = verdict_run(tmp_path / "r", project_python, 1, [late], proxy=True, rounds=2)
+    assert [e["step"] for e in of_type(run_dir, "hypothesis_escalated")] == ["replicates", "rung"]
+    assert not [v for v in records(run_dir) if v["fidelity"] == {"epochs": 4}]
+    code, out = bo(run_dir.parents[1], "park", "H1.v1", "--reason", "flat at the proxy", "--rationale", "stuck")
+    assert code == 1 and out["refused"] is True and "escalated" in out["reason"], out
+    assert not of_type(run_dir, "hypothesis_parked")
+
+
 def test_a_broken_proxy_downgrades_its_rounds_rejects_to_inconclusive(tmp_path, project_python):
     # H1 is useless everywhere; H2's bowl ranks backwards at the proxy, so the drift check breaks it
     useless = (spec({"x": lever()}), '    term += 0 * lever("H1.x")')

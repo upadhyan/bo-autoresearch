@@ -913,6 +913,10 @@ def cmd_park(a) -> dict:
         raise Refused(f"{h['id']} is {h['status']}: only a hypothesis still in the loop can be parked")
     if not a.reason.strip():
         raise Refused("park needs a --reason")
+    rung = [e["fidelity"] for e in h["escalations"] if e["step"] == "rung"]
+    if rung and not any(v["fidelity"] == rung[-1] for v in h["verdicts"]):
+        raise Refused(f"{h['id']} was escalated to {json.dumps(rung[-1])} because it couldn't be decided below "
+                      "it: its next round tests it there, and only then may it be parked")
     elog.append(con, "hypothesis_parked", a.actor,
                 {"rationale": a.rationale, "id": h["id"], "reason": a.reason, "from": h["status"]})
     _removal(con, h["id"], "parked", a.reason)  # parking is a removal: it owes an interplay review
