@@ -784,3 +784,5 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   proxy broke 2 of 20 before, 1 of 20 after; an exactly reversed proxy was caught 19 of 20 before, 20 of 20 after, and 7
   → 20 of 20 with a useless co-active lever (test_a_broken_proxy_downgrades…, noise off). Tests that declare
   `deterministic: true` must turn the toy's noise off (σ̂ = 0 lets noise pass for a proxy order).
+- workers (user decision): sequential is the default (`workers: 1`) and the interview recommends it; parallel trials only
+  when the user asks. Trials sharing a machine skew runtime/throughput/memory objectives, so the interview warns about that.
