@@ -9,7 +9,8 @@ EVENT_TYPES = {"run_started", "trial_started", "trial_finished", "trial_failed",
                "round_started", "round_ended", "noise_estimate", "fidelity_calibration",
                "proxy_accepted_unvalidated", "hypothesis_proposed", "hypothesis_registered",
                "lever_smoke", "lever_committed", "delta_set", "hypothesis_activated",
-               "trial_heartbeat", "trial_abandoned", "drift_check", "run_ended"}
+               "trial_heartbeat", "trial_abandoned", "drift_check", "run_ended", "verdict",
+               "hypothesis_rejected", "hypothesis_inconclusive", "hypothesis_escalated", "lever_frozen"}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -63,7 +64,7 @@ def state(events: list[dict]) -> dict:
     trials: dict[int, dict] = {}
     rounds: dict[int, dict] = {}
     hyps: dict[str, dict] = {}
-    noise = calib = proxy = delta = ended = None
+    noise = calib = proxy = delta = ended = escalated = None
     for e in events:
         p = {k: v for k, v in e["payload"].items() if k != "rationale"}
         if e["type"] == "run_started":
@@ -95,13 +96,29 @@ def state(events: list[dict]) -> dict:
         elif e["type"] == "proxy_accepted_unvalidated":
             proxy = p
         elif e["type"] == "hypothesis_proposed":
-            hyps[p["id"]] = {**p, "status": "proposed", "smoke": None, "commit": None}
+            hyps[p["id"]] = {**p, "status": "proposed", "smoke": None, "commit": None,
+                             "verdicts": [], "frozen": [], "escalations": []}
         elif e["type"] == "hypothesis_registered":
             hyps[p["id"]]["status"] = "registered"
         elif e["type"] == "lever_smoke":
             hyps[p["id"]]["smoke"] = p
         elif e["type"] == "lever_committed":
             hyps[p["id"]]["commit"] = p["commit"]
+        elif e["type"] == "verdict":  # a retain holds only until a check says otherwise
+            h = hyps[p["hypothesis"]]
+            h["verdicts"].append(p)
+            if p["outcome"] == "retained" or h["status"] == "retained":
+                h["status"] = "retained" if p["outcome"] == "retained" else "active"
+        elif e["type"] == "hypothesis_rejected":
+            hyps[p["id"]].update(status="rejected", condition=p["condition"])
+        elif e["type"] == "hypothesis_inconclusive":
+            hyps[p["id"]].update(status="inconclusive", reason=p["reason"])
+        elif e["type"] == "lever_frozen":
+            hyps[p["id"]]["frozen"].append(p["lever"])
+        elif e["type"] == "hypothesis_escalated":
+            hyps[p["id"]]["escalations"].append(p)
+            if p["step"] == "rung":
+                escalated = {"fidelity": p["fidelity"], "proxy": p["proxy"]}
     r0_complete = rounds.get(0, {}).get("ended") == "calibrated"
     if proxy:
         fidelity = {"fidelity": proxy["fidelity"], "proxy": "unvalidated"}
@@ -110,6 +127,7 @@ def state(events: list[dict]) -> dict:
                     "proxy": "reference" if calib["chosen"] == run["reference_fidelity"] else "validated"}
     else:
         fidelity = {"fidelity": run.get("reference_fidelity"), "proxy": "reference"}
+    fidelity = escalated or fidelity  # a stuck hypothesis moved the run up a rung
     return {"run": run, "trials": [trials[n] for n in sorted(trials)], "rounds": rounds,
             "noise": noise, "calibration": calib, "hypotheses": hyps, "r0_complete": r0_complete,
             "fidelity": fidelity, "delta": delta, "run_ended": ended}

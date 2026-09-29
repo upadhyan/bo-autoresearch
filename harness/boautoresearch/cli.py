@@ -24,7 +24,7 @@ from pathlib import Path
 
 import yaml
 
-from . import calibration, hypotheses
+from . import calibration, hypotheses, verdict
 from . import study as bo_study
 from . import experiment_log as elog
 
@@ -33,6 +33,7 @@ RUN_KEYS = {"objective", "direction", "budget_s", "runner", "reference_fidelity"
             "ladder", "deterministic", "replicates_k", "delta", "seed"}
 CONFIRMATIONS = 2  # replicates of every new incumbent before it counts as the best
 ROUND_CAP = 0.25  # a round may spend this share of the budget remaining at its start
+REPLICATE_SHARE, ESCALATED_SHARE = 0.1, 0.3  # the replicate floor, raised for a stuck hypothesis
 
 
 class Refused(Exception):
@@ -485,8 +486,13 @@ def _run_r0(run_dir: Path, con, a, st: dict) -> dict:
     return {**out, **_status(elog.load(con))}
 
 
+def _group(h: dict) -> list[str]:
+    """The hypothesis's levers still in the search (frozen ones run at baseline)."""
+    return [n for n in h["spec"]["levers"] if n not in h["frozen"]]
+
+
 def _space(selected: list[dict]) -> dict:
-    return {n: lv for h in selected for n, lv in h["spec"]["levers"].items()}
+    return {n: h["spec"]["levers"][n] for h in selected for n in _group(h)}
 
 
 def _end_run(run_dir: Path, con, round_ended: dict, log_round: bool = True) -> dict:
@@ -529,11 +535,18 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
 
     inc, trigger, noise, drift = best(st["trials"]), None, None, None
     stall_after = max(5 * len(space), 20)
+    share = ESCALATED_SHARE if any(e["step"] == "replicates" for h in selected
+                                   for e in h["escalations"]) else REPLICATE_SHARE
     try:
         while trigger is None:
             st = elog.load(con)
             inc = best(st["trials"])
+            if _verdict_checks(con, st, r, space, baseline, eligible, sign):
+                trigger = "search_space"  # a confirmed reject, a freeze or an inconclusive
+                break
             pending, since = _progress(st, r, eligible, sign, confirmations)
+            holding = any((v := _latest(h, st)) is not None and v["outcome"] == "pending-reject"
+                          for h in _in_search(st))  # a pending reject holds the round open
             this = [t for t in st["trials"] if t.get("round") == r]
             spent = sum(t["wall_clock_s"] for t in this if t["status"] != "running")
             # the drift check's two reference trials come out of the cap too; the first trial always
@@ -541,14 +554,15 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
             reserve = 2 * _cost(st["trials"], ref) if fidelity != ref else 0.0
             if spent > 0 and spent + _cost(st["trials"], fidelity) + reserve > cap:
                 trigger = "cap"
-            elif since >= stall_after and not pending and _burned_in(st, selected, eligible):
+            elif (since >= stall_after and not pending and not holding
+                  and _burned_in(st, selected, eligible)):
                 trigger = "stall"
-            elif pending or (confirmations and 10 * sum("replicate_of" in t for t in this) < len(this)):
+            elif pending or (confirmations and sum("replicate_of" in t for t in this) < share * len(this)):
                 if pending:
                     root, kind = pending[0], "confirmation"
                 else:  # the replicate floor
-                    # ponytail: the least-replicated of the top 3 configs; #26's escalation picks by
-                    # posterior overlap instead
+                    # ponytail: the least-replicated of the top 3 configs (escalation raises only the
+                    # share); pick by posterior overlap if replicates are wasted on settled configs
                     top = bo_study.ranked(eligible(st["trials"]), sign)[:3]
                     root, kind = min(top, key=lambda c: c["replicates"])["trial"], "replicate"
                 levers = next(t["levers"] for t in st["trials"] if t["trial"] == root)
@@ -564,15 +578,179 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
         noise = _reestimate_noise(con, st, r, eligible, fidelity) if confirmations else None
         drift = _drift_check(run_dir, con, r, inc, eligible, sign) if fidelity != ref and inc else None
     except BudgetRefused:
-        return _end_run(run_dir, con, {"round": r, "trigger": "budget_spent", "incumbent": inc})
+        _finalise(con, r, None)
+        return {**_end_run(run_dir, con, {"round": r, "trigger": "budget_spent", "incumbent": inc}),
+                "verdicts": _round_verdicts(elog.load(con), r)}
     except BaseException:
         elog.append(con, "round_ended", "harness", {"round": r, "trigger": "failed", "incumbent": inc})
         _regenerate(run_dir, con)
         raise
+    _finalise(con, r, drift)
+    if trigger == "stall":
+        _escalate(con, elog.load(con), r)
     elog.append(con, "round_ended", "harness", {"round": r, "trigger": trigger, "incumbent": inc})
     _regenerate(run_dir, con)
+    st = elog.load(con)
     return {"round": r, "trigger": trigger, "incumbent": inc, "drift": drift, "noise_estimate": noise,
-            **_status(elog.load(con))}
+            "verdicts": _round_verdicts(st, r), **_status(st)}
+
+
+def _in_search(st: dict) -> list[dict]:
+    return [h for h in st["hypotheses"].values() if h["status"] in ("active", "retained")]
+
+
+def _latest(h: dict, st: dict) -> dict | None:
+    """The hypothesis's last verdict record on its current group at the run's fidelity."""
+    past = [v for v in h["verdicts"]
+            if v["fidelity"] == st["fidelity"]["fidelity"] and v["group"] == _group(h)]
+    return past[-1] if past else None
+
+
+def _round_verdicts(st: dict, r: int) -> list[dict]:
+    return [v for h in st["hypotheses"].values() for v in h["verdicts"] if v["round"] == r]
+
+
+def _fresh(st: dict, h: dict, eligible) -> list[int]:
+    """Fresh sampler trials: eligible sampler trials since the hypothesis entered the search."""
+    return [t["trial"] for t in eligible(st["trials"])
+            if t["kind"] == "sampler" and t["round"] >= h["activated_round"]]
+
+
+def _schedule(h: dict) -> dict:
+    d = len(_group(h))
+    return {"needed": max(10 * d, 20), "spacing": max(5 * d, 10), "cap": max(40 * d, 80)}
+
+
+def _verdict_checks(con, st: dict, r: int, space: dict, baseline: dict, eligible, sign: int) -> bool:
+    """Every verdict check now due: the first at burn-in, then every max(5·d, 10) fresh sampler
+    trials. Logs the verdict records; True when one changed the search space."""
+    run, delta, fid = st["run"], st["delta"], st["fidelity"]
+    at_proxy = fid["fidelity"] != run["reference_fidelity"]
+    sigma = next((x["sigma"] for x in st["noise"]["rungs"] if x["fidelity"] == fid["fidelity"]),
+                 st["noise"]["sigma"])
+    trials = eligible(st["trials"])
+    changed = False
+    for h in _in_search(st):
+        sched, group, last = _schedule(h), _group(h), _latest(h, st)
+        fresh = _fresh(st, h, eligible)
+        due = last["burn_in"]["fresh"] + sched["spacing"] if last else sched["needed"]
+        if len(fresh) < due:
+            continue
+        check = sum(v["round"] == r for v in h["verdicts"]) + 1
+        vid = f"V-R{r}-{h['id']}-{check}"
+        stats = verdict.judge(space, baseline, group, trials, sign, sigma, fresh,
+                              _rng(run, "verdict", vid).getrandbits(32))
+        gates = {"trials": {"sampler": len(fresh), "agent": sum(t["kind"] in ("agent", "seed")
+                                                                 for t in trials),
+                            "passed": len(fresh) >= sched["needed"]}, **stats.pop("gates")}
+        gated = all(g["passed"] for g in gates.values())
+        vt, dl = stats["sqrt_vt"], stats["delta_stat"]
+        condition = ("irrelevant" if vt["upper"] < delta else
+                     "no-improvement" if dl["upper"] < delta else None)
+        pending = last is not None and last["outcome"] == "pending-reject"
+        held, reason = None, None
+        if not gates["homogeneity"]["passed"]:  # v1 models constant noise only: never a reject
+            outcome, reason = "inconclusive", "noise differs by region"
+        elif gated and condition and h["spec"]["fidelity_sensitive"] and at_proxy:
+            outcome, held = "active", "fidelity-sensitive: never rejected at a proxy"
+        elif gated and condition:
+            outcome = "reject" if pending else "pending-reject"
+        elif gated and vt["lower"] > delta and dl["lower"] > delta:
+            outcome = "retained"
+        else:
+            outcome = "active"
+        if outcome == "active" and len(fresh) >= sched["cap"]:
+            outcome, reason = "inconclusive", f"no verdict after {len(fresh)} fresh sampler trials"
+        frozen = []
+        if gated and outcome in ("active", "retained") and len(group) > 1:
+            frozen = [n for n, b in stats["levers"].items() if b["upper"] < delta]
+            frozen = frozen if len(frozen) < len(group) else []  # the whole group: that's a reject
+        contradicted = [n for n in group if h["spec"]["levers"][n].get("predicted") and
+                        _against(h["spec"]["levers"][n], stats["best_point"][n])]
+        record = {
+            "id": vid, "hypothesis": h["id"], "round": r, "check": check, "group": group,
+            "outcome": outcome, "condition": condition, "held": held, "reason": reason,
+            **stats, "delta": delta, "gates": gates,
+            "burn_in": {"fresh": len(fresh), **sched, "passed": len(fresh) >= sched["needed"]},
+            "confirmation": {"pending": outcome == "pending-reject",
+                             "confirms": last["id"] if last and outcome == "reject" else None,
+                             "due_at": len(fresh) + sched["spacing"] if outcome == "pending-reject"
+                             else None},
+            "fidelity": fid["fidelity"], "proxy": fid["proxy"],
+            "prediction": {"flag": "retained-against-prediction"
+                           if outcome == "retained" and contradicted else None,
+                           "contradicted": contradicted},
+            "frozen": frozen, "trials": [t["trial"] for t in trials],
+            "context": {"retained": [x["id"] for x in _in_search(st)
+                                     if x["status"] == "retained" and x["id"] != h["id"]],
+                        "co_active": [x["id"] for x in _in_search(st) if x["id"] != h["id"]]},
+        }
+        elog.append(con, "verdict", "harness", record)
+        for n in frozen:
+            elog.append(con, "lever_frozen", "harness", {"id": h["id"], "lever": n, "verdict": vid})
+        if outcome == "inconclusive":
+            elog.append(con, "hypothesis_inconclusive", "harness",
+                        {"id": h["id"], "verdict": vid, "reason": reason})
+        changed |= bool(frozen) or outcome in ("reject", "inconclusive")
+    return changed
+
+
+def _against(lv: dict, best) -> bool:
+    """The best posterior point lies on the other side of the baseline from the prediction."""
+    return (best < lv["baseline"]) if lv["predicted"] == "higher" else (best > lv["baseline"])
+
+
+def _finalise(con, r: int, drift: dict | None) -> None:
+    """The round's confirmed rejects. At a proxy they stand only once the drift check passed; a
+    broken (or unchecked) proxy logs them as inconclusive instead."""
+    st = elog.load(con)
+    at_proxy = st["fidelity"]["fidelity"] != st["run"]["reference_fidelity"]
+    for h in _in_search(st):
+        v = h["verdicts"][-1] if h["verdicts"] else None
+        if not v or v["round"] != r or v["outcome"] != "reject":
+            continue
+        if at_proxy and not (drift and drift["broken"] is False):
+            elog.append(con, "hypothesis_inconclusive", "harness", {
+                "id": h["id"], "verdict": v["id"],
+                "reason": "broken proxy" if drift and drift["broken"] else "proxy unchecked"})
+        else:
+            elog.append(con, "hypothesis_rejected", "harness", {
+                "id": h["id"], "verdict": v["id"], "condition": v["condition"],
+                "frozen": v["group"] if v["condition"] == "no-improvement" else []})
+
+
+def _escalate(con, st: dict, r: int) -> None:
+    """After a stalled round, each undecided hypothesis escalates: a larger replicate share, then
+    the next fidelity rung up. The evidence cap (inconclusive) is applied at its verdict checks."""
+    # ponytail: moves up a rung without asking calibration whether the effect is resolvable at
+    # this one; add that test when rung choice gets per-hypothesis effect sizes
+    fid, ref = st["fidelity"]["fidelity"], st["run"]["reference_fidelity"]
+    for h in _in_search(st):
+        last = _latest(h, st)
+        if not last or last["outcome"] != "active":
+            continue
+        steps = [e["step"] for e in h["escalations"]]
+        if "replicates" not in steps:
+            elog.append(con, "hypothesis_escalated", "harness", {
+                "id": h["id"], "round": r, "step": "replicates", "replicate_share": ESCALATED_SHARE})
+        elif fid != ref:
+            up = _next_rung(st)
+            elog.append(con, "hypothesis_escalated", "harness", {
+                "id": h["id"], "round": r, "step": "rung", "fidelity": up,
+                "proxy": "reference" if up == ref else "validated"})
+            st = elog.load(con)
+            fid = up
+
+
+def _next_rung(st: dict) -> dict:
+    """The cheapest validated rung dearer than the current fidelity, else the reference."""
+    fid, ref = st["fidelity"]["fidelity"], st["run"]["reference_fidelity"]
+    rungs = (st["calibration"] or {}).get("rungs", [])
+    cost = {json.dumps(x["fidelity"], sort_keys=True): x["cost_s"] for x in st["noise"]["rungs"]}
+    here = cost.get(json.dumps(fid, sort_keys=True), 0.0)
+    up = [x["fidelity"] for x in rungs if x.get("passed") and x["fidelity"] != fid
+          and cost[json.dumps(x["fidelity"], sort_keys=True)] > here]
+    return min(up, key=lambda f: cost[json.dumps(f, sort_keys=True)]) if up else ref
 
 
 def _progress(st: dict, r: int, eligible, sign: int, confirmations: int) -> tuple[list[int], int]:
@@ -634,7 +812,7 @@ def _burned_in(st: dict, selected: list[dict], eligible) -> bool:
     ts = [t for t in eligible(st["trials"]) if t["kind"] == "sampler"]
     hyps = st["hypotheses"]
     return all(sum(t["round"] >= hyps[h["id"]]["activated_round"] for t in ts)
-               >= max(10 * len(h["spec"]["levers"]), 20) for h in selected)
+               >= _schedule(hyps[h["id"]])["needed"] for h in selected)
 
 
 def _drift_check(run_dir: Path, con, r: int, inc: dict, eligible, sign: int) -> dict | None:
@@ -795,7 +973,7 @@ def _selected(st: dict) -> list[dict]:
     """The hypotheses the next round searches: those in search plus the registered queue."""
     # ponytail: every registered hypothesis joins; #29's scheduler adds priority, the dimension cap
     # and exclusivity
-    return [h for h in st["hypotheses"].values() if h["status"] in ("registered", "active")]
+    return [h for h in st["hypotheses"].values() if h["status"] in ("registered", "active", "retained")]
 
 
 def _next(st: dict) -> list[str]:
@@ -856,6 +1034,22 @@ def cmd_status(a) -> dict:
     return _status(elog.load(con))
 
 
+def cmd_verdict(a) -> dict:
+    """A hypothesis's verdict records, latest last; `burn-in` until its first verdict check."""
+    run_dir, con = _open_run(recover=False)
+    st = elog.load(con)
+    h = _hypothesis(st, a.hypothesis)
+    out = {"hypothesis": h["id"], "status": h["status"], "records": h["verdicts"]}
+    if h["status"] in ("active", "retained"):
+        space, baseline, fidelity = _space(_selected(st)), _baseline(run_dir), st["fidelity"]["fidelity"]
+        fresh = _fresh(st, h, lambda ts: [t for t in ts
+                                          if bo_study.eligible(t, space, baseline, fidelity)])
+        last = _latest(h, st)
+        out["verdict"] = last["outcome"] if last else "burn-in"
+        out["burn_in"] = {"fresh": len(fresh), **_schedule(h)}
+    return out
+
+
 def cmd_trials(a) -> dict:
     _, con = _open_run(recover=False)
     return {"trials": elog.load(con)["trials"]}
@@ -900,6 +1094,9 @@ def _parser() -> argparse.ArgumentParser:
     action("set-delta", cmd_set_delta).add_argument("value", type=float)
     sub.add_parser("status").set_defaults(fn=cmd_status, action=False)
     sub.add_parser("trials").set_defaults(fn=cmd_trials, action=False)
+    v = sub.add_parser("verdict")
+    v.add_argument("hypothesis")
+    v.set_defaults(fn=cmd_verdict, action=False)
     return p
 
 

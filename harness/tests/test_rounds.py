@@ -259,7 +259,7 @@ def gone(pid, within=10.0):
 
 
 def test_a_killed_round_is_resumed_from_the_log(bo_repo, bo_run, tmp_path):
-    # δ out of reach: the stall comes 20 fresh sampler trials after the first confirmed incumbent
+    # δ out of reach: the bowl is `irrelevant` next to it, so R2 ends with its confirmed reject
     run_dir = bo_run(BASE + "delta: 10\nseed: 3\n")
     coded(bo_repo, run_dir, tmp_path, env=toy_env(sigma=0.01))
     n = len(of_type(run_dir, "trial_started"))
@@ -293,7 +293,7 @@ def test_a_killed_round_is_resumed_from_the_log(bo_repo, bo_run, tmp_path):
     assert abandoned["trial"] == stuck["trial"] and abandoned["wall_clock_s"] == beats[-1] >= 1
     assert all(b <= 2 * a + 0.5 for a, b in zip(beats, beats[1:]))  # a kill is charged ≥ half its time
     assert [(e["round"], e["trigger"]) for e in of_type(run_dir, "round_ended")][1:3] == [
-        (1, "interrupted"), (2, "stall")]
+        (1, "interrupted"), (2, "search_space")]
     [r2] = [s for s in of_type(run_dir, "round_started") if s["round"] == 2]
     assert sorted(r2["seeded"]) == sorted(expected) and len(expected) >= 7
     assert stuck["trial"] not in [t["trial"] for t in started_in(run_dir, 2)]  # never retried
@@ -302,9 +302,12 @@ def test_a_killed_round_is_resumed_from_the_log(bo_repo, bo_run, tmp_path):
     assert r2_trials[0]["kind"] == "confirmation" and r2_trials[0]["replicate_of"] == root
     both = started_in(run_dir, 1) + r2_trials
     assert sum(t.get("replicate_of") == root and t["kind"] == "confirmation" for t in both) == 2
-    # the stall counts fresh sampler trials across the interrupted round: R2 needs fewer than 20
+    # burn-in counts fresh sampler trials across the interrupted round: R2 needs fewer than 20
     samplers = [t for t in both if t["kind"] == "sampler" and t["status"] == "finished"]
-    assert 0 < sum(t["round"] == 1 for t in samplers) and sum(t["round"] == 2 for t in samplers) < 20
+    first = of_type(run_dir, "verdict")[0]
+    r1 = sum(t["round"] == 1 for t in samplers)
+    assert first["round"] == 2 and first["burn_in"]["fresh"] == 20 and 0 < r1
+    assert sum(t["round"] == 2 and t["trial"] in first["trials"] for t in samplers) == 20 - r1
     _, status = bo(bo_repo, "status")
     assert status["trials"]["abandoned"] == 1
     r2_spent = sum(t["wall_clock_s"] for t in r2_trials)
