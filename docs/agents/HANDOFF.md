@@ -1,8 +1,107 @@
 # Handoff: BO Autoresearch after the v1 follow-ups (2026-09-29)
 
-Repo: `upadhyan/bo-autoresearch`. `main` is at the merge of PR #41. All finished work is on `main`; nothing is
-in flight. The next session's job is to **run the dogfood benchmark once with the real `claude` caller** to
-confirm the harness and skills work, then tie off the loose ends below.
+Repo: `upadhyan/bo-autoresearch`. All finished work is on `main`; nothing is in flight. The next session's job:
+**first fix the blocking bug below** (the scripted benchmark crashes on a fresh clone of `main`), then **run the
+dogfood benchmark once with the real `claude` caller** to confirm the harness and skills work, then tie off the
+loose ends.
+
+## BLOCKING BUG: the scripted dogfood benchmark crashes on `main`
+
+### Symptom
+A fresh clone of `main` (verified at fd77e81; nothing in the harness has changed since) running
+
+```bash
+uv venv -q --python 3.12 /tmp/dfenv && uv pip install -q --python /tmp/dfenv/bin/python pyyaml
+/tmp/dfenv/bin/python benchmarks/dogfood/run_benchmark.py --caller scripted --seeds 1 --sigmas 0.025 --no-free --jobs 1 --work /tmp/df
+```
+
+gets through setup, R0, the ladder calibration, R1 and R2 (about 115 trials, ~5 min), then `scripted.py` dies.
+From `/tmp/df/seed1-sigma0.025/caller.log`:
+
+```
+scripted.py:126 duties     -> self.interplay(st["interplay_missing"][0], st)
+scripted.py:94  interplay  -> self.record("interplay", {**m, "flags": flags}, "interplay-reviewer", ...)
+RuntimeError: record refused: interplay: flags[0].partner: H4.v1 is active, not rejected or inconclusive or parked
+```
+
+The matrix gate then FAILS, because the run never finished: not ended by exhaustion, distilled branch unverified,
+incumbent not within δ, and the interaction, fidelity-sensitive and discouraged-but-wins verdicts are missing.
+Everything else passed: every invariant, every adversarial action blocked, and the useful, useless,
+matters-but-hurts, prohibited and off-intent verdicts. (The optuna "greenlet unavailable" warning in the log is
+harmless.) This benchmark passed in v1 (PR #39), so this is a regression from the follow-ups in PR #40.
+
+### What the event log shows (seed 1, σ = 0.025)
+The hypotheses are H1 warm-up (retained), H2 label smoothing, H3 weight decay, **H4 "Clip the gradients"**,
+H5 mixed precision, H6 pretrained (pruned), H7 attention (parked), **H8 "Keep an EMA"**, **H9 "Distil"**
+(registered, untested), H10 cosine tail, and **H11 "Raise the learning rate"**. H11 is H4's planted partner; it
+arrives in generation pass 3 (`fixtures/pass3.yaml`, "arriving after it was tested alone").
+1. **R1:** H3, H4 and H8 each get pending-reject and then confirmed `reject`, all with condition **`no-improvement`**.
+   The drift check passed (`undecidable: false`).
+2. **R1's round end** (`cli._finalise_rejects`): only H3 is rejected. H4 and H8 get **`reject_deferred`**
+   (events 357 and 358), with no reason field. That is the "substitutes" rule: *one `no-improvement` reject per
+   round end, the smallest Δ upper bound first; the rest are re-judged next round*. A deferred reject then needs a
+   fresh pending check **and** a fresh confirmation (see the `ponytail:` "k substitutes take k rounds" in
+   `_finalise_rejects`).
+3. **R2:** H4 gets a fresh pending-reject (`V-R2-H4.v1-1`) but no confirmation before the round ends. H2 is rejected.
+4. **After R2:** pass 3 registers H11. The harness asks for a **newcomer interplay review** of H11
+   (`interplay_missing: [{"newcomer": "H11.v1"}]`).
+5. `scripted.py` `interplay()` (the newcomer branch, lines ~89–93) flags H4 as the partner whenever
+   `verdict H4` has **any** records. It never checks H4's status. H4 is still **active**, because its reject was
+   deferred, so the harness correctly refuses the flag (a flagged partner must be rejected, inconclusive or
+   parked) and the scripted caller raises.
+
+H8 (EMA) is in the same state. Its planted "interaction found by interplay review" story (EMA removed while its
+partner Distil is untested, then revived) can't happen either, because H8 was deferred rather than removed.
+
+### Root cause (strongly supported; confirm it)
+Two things interact:
+- **The calibrated-verdict amendment** (PR #40, "accept and amend": a δ-based signal floor on the verdict GP).
+  A flat lever next to a curved partner is now labelled `no-improvement` where it used to be `irrelevant`.
+- **The substitutes rule** in `_finalise_rejects` (older: it came with the M_u amendment, 244fd4e) exempts only
+  `irrelevant` rejects. Every `no-improvement` reject beyond the first is deferred and must be re-earned from scratch.
+
+So after the amendment, R1's three flat levers (H3, H4, H8) were all `no-improvement`, and two were deferred.
+Presumably in v1, H4 and H8 came out `irrelevant` (exempt) and were rejected in R1, which is what the benchmark's
+planted timeline assumes. The second bug is in `scripted.py`: it should never propose a flag the harness can't
+accept, so a timing change should fail a verdict criterion rather than crash the run.
+
+### What the fixing agent should do
+1. **Reproduce** with the command above (a scratch `--work` dir outside the repo; about 5 minutes). Confirm the
+   same crash and the `reject_deferred` events: `sqlite3 <work>/seed1-sigma0.025/project/.bo-research/*/log.db
+   "select seq,type,payload from events where type in ('reject_deferred','hypothesis_rejected','verdict')"`.
+2. **Confirm the cause** by checking that R1's labels changed with the signal floor. The commit that added it
+   is `cdaab6d` ("Floor the verdict GP's signal so low-SNR intervals hold the truth"). Run the same command in
+   `git worktree`s of `cdaab6d^` (just before it) and `cdaab6d`, plus `10cf86b` (the v1 merge) as a baseline.
+   Compare R1's H4/H8 conditions and whether `reject_deferred` appears: expected `irrelevant` with no deferral
+   before, `no-improvement` with deferrals after. If `cdaab6d^` also crashes, bisect the other follow-up merges
+   instead (`git log --first-parent --oneline 06d6027^2` lists them). The evidence-cap change (`49efbbf`) and
+   the two-stage checks (`bb8e8a2`) are the next suspects. Don't change code before the cause is confirmed; use
+   the `diagnosing-bugs` skill.
+3. **Fix `scripted.py` first, whatever else is decided.** Both interplay branches must flag only partners the
+   harness allows. Build flags from `status` (the partner's `status` in rejected / inconclusive / parked), not
+   from "has verdict records". With that alone the run should finish, but the two interaction cases may fail.
+4. **Then fix the timing. This is a spec-level choice, so ask the user before implementing.** Options, with a
+   recommendation:
+   - **(a) Recommended: carry the confirmation over.** A deferred `no-improvement` reject is re-judged at the next
+     verdict check, and if that check still says reject, it applies at that round end without a new
+     pending + confirmation pair. This is the upgrade path already written in the `ponytail:` note. It keeps the
+     point of the substitutes rule (once one substitute is frozen, the other is re-judged and can now show its
+     effect) while cutting the extra round per deferred lever.
+   - (b) Narrow the rule to levers that could actually be substitutes, e.g. defer only when the co-rejected
+     hypotheses' levers are correlated in the GP posterior or share a config path. It's more precise but more code,
+     and needs a definition the spec doesn't give.
+   - (c) Change the benchmark (move `Raise the learning rate` to a later pass, or accept a late revival). Not
+     recommended: it hides a real slowdown that users would hit too, since k flat levers now take about 2k rounds
+     to leave.
+5. **Tests:** a Seam 1 test (drive the CLI; assert only on JSON, refusals, events and generated files) that
+   reproduces "two flat, non-substitute levers confirmed in the same round next to a curved one" and asserts the
+   chosen rule. Mark any multi-seed rate test `@pytest.mark.slow`. Keep `test_two_substitute_levers_are_never_both_rejected_at_one_round_end`
+   passing: true substitutes must still never both go at one round end.
+6. **Acceptance:** the one-run command above passes every criterion, then the full scripted matrix
+   `run_benchmark.py --caller scripted --jobs 2` (6 runs) passes the matrix gate. A verdict wrong in 1 of 6 is
+   allowed; report the counts. Then update the Decision log and, if the rule changed, post an amendment to #21
+   (ask the user first).
+7. Only after that, go on to "What's left" below (the real `claude` benchmark).
 
 ## Read first (don't duplicate these)
 - **Spec:** [issue #21](https://github.com/upadhyan/bo-autoresearch/issues/21), the source of truth, plus its
@@ -38,7 +137,7 @@ confirm the harness and skills work, then tie off the loose ends below.
 - **CI:** `.github/workflows/dogfood.yml` runs on demand only. The `CLAUDE_CODE_OAUTH_TOKEN` repo secret is set.
   If that secret holds a token that was ever pasted into a chat, rotate it (`claude setup-token`, revoke the old one).
 
-## What's left, in order
+## What's left, in order (after the blocking bug above is fixed)
 1. **Run the benchmark once, real caller (#38).**
    `python benchmarks/dogfood/run_benchmark.py --caller claude --jobs 2` (3 seeds × σ ∈ {δ/4, δ/2} scripted, plus
    1 free run). Measured: ~36 min per scripted run, 1.5–2 h for the free run; ~3 h total at 2 at a time.
