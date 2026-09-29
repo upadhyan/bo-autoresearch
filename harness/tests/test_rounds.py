@@ -394,11 +394,11 @@ def test_a_proxy_that_ranks_backwards_is_flagged_broken_by_the_drift_check(tmp_p
         assert [t["levers"] for t in pair] == [trials[inc]["levers"], trials[other]["levers"]]
         assert drift["reference"] == pytest.approx([true_loss(t["levers"]) for t in pair])
         broken.append(drift["broken"])
-    # no noise (margin 0) and an exactly reversed proxy: every pair with distinct losses is flagged. Measured
-    # 19 of 20 over seeds 0..19; the miss (seed 1) drew as its other config the incumbent up to float
-    # rounding (y = 0.9999999999999999 vs 1.0), a pair no check can order. At 95%, fewer than 7 of 8 has
-    # probability ~6%
-    assert sum(b is True for b in broken) >= 7, broken
+    # no noise (margin: a float tolerance) and an exactly reversed proxy: every pair with distinct losses is
+    # flagged, and the other config is drawn only among those the proxy orders against the incumbent (before,
+    # seed 1 drew the incumbent up to float rounding, y = 0.9999999999999999 vs 1.0: 19 of 20). Measured 20
+    # of 20 over seeds 0..19
+    assert all(b is True for b in broken), broken
 
 
 def test_no_stall_before_every_hypothesis_is_burned_in(bo_repo, bo_run, tmp_path):
@@ -440,10 +440,12 @@ def drift_run(d, python, seed):
 def test_reference_noise_alone_does_not_flag_a_faithful_proxy_broken(tmp_path, project_python):
     runs = repeat_runs(tmp_path, project_python, drift_run, range(10))
     drifts = [out["drift"] for _, out in runs]
-    # the margin is 2 sd of a reference difference, but σ comes from R0's 3 replicates (df = 2): the false
-    # break rate is P(t₂ > 2) ≈ 9%, not the 2.3% of a known σ. Measured 2 of 20 over seeds 0..19; at 9%,
-    # more than 2 of 10 broken has probability ~5%
-    assert sum(d["broken"] is False for d in drifts) >= 8, drifts
+    # the margin is a one-sided t-test at α = 5% on σ̂ pooled at the reference (R0's smoke and 3 replicates,
+    # and the like: df 4–9), so a tie at the reference breaks the proxy at most 5% of the time (the old 2 sd
+    # on R0's df-2 σ̂: P(t₂ > 2) ≈ 9%, measured 2 of 20). Measured 1 of 20 over seeds 0..19; at 5%, more
+    # than 1 of 10 broken has probability ~9%
+    assert sum(d["broken"] is False for d in drifts) >= 9, drifts
+    assert all(d["df"] >= 4 and not d["undecidable"] for d in drifts), drifts
     # the reference's noise did reverse the pair in some runs: the margin is what kept them unbroken
     flipped = [(d["proxy"][0] - d["proxy"][1]) * (d["reference"][0] - d["reference"][1]) < 0
                for d in drifts]
