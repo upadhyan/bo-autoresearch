@@ -1125,9 +1125,7 @@ def _replicates(run_dir: Path, con, branch: str, wt: Path | None = None, attempt
     levers = w["config"] if branch == "research" else _baseline(run_dir, wt)
     runs = [_trial(run_dir, con, None, WRAPUP_KIND, levers, w["fidelity"], wt, wrapup_of=branch,
                    **({"attempt": attempt} if attempt else {})) for _ in range(r)]
-    ys = [t["objective"] for t in runs if t["status"] == "finished"]
-    return {"trials": [t["trial"] for t in runs], "commit": runs[0]["commit"],
-            "mean": statistics.fmean(ys) if len(ys) == len(runs) else None}
+    return {"trials": [t["trial"] for t in runs], "commit": runs[0]["commit"], "mean": _mean(runs)}
 
 
 def _confirmed(st: dict, research: dict) -> dict:
@@ -1477,18 +1475,23 @@ def _equivalence_check(run_dir: Path, con, sha: str, change: str) -> dict:
             # nothing logged at this config yet: nothing it could disagree with
             return {"trials": [t["trial"] for t in runs], "mean": mean, "tolerance": tol,
                     "passed": mean is not None and (before is None or abs(mean - before) <= tol)}
+        first = None
         try:
             first = second = look(2, 2 * sigma + ftol)
             if not first["passed"] and first["mean"] is not None and sigma:  # σ̂ = 0: one look
                 second = look(4, q * sigma * math.sqrt(1 / 6 + 1 / m) + ftol)
         except TrialRefused as e:  # the run can't go on anyway: no round fits either
             refused = str(e)
+            if first:  # the budget refused the second look: the first look's failure stands
+                rows.append({"config": name, "levers": levers, "logged_mean": before, "logged_n": m, **first,
+                             "stage1": None})
             break
         rows.append({"config": name, "levers": levers, "logged_mean": before, "logged_n": m, **second,
                      "stage1": first if second is not first else None})
+    failed = any(r["passed"] is False for r in rows)
     payload = {"commit": sha, "change": change, "fidelity": fidelity, "sigma": sigma, "df": df,
                "alpha": CHECK_ALPHA, "configs": rows,
-               "passed": None if refused else all(r["passed"] for r in rows), "refused": refused}
+               "passed": False if failed else None if refused else True, "refused": refused}
     elog.append(con, "equivalence_check", "harness", payload)
     return payload
 
@@ -2002,8 +2005,8 @@ def _finalise_rejects(con, r: int, drift: dict | None) -> None:
             elog.append(con, "reject_deferred", "harness", {"id": h["id"], "verdict": v["id"], "round": r})
             continue
         if at_proxy and drift and drift.get("undecidable"):
-            # ponytail: a proxy that never orders anything defers every round until the budget ends or a
-            # stall escalates; send it up a rung after one such deferral if that shows up in practice
+            # ponytail: a proxy fidelity that never orders anything defers every round until the budget ends
+            # or a stall escalates; send it up a rung after one such deferral if that shows up in practice
             elog.append(con, "reject_deferred", "harness", {"id": h["id"], "verdict": v["id"], "round": r,
                                                             "reason": "undecidable proxy fidelity"})
         elif at_proxy and not (drift and drift["broken"] is False):

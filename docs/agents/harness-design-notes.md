@@ -722,7 +722,7 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   advice, previous_sigma): the spec keeps those on the baseline σ and the per-round re-estimate as a flag only. σ̂ is taken
   before a check's own trials. Equivalence: first look 2 replicates within 2σ̂ (+ float tol); a config outside it gets 4 more
   and fails iff |mean₆ − logged| > t(1 − α/(2·#configs), df)·σ̂·√(1/6 + 1/m); σ̂ = 0 or a failed trial → no second look; epoch
-  iff a config fails. The incumbent's logged mean excludes the trial that selected it when it has replicates (winner's curse).
+  iff a config fails (a budget refusal keeps any config's already-failed look: passed False, not None). The incumbent's logged mean excludes the trial that selected it when it has replicates (winner's curse).
   Row: final `trials`/`mean`/`tolerance`/`passed` + `stage1` (the first look, only when a second ran); payload + `df`,
   `alpha`. Verification: same shape, 3 + 3 more distilled replicates, t(1 − α/2, df)·σ̂·√(1/6 + 1/3); `distilled`, `gap`,
   `tolerance`, `passed` are final, + `stage1`, `df`, `alpha` (σ = 0.0, not None, before R0). Drift: margin t(1 − α, df)·√2·σ̂

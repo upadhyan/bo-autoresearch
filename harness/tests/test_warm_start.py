@@ -150,6 +150,18 @@ def test_a_changed_objective_fails_the_equivalence_check_and_starts_a_new_epoch(
     assert set(eligible(repo)) == {t["trial"] for t in fresh}  # the earlier trials are telemetry
 
 
+def test_a_first_look_failure_stands_when_the_budget_refuses_the_second(tmp_path, project_python):
+    repo, run_dir = calibrated(tmp_path, project_python, "max_trials: 6\n")
+    assert len(of_type(run_dir, "trial_started")) == 4  # R0: the smoke and 3 baseline replicates
+    code, out = change(repo, run_dir, "loss = 1.0 +", "loss = 2.0 +")  # 20σ: the first look fails
+    assert code == 0, out
+    check = out["equivalence_check"]
+    [row] = check["configs"]
+    assert len(row["trials"]) == 2 and row["passed"] is False and row["stage1"] is None
+    assert check["refused"] and check["passed"] is False  # the ceiling refused the 4 more replicates
+    assert of_type(run_dir, "epoch_started")
+
+
 def no_op_check(d, python, seed):
     d.mkdir()
     repo = make_repo(d)
