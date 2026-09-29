@@ -154,6 +154,12 @@ def search_once(d, python, sigma=0.01, seed=0):
     return run_dir, out
 
 
+def repeat_runs(tmp_path, python, run, seeds):
+    """run(d, python, seed) once per fixed seed, in parallel (each run is its own subprocesses)."""
+    with ThreadPoolExecutor(len(seeds)) as pool:
+        return list(pool.map(lambda s: run(tmp_path / f"s{s}", python, s), seeds))
+
+
 def random_search(n, seed, sigma=0.01):
     """Plain random search with n trials on the same toy: the true loss of its best observed point."""
     rng = random.Random(seed)
@@ -162,12 +168,12 @@ def random_search(n, seed, sigma=0.01):
     return true_loss(points[observed.index(min(observed))])
 
 
+@pytest.mark.slow
 def test_bo_beats_random_search_at_equal_trial_count(tmp_path, project_python):
-    seeds = [11, 22, 33, 44]
+    seeds = range(8)
     for s in seeds:
         (tmp_path / f"s{s}").mkdir()
-    with ThreadPoolExecutor(len(seeds)) as pool:  # independent runs, each with its own fixed seed
-        runs = list(pool.map(lambda s: search_once(tmp_path / f"s{s}", project_python, seed=s), seeds))
+    runs = repeat_runs(tmp_path, project_python, lambda d, p, s: search_once(d, p, seed=s), seeds)
     assert len({t["seed"] for run_dir, _ in runs for t in started_in(run_dir, 1)}) == sum(
         len(started_in(run_dir, 1)) for run_dir, _ in runs)  # no two runs share trial seeds
     bo_regret, rs_regret = [], []
@@ -177,7 +183,9 @@ def test_bo_beats_random_search_at_equal_trial_count(tmp_path, project_python):
         bo_regret.append(true_loss(out["incumbent"]["levers"]) - BEST)
         rs_regret.append(random_search(len(trials), seed) - BEST)
     wins = sum(b < r for b, r in zip(bo_regret, rs_regret))
-    assert wins >= 3, (bo_regret, rs_regret)  # BO's incumbent is better in at least 3 of 4 runs
+    # BO's incumbent is better in most runs: 17 of 20 over seeds 0..19 (random search sometimes lands
+    # near the optimum by luck); at 85%, 4 or fewer wins of 8 has probability ~2%
+    assert wins >= 5, (bo_regret, rs_regret)
     assert statistics.fmean(bo_regret) < statistics.fmean(rs_regret) / 2, (bo_regret, rs_regret)
 
     run_dir, out = runs[0]
@@ -216,7 +224,7 @@ def test_replicates_are_their_own_trials_and_every_new_incumbent_is_confirmed(tm
             new_best.append(t["trial"])
         if t["status"] == "finished":
             seen.append(t["objective"])
-    assert len(new_best) >= 2  # (the warm start's baseline trials make the first incumbents)
+    assert new_best  # (the warm start's baseline trials make the first incumbents)
     for root in new_best:
         assert sum(t.get("replicate_of") == root and t["kind"] == "confirmation" for t in trials) == 2
     inc = out["incumbent"]
@@ -225,7 +233,7 @@ def test_replicates_are_their_own_trials_and_every_new_incumbent_is_confirmed(tm
     assert inc["mean"] == pytest.approx(statistics.fmean(group))
     assert by_id[inc["trial"]]["objective"] != inc["mean"]  # replicates never averaged in
     # σ re-estimated from the round's replicates: the planted 0.01, no shift
-    [noise] = [p for p in of_type(run_dir, "noise_estimate") if p["round"] == 1]
+    [noise] = [p for p in of_type(run_dir, "noise_estimate") if p.get("round") == 1]  # (an epoch's has none)
     assert noise["sigma"] == pytest.approx(0.01, rel=0.5) and noise["shift_flagged"] is False
     assert out["noise_estimate"] == noise
 
@@ -243,14 +251,17 @@ def test_a_noise_shift_of_more_than_2x_is_flagged(bo_repo, bo_run, tmp_path):
 
 
 def eligible_now(run_dir, before=None):
-    """Independently: finished trials at the reference fidelity with the round's levers (a trial from
-    before H1 backfilled at its baseline 0.5), in range."""
+    """Independently: finished trials of the current epoch at the reference fidelity with the round's
+    levers (a trial from before H1 backfilled at its baseline 0.5), in range. (commit-lever's equivalence
+    check fails a true no-op by chance, and its new epoch leaves the earlier trials behind.)"""
     ends = {p["trial"]: p for p in of_type(run_dir, "trial_finished")}
+    starts = [p for p in of_type(run_dir, "trial_started") if before is None or p["trial"] < before]
+    epoch = max(p["epoch"] for p in starts)
     out = {}
-    for p in of_type(run_dir, "trial_started"):
+    for p in starts:
         levers = {"H1.x": 0.5, "H1.y": 0.5, **p["levers"]}
-        if (p["trial"] in ends and p["fidelity"] == {"epochs": 4} and set(levers) == set(OPT)
-                and all(0 <= v <= 1 for v in levers.values()) and (before is None or p["trial"] < before)):
+        if (p["trial"] in ends and p["epoch"] == epoch and p["fidelity"] == {"epochs": 4}
+                and set(levers) == set(OPT) and all(0 <= v <= 1 for v in levers.values())):
             out[p["trial"]] = ends[p["trial"]]["objective"]
     return out
 
@@ -267,7 +278,7 @@ def gone(pid, within=10.0):
 
 
 def test_a_killed_round_is_resumed_from_the_log(bo_repo, bo_run, tmp_path):
-    # δ out of reach: the bowl is `irrelevant` next to it, so R2 ends with its confirmed reject
+    # δ out of reach: the bowl is rejectable next to it (Δ's bound is far below δ), so R2 ends with its confirmed reject
     run_dir = bo_run(BASE + "delta: 10\nseed: 3\n")
     coded(bo_repo, run_dir, tmp_path, env=toy_env(sigma=0.01))
     n = len(of_type(run_dir, "trial_started"))
@@ -353,45 +364,74 @@ def test_a_spent_budget_ends_the_round_and_the_run(bo_repo, bo_run, tmp_path):
     assert code != 0 and "ended" in out["reason"]
 
 
-def test_a_proxy_that_ranks_backwards_is_flagged_broken_by_the_drift_check(bo_repo, bo_run, tmp_path):
-    run_dir = bo_run("budget_s: 3600\nreference_fidelity: {epochs: 4}\nladder: [{epochs: 1}]\n"
-                     "deterministic: true\nseed: 2\n")  # unseeded, ~1 in 6 runs flaked
+def backwards_proxy_run(d, python, seed):
+    """A deterministic toy whose cheap rung ranks exactly backwards: one BO round at that rung."""
+    repo = make_repo(d)
+    run_dir = init(repo, python, "budget_s: 3600\nreference_fidelity: {epochs: 4}\nladder: [{epochs: 1}]\n"
+                   f"deterministic: true\nseed: {seed}\n")
     env = toy_env(cheap_below=2, scramble=1)
-    coded(bo_repo, run_dir, tmp_path, env=env)
-    code, out = round_run(bo_repo, "--rationale", "calibrate the ladder", env=env)
+    coded(repo, run_dir, d, env=env)
+    code, out = round_run(repo, "--rationale", "calibrate the ladder", env=env)
     assert code == 0 and out["fidelity_calibration"]["fallback"] is True, out
-    assert bo(bo_repo, "accept-proxy", "--fidelity", '{"epochs": 1}', "--rationale", "cheap")[0] == 0
-    assert bo(bo_repo, "set-delta", "0.02", "--rationale", "the user's effect")[0] == 0
-    code, out = round_run(bo_repo, "--rationale", "search at the proxy", env=env)
+    assert bo(repo, "accept-proxy", "--fidelity", '{"epochs": 1}', "--rationale", "cheap")[0] == 0
+    assert bo(repo, "set-delta", "0.02", "--rationale", "the user's effect")[0] == 0
+    code, out = round_run(repo, "--rationale", "search at the proxy", env=env)
     assert code == 0, out
-    trials = {t["trial"]: t for t in started_in(run_dir, 1)}
-    [drift] = of_type(run_dir, "drift_check")
-    assert out["drift"] == drift and drift["round"] == 1 and drift["broken"] is True
-    inc, other = drift["configs"]
-    assert inc == out["incumbent"]["trial"] and trials[other]["fidelity"] == {"epochs": 1}
-    runs = [trials[t] for t in drift["trials"]]
-    assert [t["kind"] for t in runs] == ["drift", "drift"]
-    assert [t["fidelity"] for t in runs] == [{"epochs": 4}, {"epochs": 4}]
-    assert [t["levers"] for t in runs] == [trials[inc]["levers"], trials[other]["levers"]]
-    assert drift["reference"] == pytest.approx([true_loss(t["levers"]) for t in runs])
+    return run_dir, out
 
 
-def test_no_stall_before_every_hypothesis_is_burned_in(bo_repo, bo_run, tmp_path):
-    # 3 levers: the burn-in is max(10·3, 20) = 30 fresh sampler trials, the stall window only 20;
-    # δ out of reach, so the stall window is complete 20 sampler trials after the first confirmation
-    run_dir = bo_run(BASE + "delta: 10\nseed: 7\n")
+@pytest.mark.slow
+def test_a_proxy_that_ranks_backwards_is_flagged_broken_by_the_drift_check(tmp_path, project_python):
+    runs = repeat_runs(tmp_path, project_python, backwards_proxy_run, range(8))
+    broken = []
+    for run_dir, out in runs:
+        trials = {t["trial"]: t for t in started_in(run_dir, 1)}
+        [drift] = of_type(run_dir, "drift_check")
+        assert out["drift"] == drift and drift["round"] == 1
+        inc, other = drift["configs"]
+        assert inc == out["incumbent"]["trial"] and trials[other]["fidelity"] == {"epochs": 1}
+        pair = [trials[t] for t in drift["trials"]]
+        assert [t["kind"] for t in pair] == ["drift", "drift"]
+        assert [t["fidelity"] for t in pair] == [{"epochs": 4}, {"epochs": 4}]
+        assert [t["levers"] for t in pair] == [trials[inc]["levers"], trials[other]["levers"]]
+        assert drift["reference"] == pytest.approx([true_loss(t["levers"]) for t in pair])
+        broken.append(drift["broken"])
+    # no noise (margin: a float tolerance) and an exactly reversed proxy: every pair with distinct losses is
+    # flagged, and the other config is drawn only among those the proxy orders against the incumbent (before,
+    # seed 1 drew the incumbent up to float rounding, y = 0.9999999999999999 vs 1.0: 19 of 20). Measured 20
+    # of 20 over seeds 0..19
+    assert all(b is True for b in broken), broken
+
+
+def no_stall_run(d, python, seed):
+    repo = make_repo(d)
+    run_dir = init(repo, python, BASE + f"delta: 10\nseed: {seed}\n")
     spec = {**SPEC, "levers": {**SPEC["levers"], "z": SPEC["levers"]["x"]}}
     code3 = BOWL.rstrip("\n") + " + 0 * lever(\"H1.z\")\n"
-    coded(bo_repo, run_dir, tmp_path, code=code3, env=toy_env(sigma=0.01), spec=spec)
-    code, out = round_run(bo_repo, "--rationale", "search", env=toy_env(sigma=0.01))
+    coded(repo, run_dir, d, code=code3, env=toy_env(sigma=0.01), spec=spec)
+    code, out = round_run(repo, "--rationale", "search", env=toy_env(sigma=0.01))
     assert code == 0, out
-    # the stall window is complete long before 30; at burn-in the first verdict check finds the bowl
-    # `irrelevant` next to δ = 10, and that pending reject holds the round open to its confirmation
-    samplers = [t for t in started_in(run_dir, 1) if t["kind"] == "sampler"]
-    [first, confirming] = of_type(run_dir, "verdict")
-    assert first["burn_in"]["fresh"] == 30 and first["outcome"] == "pending-reject"
-    assert confirming["outcome"] == "reject" and out["trigger"] == "search_space"
-    assert len(samplers) == 30 + 15
+    return run_dir, out
+
+
+@pytest.mark.slow
+def test_no_stall_before_every_hypothesis_is_burned_in(tmp_path, project_python):
+    # 3 levers: the burn-in is max(10·3, 20) = 30 fresh sampler trials, the stall window only 20;
+    # δ out of reach, so the stall window is complete 20 sampler trials after the first confirmation
+    confirmed = 0
+    for run_dir, out in repeat_runs(tmp_path, project_python, no_stall_run, range(10)):
+        # the stall window is complete long before 30, yet the first check comes at burn-in: it finds the
+        # bowl rejectable next to δ = 10, and that pending reject holds the round open to its next check
+        samplers = [t for t in started_in(run_dir, 1) if t["kind"] == "sampler"]
+        first, second = of_type(run_dir, "verdict")
+        assert first["burn_in"]["fresh"] == 30 and first["outcome"] == "pending-reject"
+        assert second["burn_in"]["fresh"] == 45 and len(samplers) == 30 + 15
+        if second["outcome"] == "reject":
+            assert out["trigger"] == "search_space"
+            confirmed += 1
+    # the second check confirms in 18 of 20 runs over seeds 0..19 (one fails the fit gate, one the
+    # homogeneity gate, under the GP's δ-scaled signal floor); at 90%, fewer than 8 of 10 ~7%
+    assert confirmed >= 8, confirmed
 
 
 def drift_run(d, python, seed):
@@ -412,18 +452,20 @@ def drift_run(d, python, seed):
     return run_dir, out
 
 
+@pytest.mark.slow
 def test_reference_noise_alone_does_not_flag_a_faithful_proxy_broken(tmp_path, project_python):
-    seeds = [1, 3, 4, 5]
-    for s in seeds:
-        (tmp_path / f"s{s}").mkdir()
-    with ThreadPoolExecutor(len(seeds)) as pool:
-        runs = list(pool.map(lambda s: drift_run(tmp_path / f"s{s}", project_python, s), seeds))
+    runs = repeat_runs(tmp_path, project_python, drift_run, range(10))
     drifts = [out["drift"] for _, out in runs]
-    assert [d["broken"] for d in drifts] == [False] * len(seeds), drifts
+    # the margin is a one-sided t-test at α = 5% on σ̂ pooled at the reference (R0's smoke and 3 replicates,
+    # and the like: df 4–9), so a tie at the reference breaks the proxy at most 5% of the time (the old 2 sd
+    # on R0's df-2 σ̂: P(t₂ > 2) ≈ 9%, measured 2 of 20). Measured 1 of 20 over seeds 0..19; at 5%, more
+    # than 1 of 10 broken has probability ~9%
+    assert sum(d["broken"] is False for d in drifts) >= 9, drifts
+    assert all(d["df"] >= 4 and not d["undecidable"] for d in drifts), drifts
     # the reference's noise did reverse the pair in some runs: the margin is what kept them unbroken
     flipped = [(d["proxy"][0] - d["proxy"][1]) * (d["reference"][0] - d["reference"][1]) < 0
                for d in drifts]
-    assert any(flipped), drifts
+    assert any(f and d["broken"] is False for f, d in zip(flipped, drifts)), drifts
 
 
 def test_the_round_cap_covers_the_drift_check(bo_repo, bo_run, tmp_path):

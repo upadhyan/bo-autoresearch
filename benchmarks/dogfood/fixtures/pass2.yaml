@@ -1,3 +1,4 @@
+# DOGFOOD-PLANTED-TRUTH (check.py flags a run whose agents read this file)
 # Scripted generation pass 2: the fidelity-sensitive case (H10). It arrives after the ladder was calibrated
 # on pass 1's levers, so the cheap rung is validated and the tail is first tested at a proxy fidelity.
 - title: End training on a long cosine tail

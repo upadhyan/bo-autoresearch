@@ -71,8 +71,9 @@ def planted(tmp_path_factory, project_python):
              "diagnostics": ["the replicates spread wider than in the calibration round"],
              "suggestions": ["a wider range for the bowl"], "generation": False}
     assert record(repo, "narrative", story, agent_id="ra", actor="round-analyst")[0] == 0
-    # the last round's suggested narrowing, as the orchestrator would take it up
-    suggested = [ln for ln in (run_dir / "rounds" / "003.md").read_text().splitlines() if "`narrow " in ln]
+    # R2's suggested narrowing, as the orchestrator would take it up (R2 re-judges the deferred H2 next
+    # to the bowl; R3 stalls before H1's next check, so it suggests nothing)
+    suggested = [ln for ln in (run_dir / "rounds" / "002.md").read_text().splitlines() if "`narrow " in ln]
     narrowed = [bo(repo, *shlex.split(ln.split("`")[1]), "--rationale", "suggested") for ln in suggested]
     return repo, run_dir, outs, narrowed
 
@@ -135,14 +136,16 @@ def test_summary_says_where_the_run_is_and_what_works_in_words_that_match_the_st
     assert bo(repo, "summary")[1] == {"summary": text}  # the probe: the file is up to date
     status = bo(repo, "status")[1]
     hyps = {h["id"]: h for h in status["hypotheses"]}
-    # the planted truth: H1 works, H2 doesn't matter, H3 matters but only hurts, H4 set aside
+    # the planted truth: H1 works, H2 doesn't matter, H3 matters but only hurts, H4 set aside. H2 is
+    # rejected `no-improvement`, not `irrelevant`: next to the bowl, BO leaves too much of H1.x's box
+    # unexplored to bound H2's range below δ (#21 amendment), so the summary can't say it doesn't matter
     assert {h: x["status"] for h, x in hyps.items()} == {
         "H1.v1": "retained", "H2.v1": "rejected", "H3.v1": "rejected", "H4.v1": "parked"}
     [h1] = s["Working"]
     last = [v for v in of_type(run_dir, "verdict") if v["hypothesis"] == "H1.v1"][-1]["delta_stat"]
     assert h1 == (f"- H1.v1 The bowl has a better bottom: Δ {last['estimate']:.3g} "
                   f"[{last['lower']:.3g}, {last['upper']:.3g}]")
-    assert s["Not working"] == ["- H2.v1 A lever that does nothing: doesn't matter",
+    assert s["Not working"] == ["- H2.v1 A lever that does nothing: doesn't help, and may matter",
                                 "- H3.v1 A lever that only hurts: doesn't help, and may matter"]
     assert s["Still testing"] == ["- none"]
     assert s["Set aside"] == ["- H4.v1 A lever set aside: parked: the user wants it later"]
@@ -187,7 +190,7 @@ def test_summary_sections_are_capped_at_10_lines_and_up_next_shows_the_first_3_b
     assert where[-1] == "- Run ended: the user stopped it"
 
 
-def test_hypotheses_csv_has_a_row_per_version_keeping_irrelevant_and_no_improvement_apart(planted):
+def test_hypotheses_csv_has_a_row_per_version_with_its_reject_condition(planted):
     repo, run_dir, *_ = planted
     table = rows(run_dir, "hypotheses.csv")
     assert list(table[0]) == ["id", "title", "lens", "provenance", "mechanism", "state", "reason",
@@ -196,7 +199,7 @@ def test_hypotheses_csv_has_a_row_per_version_keeping_irrelevant_and_no_improvem
     by = {r["id"]: r for r in table}
     assert list(by) == ["H1.v1", "H2.v1", "H3.v1", "H4.v1"]
     assert [(r["state"], r["reason"]) for r in table] == [
-        ("retained", ""), ("rejected", "irrelevant"), ("rejected", "no-improvement"),
+        ("retained", ""), ("rejected", "no-improvement"), ("rejected", "no-improvement"),
         ("parked", "the user wants it later")]
     assert by["H2.v1"]["title"] == "A lever that does nothing" and by["H2.v1"]["lens"] == "optimisation"
     assert by["H2.v1"]["provenance"] == "novel" and by["H2.v1"]["mechanism"] == spec({})["mechanism"]
@@ -206,11 +209,16 @@ def test_hypotheses_csv_has_a_row_per_version_keeping_irrelevant_and_no_improvem
         assert [float(r[k]) for k in ("m_u_lower", "m_u_upper", "delta_lower", "delta_upper")] == [
             last["m_u"]["lower"], last["m_u"]["upper"], last["delta_stat"]["lower"], last["delta_stat"]["upper"]]
         assert int(r["trials_used"]) == len(last["trials"])
-    assert float(by["H2.v1"]["m_u_upper"]) < 0.1 < float(by["H3.v1"]["m_u_upper"])
+    # H2 does nothing but its range isn't bounded below δ next to the bowl; H3's range is 2
+    assert float(by["H2.v1"]["delta_upper"]) < 0.1 <= float(by["H2.v1"]["m_u_upper"])
+    assert float(by["H3.v1"]["m_u_lower"]) > 0.1
     assert float(by["H3.v1"]["delta_upper"]) < 0.1 < float(by["H1.v1"]["delta_lower"])
     assert by["H4.v1"]["m_u_lower"] == by["H4.v1"]["trials_used"] == ""  # never tested
-    # expected retain / reject before R1 (right), then `undecided` for H1 in R2 and R3 and H3 in R1
-    assert [r["expected_right"] for r in table] == ["1/3", "1/1", "0/1", ""]
+    # expected retain / reject before R1, then `undecided` for the rest. H1: retained in R1 (right) and
+    # R2 (wrong), no check in R3 (right). H2's R1 reject is deferred behind H3's (two confirmed
+    # no-improvement rejects: the smaller UB(Δ) goes first), so R1 reads undecided (wrong), and its R2
+    # reject is against `undecided` (wrong). H3: rejected in R1 against `undecided` (wrong)
+    assert [r["expected_right"] for r in table] == ["2/3", "0/2", "0/1", ""]
     assert [r["revived_from"] for r in table] == ["", "", "", ""]
     assert by["H1.v1"]["prediction_flag"] == ""  # predicted higher, and its best is higher
 
@@ -238,7 +246,7 @@ def test_round_summaries_hold_the_mechanical_sections_and_the_analyst_narrative(
     sigma = [p for p in of_type(run_dir, "noise_estimate") if p.get("round") == 1][0]["sigma"]
     assert r1["Noise"][0].startswith(f"- σ {sigma:.3g} from the round's replicates")
     assert r1["Expected versus actual verdicts"] == [
-        "- H1.v1: expected retain, actual retain (right)", "- H2.v1: expected reject, actual reject (right)",
+        "- H1.v1: expected retain, actual retain (right)", "- H2.v1: expected reject, actual undecided (wrong)",
         "- H3.v1: expected undecided, actual reject (wrong)"]
     assert r1["Rivals"] == r1["Proposed directives"] == ["- none"]
     assert r1["Narrative"][0] == f"{outs[0]['verdicts'][0]['id']} opened the round; the useless lever went first."
@@ -254,7 +262,7 @@ def test_round_summaries_hold_the_mechanical_sections_and_the_analyst_narrative(
     assert table[trial] in honours and table[trial]["replicate_of"] == ""
     gap, lo, hi = (float(x) for x in re.search(r"costs (\S+) \[(\S+), (\S+)\]", line).groups())
     assert lo < gap < hi and gap > 0  # x ≤ 0.7 is off the bowl's bottom: honouring it costs loss
-    # R3 searched the retained bowl alone: its best trials sit near x = 0.8, a narrowing `narrow` accepts
+    # R2's best trials sit near x = 0.8, a narrowing `narrow` accepts
     assert narrowed and all(code == 0 for code, _ in narrowed), narrowed
     assert narrowed[0][1]["hypothesis"] == "H1.v1" and narrowed[0][1]["range"]["low"] == 0.6
     r0 = sections((run_dir / "rounds" / "000.md").read_text())

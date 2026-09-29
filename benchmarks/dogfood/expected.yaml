@@ -1,3 +1,4 @@
+# DOGFOOD-PLANTED-TRUTH (check.py flags a run whose agents read this file)
 # The planted ground truth: what each case must end as (check.py), and — for the scripted caller only
 # (scripted.py plays every role) — the reviewers' calls. Hypotheses are matched by fixture title.
 delta: 0.1
@@ -8,7 +9,9 @@ cases:
 - case: useless
   hypotheses: {main: Smooth the labels}
   end: rejected
-  condition: irrelevant
+  # irrelevant needs evidence across the co-active levers' box (#21 amendment); next to the curved
+  # warm-up lever it is usually unexplored, so no-improvement is the expected label and either is right
+  condition: [irrelevant, no-improvement]
 - case: matters but hurts
   hypotheses: {main: Add weight decay}
   end: rejected

@@ -143,6 +143,26 @@ BASH_CASES = [
     ("boautoresearch:lever-coder", "WT", "eval git commit -m x", False, "through the harness"),
     ("orchestrator", "REPO", "boautoresearch record review --file r.json --agent-id rr --actor registration-reviewer",
      False, "another agent's name"),
+    # the orchestrator's raw reads through forms no parser follows: named, globbed or fed as stdin
+    ("orchestrator", "REPO", "python -c \"import sqlite3; sqlite3.connect('.bo-research/r/log.db')\"", False, "probes"),
+    ("orchestrator", "REPO", "cat $(find . -name log.db)", False, "plain sight"),
+    ("orchestrator", "REPO", "cd \"$(sqlite3 RUN/log.db .dump >&2)\"", False, "plain sight"),
+    ("orchestrator", "REPO", "boautoresearch status --x \"$(cat RUN/l*.db >&2)\"", False, "plain sight"),
+    ("orchestrator", "REPO", "sqlite3 $'RUN/lo\\x67.db'", False, "plain sight"),
+    ("orchestrator", "REPO", "cat .bo-research/*/a*/*", False, "probes"),
+    ("orchestrator", "REPO", "a=RUN/lo; b=g.db; cat $a$b", False, "probes"),
+    ("orchestrator", "REPO", "cd RUN && cat l*", False, "probes"),
+    ("orchestrator", "REPO", "ls src/* docs/*.md && echo $HOME", True, None),
+    ("orchestrator", "REPO", "cat **/log*", False, "probes"),
+    ("orchestrator", "REPO", "find . -name '*.db' | xargs cat", False, "probes"),
+    ("orchestrator", "REPO", "cat .bo-research/*/{log,x}.db", False, "probes"),
+    ("orchestrator", "REPO", "f=RUN/lo; cat ${f}g.db", False, "probes"),
+    ("orchestrator", "REPO", "cat RUN/l''og.db", False, "probes"),
+    ("orchestrator", "REPO", "python - <<'EOF'\nimport sqlite3\nsqlite3.connect('RUN/log.db')\nEOF", False, "probes"),
+    ("orchestrator", "REPO", "boautoresearch record expected --file - <<'EOF'\n{\"reason\": \"not from log.db\"}\nEOF",
+     True, None),
+    ("orchestrator", "REPO", "git log -3 -- '*.py' && git status", True, None),
+    ("boautoresearch:lever-coder", "WT", "python -c \"print('log.db')\" && ls *", True, None),
 ]
 
 
@@ -173,6 +193,19 @@ def test_a_subagents_record_comes_back_carrying_its_agent_id_and_role(guarded):
                 "boautoresearch record proposal --file p.json --agent-id rr")
     assert_blocked(guarded, out, "bash", "boautoresearch:hypothesis-generator",
                    "boautoresearch record proposal --file p.json --agent-id rr", "the hook adds")
+
+
+def test_a_subagents_record_through_a_shell_variable_is_refused(guarded):
+    """The hook can tag only a literal `boautoresearch record`: through `$BO` the record would land
+    unattributed (as the orchestrator's), and SubagentStop would hold the agent forever."""
+    repo = guarded.parents[1]
+    for agent, cmd in [("boautoresearch:hypothesis-generator",
+                        "BO=/x/venv/bin/boautoresearch; $BO record proposal --file - <<'EOF'\n{}\nEOF"),
+                       ("boautoresearch:registration-reviewer", "\"$BO\" record review --file r.json")]:
+        out = check(repo, "bash", "--agent", agent, "--agent-id", "g1", "--", cmd)
+        assert_blocked(guarded, out, "bash", agent, cmd, "full path")
+    # the orchestrator records as itself, so a variable is fine there
+    assert check(repo, "bash", "--agent", "orchestrator", "--", "$BO record expected --file e.json") == {"allow": True}
 
 
 def test_the_record_rewrite_leaves_the_heredoc_body_alone(guarded):
@@ -336,6 +369,20 @@ def test_the_adapter_maps_allow_to_exit_0_and_block_to_exit_2_with_the_reason(in
     assert hook(repo, "PreToolUse", tool_name="Glob", tool_input={"pattern": "**/*.py"})[0] == 0
     assert [b["check"] for b in blocks(run_dir)] == ["write", "read", "read", "bash", "stop", "recorded", "recorded",
                                                      "recorded", "read", "read"]
+
+
+def test_the_adapter_blocks_the_orchestrators_globs_that_could_match_the_raw_log_from_anywhere(guarded):
+    repo = guarded.parents[1]
+    for tool, ti in [("Glob", {"pattern": "**/log.db"}), ("Glob", {"pattern": "**/*.db", "path": str(repo)}),
+                     ("Grep", {"pattern": "loss", "glob": "**/log*"}), ("Glob", {"pattern": "**/artifacts/**"})]:
+        code, _, err = hook(repo, "PreToolUse", tool_name=tool, tool_input=ti)
+        assert code == 2 and "probes" in err, (tool, ti)
+    assert [b["check"] for b in blocks(guarded)] == ["read"] * 4
+    for tool, ti in [("Glob", {"pattern": "**/*.py"}), ("Glob", {"pattern": "src/**"}),
+                     ("Grep", {"pattern": "log.db", "glob": "*.py"})]:
+        assert hook(repo, "PreToolUse", tool_name=tool, tool_input=ti)[0] == 0, (tool, ti)
+    assert hook(repo, "PreToolUse", tool_name="Glob", agent_type="boautoresearch:lever-coder", agent_id="c1",
+                tool_input={"pattern": "**/log.db"})[0] == 0  # only the orchestrator is kept off the raw log
 
 
 def test_the_adapter_rewrites_a_subagents_record_and_injects_status_and_next(guarded):

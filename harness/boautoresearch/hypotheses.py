@@ -212,19 +212,35 @@ def _config_reads(tree: ast.AST) -> Counter:
     return sites
 
 
-def harness_imports(source: str, path: str) -> set:
-    """What a module imports from boautoresearch (`boautoresearch`, `boautoresearch.lever`, ...)."""
-    # ponytail: static imports only; importlib/__import__ slip past (the verification still runs it)
+LOADERS = {"__import__", "import_module", "run_module", "run_path", "exec_module", "load_module"}  # by attribute too
+BUILTIN_LOADERS = {"__import__", "exec", "eval", "modules"}  # bare, or on builtins/sys (not a model's `.eval()`)
+
+
+def harness_imports(source: str, path: str) -> Counter:
+    """Every site through which a module imports or could load boautoresearch: its static imports
+    (`boautoresearch`, `boautoresearch.lever`, ...), a string naming it, and each dynamic loader
+    (a module name built at run time is invisible, so the loader itself counts)."""
+    # ponytail: a denylist of the usual routes; a subprocess or a .pth file still reaches it. Upgrade
+    # path: run the distilled replicates under a runner that imports the harness in another process.
     try:
         tree = ast.parse(source, path)
     except SyntaxError as e:
         raise ValueError(f"{path} does not parse: {e}")
-    out: set = set()
+    out: Counter = Counter()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            out |= {a.name for a in node.names if a.name.split(".")[0] == "boautoresearch"}
-        elif isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "boautoresearch":
-            out |= {f"{node.module}.{a.name}" for a in node.names}
+            out.update(a.name for a in node.names if a.name.split(".")[0] in ("boautoresearch", "builtins"))
+        elif isinstance(node, ast.ImportFrom):
+            harness = (node.module or "").split(".")[0] == "boautoresearch"
+            out.update(f"{node.module}.{a.name}" for a in node.names
+                       if harness or a.name in LOADERS | BUILTIN_LOADERS)
+        elif isinstance(node, ast.Name) and node.id in BUILTIN_LOADERS - {"modules"}:
+            out[f"{node.id}()"] += 1
+        elif isinstance(node, ast.Attribute) and (node.attr in LOADERS or node.attr in BUILTIN_LOADERS and (
+                isinstance(node.value, ast.Name) and node.value.id in ("builtins", "__builtins__", "sys"))):
+            out[f".{node.attr}"] += 1
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and re.search(r"\bboautoresearch\b", node.value):
+            out[repr(node.value)] += 1
     return out
 
 

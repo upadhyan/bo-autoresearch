@@ -6,6 +6,7 @@ the planted interactions at the end are statistical and asserted as rates over f
 import json
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
 import yaml
 
 from conftest import bo, events, round_run, write_run_yaml
@@ -268,6 +269,27 @@ def test_exhaustion_waits_for_every_condition_then_ends_the_run(tmp_path, projec
     assert code_ != 0 and "ended" in out["reason"]
 
 
+def test_a_free_pass_whose_generators_find_nothing_new_is_empty_and_can_exhaust(tmp_path, project_python):
+    """A generator with nothing new in its lane records an empty proposal (a pass may produce nothing:
+    that is how exhaustion is shown), and a pass of empty proposals counts as the final empty pass."""
+    repo, run_dir = setup(tmp_path, project_python, "lenses: [optimisation]\n")
+    assert bo(repo, "generate", "--rationale", "run start")[0] == 0
+    code, out = bo(repo, "record", "proposal", "--file", str(write(tmp_path, {"hypotheses": []})),
+                   "--agent-id", "g1", "--actor", "hypothesis-generator", "--rationale", "nothing new in my lane")
+    assert code == 0, out
+    assert bo(repo, "check", "recorded", "g1")[1]["recorded"] is True
+    assert bo(repo, "status")[1]["exhaustion"]["final_pass_empty"] is True
+    # an empty pass still needs its record: no pass counts before a generator records
+    assert bo(repo, "generate", "--rationale", "again")[0] == 0
+    assert bo(repo, "status")[1]["exhaustion"]["final_pass_empty"] is False
+
+
+def write(d, body):
+    f = d / f"body-{len(list(d.glob('body-*')))}.json"
+    f.write_text(json.dumps(body))
+    return f
+
+
 # The planted interactions: A (C) does nothing alone and helps only with B (D). δ = 0.1, σ = 0.05;
 # with both levers free the pair's loss term is −8a(b − 0.5), √V_T of each ≈ 1.3 ≫ δ. B's baseline sits
 # mid-range: its warm start then covers neither end, so its fresh trials reach both (the coverage gate).
@@ -365,12 +387,14 @@ def rate(toy_fn, tmp_path, python):
         return list(pool.map(lambda s: toy_fn(tmp_path / f"s{s}", python, s), SEEDS))
 
 
+@pytest.mark.slow
 def test_a_rejected_hypothesis_flagged_at_a_newcomers_registration_is_revived_and_both_retained(
         tmp_path, project_python):
     outcomes = rate(registration_toy, tmp_path, project_python)
     assert sum(outcomes) >= 2, outcomes
 
 
+@pytest.mark.slow
 def test_a_removal_flagged_by_its_interplay_review_is_revived_into_the_queued_partners_round(
         tmp_path, project_python):
     outcomes = rate(review_toy, tmp_path, project_python)

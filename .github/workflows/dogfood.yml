@@ -2,8 +2,8 @@
 # headless `claude -p "/boautoresearch:start"` on a fresh copy of benchmarks/dogfood/toy, with the
 # adversarial checklist fired from outside the LLM. check.py's output for every run is attached.
 #
-# Needs one repository secret: ANTHROPIC_API_KEY (Settings > Secrets and variables > Actions), an API key
-# with enough credit for 7 long agent sessions. Runs on demand and weekly.
+# Needs one repository secret: CLAUDE_CODE_OAUTH_TOKEN (Settings > Secrets and variables > Actions), from
+# `claude setup-token` on a subscription with enough usage for 7 long agent sessions. Runs on demand and weekly.
 name: dogfood
 on:
   workflow_dispatch:
@@ -28,7 +28,7 @@ jobs:
           python -m pip install pyyaml
       - name: Run the matrix
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
         run: python benchmarks/dogfood/run_benchmark.py --caller claude --work dogfood-runs
       - name: Attach check.py output
         if: always()

@@ -12,7 +12,7 @@ EVENT_TYPES = {"run_started", "trial_started", "trial_finished", "trial_failed",
                "proxy_accepted_unvalidated", "hypothesis_proposed", "hypothesis_registered",
                "lever_smoke", "lever_committed", "delta_set", "hypothesis_activated",
                "trial_heartbeat", "trial_abandoned", "drift_check", "run_ended", "verdict",
-               "hypothesis_rejected", "hypothesis_inconclusive", "hypothesis_escalated", "lever_frozen", "record",
+               "hypothesis_rejected", "hypothesis_inconclusive", "hypothesis_escalated", "lever_frozen", "lever_unfrozen", "record",
                "commit_change", "dependency_added", "equivalence_check", "epoch_started", "narrowed",
                "hypothesis_prioritized", "hypothesis_parked", "hypothesis_unparked", "trial_enqueued",
                "agent_trial_skipped", "checkpoint", "user_pause", "user_resume", "removal",
@@ -141,6 +141,8 @@ def state(events: list[dict]) -> dict:
             checks.append(p)
         elif e["type"] == "trial_enqueued":
             queue.append(p)
+        elif e["type"] == "agent_trial_skipped" and "queued" in p:  # judged: never carried on
+            queue[p["queued"] - 1]["skipped"] = True
         elif e["type"] == "checkpoint":  # checkpoint mode, at a round boundary
             paused = {"by": "checkpoint", "round": p["round"]}
         elif e["type"] == "user_pause":
@@ -182,6 +184,7 @@ def state(events: list[dict]) -> dict:
             hyps[p["id"]]["priority"] = p["priority"]
         elif e["type"] == "hypothesis_parked":  # no verdict: it returns as the same version
             hyps[p["id"]].update(status="parked", parked_from=p["from"], park_reason=p["reason"])
+            hyps[p["id"]].pop("context", None)  # it returns afresh
         elif e["type"] == "hypothesis_unparked":  # back to the queue (a proposal to its review)
             h = hyps[p["id"]]
             h.update(status="proposed" if h["parked_from"] == "proposed" else "registered", unselected=0,
@@ -199,6 +202,8 @@ def state(events: list[dict]) -> dict:
             h["verdicts"].append(p)
             if p["outcome"] == "retained" or h["status"] == "retained":
                 h["status"] = "retained" if p["outcome"] == "retained" else "active"
+            if h["status"] != "retained":  # undecided again: its levers count against the cap
+                h.pop("context", None)
         elif e["type"] == "hypothesis_rejected":
             hyps[p["id"]].update(status="rejected", condition=p["condition"])
         elif e["type"] == "hypothesis_inconclusive":
@@ -206,10 +211,14 @@ def state(events: list[dict]) -> dict:
         elif e["type"] == "narrowed":  # the new range, from the next round on (its checks restart)
             h = hyps[p["id"]]
             h["narrowed_round"] = p["round"]
+            if p.get("cap"):  # narrowed for a tight dimension cap: searched as context
+                h["context"] = [*h.get("context", []), p["lever"]]
             levers = h["spec"]["levers"]
             h["spec"] = {**h["spec"], "levers": {**levers, p["lever"]: {**levers[p["lever"]], **p["after"]}}}
         elif e["type"] == "lever_frozen":
             hyps[p["id"]]["frozen"][p["lever"]] = p["condition"]
+        elif e["type"] == "lever_unfrozen":  # frozen at a proxy fidelity its drift check didn't pass
+            hyps[p["id"]]["frozen"].pop(p["lever"], None)
         elif e["type"] == "reject_deferred":
             hyps[p["id"]]["deferred"].append(p["verdict"])
         elif e["type"] == "record":

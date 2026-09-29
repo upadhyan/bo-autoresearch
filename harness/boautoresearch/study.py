@@ -78,6 +78,8 @@ class Study:
 
     def __init__(self, path: Path, direction: str, space: dict, trials: list[dict], seed: int):
         import optuna
+        import torch  # GPSampler's backend
+        torch.set_num_threads(1)  # the GPs are tiny: extra threads only burn CPU
         optuna.logging.set_verbosity(optuna.logging.WARNING)
         warnings.filterwarnings("ignore", category=optuna.exceptions.ExperimentalWarning)
         self._optuna, self.space, self.dists = optuna, space, _distributions(space)

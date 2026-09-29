@@ -52,8 +52,10 @@ def _texts(d: dict, key: str) -> None:
 
 def _proposal(r: dict, st: dict) -> list[str]:
     hs = r.get("hypotheses")
-    if not isinstance(hs, list) or not hs:
-        raise ValueError("hypotheses must list the proposed hypothesis specs")
+    if not isinstance(hs, list):
+        raise ValueError("hypotheses must list the proposed hypothesis specs ([] when your lane holds nothing new)")
+    if not hs:
+        return []  # nothing new in this lane: how a final pass shows exhaustion
     for i, s in enumerate(hs):
         try:
             hypotheses.validate(s)

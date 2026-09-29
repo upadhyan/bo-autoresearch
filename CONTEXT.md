@@ -71,7 +71,7 @@ A forced review, triggered every time a hypothesis is removed from the loop, tha
 _Avoid_: Combination sweep, interaction search
 
 **Narrowing**:
-Shrinking an active hypothesis's lever ranges on evidence. The hypothesis and its reject conditions stay the same.
+Shrinking an active or retained hypothesis's lever ranges on evidence. The hypothesis and its reject conditions stay the same. When the dimension cap gets tight, the harness narrows the oldest retained hypotheses whose posterior is concentrated, and their narrowed levers stay in the search as **context**, not counted against the cap.
 _Avoid_: Pruning, refinement
 
 **Fidelity-sensitive**:

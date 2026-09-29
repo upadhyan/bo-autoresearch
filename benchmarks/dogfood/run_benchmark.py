@@ -7,7 +7,7 @@ with check.py.
     python run_benchmark.py --seeds 1 --sigmas 0.05 --no-free --work /tmp/df
 
 The claude caller runs `claude -p "/boautoresearch:start" --plugin-dir <this repo>` in each toy
-repository (it needs a logged-in `claude` or ANTHROPIC_API_KEY). The matrix passes when every hard
+repository (it needs a logged-in `claude` or CLAUDE_CODE_OAUTH_TOKEN). The matrix passes when every hard
 invariant holds in every run and each planted verdict is right in at least 5 of the 6 scripted runs.
 """
 import argparse
@@ -35,8 +35,17 @@ CLAUDE_TIMEOUT_S = 4 * 3600
 
 
 def trial_env(sigma):
-    """The environment trials inherit: the planted noise σ and the seconds per epoch."""
-    return {**os.environ, "DOGFOOD_SIGMA": str(sigma), "DOGFOOD_SLEEP_PER_EPOCH": str(SLEEP_PER_EPOCH)}
+    """The environment trials inherit: the planted noise σ, the seconds per epoch, and the scorer the
+    toy's objective.py loads (the planted truth, kept outside the toy repository so research can't read it)."""
+    return {**os.environ, "DOGFOOD_SIGMA": str(sigma), "DOGFOOD_SLEEP_PER_EPOCH": str(SLEEP_PER_EPOCH),
+            "DOGFOOD_SCORER": str(HERE / "truth.py")}
+
+
+def claude_cmd() -> list[str]:
+    """The headless start. Only project and local settings load: the user's own hooks, plugins and MCP
+    servers stay out of the run (auth is stored apart from settings, so it still works)."""
+    return ["claude", "-p", "/boautoresearch:start", "--plugin-dir", str(PLUGIN), "--allowedTools", TOOLS,
+            "--setting-sources", "project,local", "--strict-mcp-config", "--output-format", "stream-json", "--verbose"]
 
 
 def git(cwd, *args):
@@ -223,9 +232,8 @@ def one_run(work: Path, name: str, seed: int, sigma: float, free: bool, caller: 
         t.start()
         try:
             with open(d / "caller.log", "w") as f:
-                p = subprocess.run(["claude", "-p", "/boautoresearch:start", "--plugin-dir", str(PLUGIN),
-                                    "--allowedTools", TOOLS, "--output-format", "stream-json", "--verbose"],
-                                   cwd=repo, stdout=f, stderr=subprocess.STDOUT, env=env, timeout=CLAUDE_TIMEOUT_S)
+                p = subprocess.run(claude_cmd(), cwd=repo, stdin=subprocess.DEVNULL, stdout=f,
+                                   stderr=subprocess.STDOUT, env=env, timeout=CLAUDE_TIMEOUT_S)
         except subprocess.TimeoutExpired as e:  # scored as it stands: the matrix goes on
             p = subprocess.CompletedProcess(e.cmd, "timeout")
         finally:
@@ -234,6 +242,7 @@ def one_run(work: Path, name: str, seed: int, sigma: float, free: bool, caller: 
     run_dir = run_dir_of(repo)
     report = d / "check.json"
     args = [sys.executable, str(HERE / "check.py"), str(run_dir), "--adversarial", str(adv_log), "--json", str(report)]
+    args += ["--transcript", str(d / "caller.log")] if caller == "claude" else []
     c = subprocess.run(args + (["--free"] if free else []), capture_output=True, text=True) if run_dir else None
     (d / "check.txt").write_text(c.stdout + c.stderr if c else f"no run was started (caller exit {p.returncode})\n")
     out = json.loads(report.read_text()) if report.exists() else {"criteria": {}, "cases": {}, "passed": False}
