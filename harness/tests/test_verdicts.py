@@ -115,30 +115,38 @@ FIELDS = {"id", "hypothesis", "round", "check", "group", "outcome", "condition",
           "burn_in", "confirmation", "fidelity", "proxy", "prediction", "frozen", "trials", "context"}
 
 
-def test_verdict_records_hold_every_field_and_the_probe_shows_them(tmp_path, project_python):
+def test_a_harmful_lever_is_rejected_no_improvement_and_its_records_hold_every_field(tmp_path, project_python):
     harmful = (spec({"x": lever()}), '    term += 2 * lever("H1.x")')
-    run_dir, [out] = verdict_run(tmp_path / "r", project_python, 1, [harmful])
-    repo = run_dir.parents[1]
-    vs = records(run_dir)
-    assert vs and out["verdicts"] == vs
-    for v in vs:
-        assert set(v) == FIELDS
-        assert set(v["gates"]) == {"trials", "coverage", "fit", "homogeneity"}
-        assert all("passed" in g for g in v["gates"].values())
-        assert set(v["gates"]["trials"]) == {"sampler", "agent", "passed"}
-        for stat in ("sqrt_vt", "delta_stat", "m_u"):
-            assert v[stat]["lower"] <= v[stat]["estimate"] <= v[stat]["upper"]
-        assert v["fidelity"] == {"epochs": 4} and v["proxy"] == "reference"
-        assert v["context"] == {"retained": [], "co_active": []}
-        assert v["prediction"]["flag"] is None
-    # harmful: the lever matters (its range M_u, 2, is above δ) but only hurts, so Δ's upper bound is below δ
-    [rej] = of_type(run_dir, "hypothesis_rejected")
-    assert rej["condition"] == "no-improvement" and rej["frozen"] == ["H1.x"]
-    assert vs[-1]["m_u"]["lower"] > DELTA and vs[-1]["delta_stat"]["upper"] < DELTA
-    assert vs[-1]["delta_stat"]["upper"] <= vs[-1]["m_u"]["upper"]
-    code, probe = bo(repo, "verdict", "H1")
-    assert code == 0 and probe["status"] == "rejected" and probe["records"] == vs
-    assert bo(repo, "verdict", "H9")[1]["refused"]
+    runs = repeat(tmp_path, project_python, [harmful])
+    conditions = [[p["condition"] for p in of_type(run_dir, "hypothesis_rejected")] for run_dir, _ in runs]
+    # rejected within R1 in 8 of 10 runs over seeds 0..9 (the rest still active); at 80%, fewer than 2 of 3
+    # has probability ~10%
+    assert conditions.count(["no-improvement"]) >= 2, conditions
+    assert all(c in ([], ["no-improvement"]) for c in conditions), conditions
+    for run_dir, [out] in runs:
+        repo = run_dir.parents[1]
+        vs = records(run_dir)
+        assert vs and out["verdicts"] == vs
+        for v in vs:
+            assert set(v) == FIELDS
+            assert set(v["gates"]) == {"trials", "coverage", "fit", "homogeneity"}
+            assert all("passed" in g for g in v["gates"].values())
+            assert set(v["gates"]["trials"]) == {"sampler", "agent", "passed"}
+            for stat in ("sqrt_vt", "delta_stat", "m_u"):
+                assert v[stat]["lower"] <= v[stat]["estimate"] <= v[stat]["upper"]
+            assert v["fidelity"] == {"epochs": 4} and v["proxy"] == "reference"
+            assert v["context"] == {"retained": [], "co_active": []}
+            assert v["prediction"]["flag"] is None
+        code, probe = bo(repo, "verdict", "H1")
+        assert code == 0 and probe["records"] == vs
+        assert bo(repo, "verdict", "H9")[1]["refused"]
+        if not of_type(run_dir, "hypothesis_rejected"):
+            continue
+        # the lever matters (its range M_u, 2, is above δ) but only hurts, so Δ's upper bound is below δ
+        [rej] = of_type(run_dir, "hypothesis_rejected")
+        assert rej["frozen"] == ["H1.x"] and probe["status"] == "rejected"
+        assert vs[-1]["m_u"]["lower"] > DELTA and vs[-1]["delta_stat"]["upper"] < DELTA
+        assert vs[-1]["delta_stat"]["upper"] <= vs[-1]["m_u"]["upper"]
 
 
 def test_no_verdict_before_burn_in(tmp_path, project_python):
@@ -150,14 +158,6 @@ def test_no_verdict_before_burn_in(tmp_path, project_python):
     fresh = sum(t["kind"] == "sampler" for t in started_in(run_dir, 1))
     assert code == 0 and probe["verdict"] == "burn-in" and probe["records"] == []
     assert probe["burn_in"] == {"fresh": fresh, "needed": 20, "spacing": 10, "cap": 80} and fresh < 20
-
-
-def test_a_harmful_lever_is_rejected_no_improvement(tmp_path, project_python):
-    harmful = (spec({"x": lever()}), '    term += 2 * lever("H1.x")')
-    runs = repeat(tmp_path, project_python, [harmful])
-    conditions = [[p["condition"] for p in of_type(run_dir, "hypothesis_rejected")] for run_dir, _ in runs]
-    assert conditions.count(["no-improvement"]) >= 2, conditions
-    assert all(c in ([], ["no-improvement"]) for c in conditions), conditions
 
 
 def test_a_useful_lever_is_retained(tmp_path, project_python):
