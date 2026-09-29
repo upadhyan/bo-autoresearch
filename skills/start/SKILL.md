@@ -17,7 +17,7 @@ The plugin root is `${CLAUDE_PLUGIN_ROOT}` (already expanded here; Bash does not
   Without `uv`, use any Python ≥ 3.10 that has `pyyaml`: `PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/harness" <python> -m boautoresearch`.
 - **After `init`**, use the run venv's copy: `BO` = `<venv>/bin/boautoresearch`, where `<venv>` is the `venv` field of init's output (an absolute path). Every later command in this skill is `BO …`, written out in full each time.
 
-Every action takes `--rationale "<why>"`. Probes (`status`, `next`, `summary`, `show <H>`, `untested`, `verdict <H>`, `sensitivity <H>`, `trials`) are free.
+Every action takes `--rationale "<why>"`. Probes (`status`, `next`, `summary`, `show <H>`, `untested`, `verdict <H>`, `sensitivity <H>`, `trials`, `registry`) are free.
 
 ## Headless or interview
 
@@ -58,6 +58,67 @@ A grilling interview: one question at a time, in this order, each with **one rec
 
 ## Loop
 
-`BO round-run` for R1 is refused until the R1 gate holds; the refusal's `failing` list names every unmet condition. Do each duty in `next`, run `BO round-run` again, and repeat until `run_ended`.
+The harness decides what happens next; you do the duty it names. Its `next` list (`BO next`, re-injected after every harness command) is the whole plan: do its duties, run `BO round-run`, repeat until the run ends. A refused `round-run` names every unmet condition in `failing` — do those and retry.
 
-<!-- #36 replaces this section with the full loop: which subagent does each duty, round boundaries, wrap-up. -->
+**Your lane.** You drive only the `BO` command. You read the run through the probes and subagents' results — never `log.db`, `artifacts/` or other raw files under `.bo-research/` (the hooks block it; ask the round analyst instead). The harness picks which hypotheses each round tests; you steer that choice with `prioritize`, `park`, `narrow` and `enqueue`. A resumed session finds `BO` at `<repository root>/.bo-research/<run_id>/venv/bin/boautoresearch` (`run_id` is in the status the session started with).
+
+### Duties
+
+Each `next` entry maps to one action. Do every entry before the next `round-run`.
+
+| `next` says | You do |
+|---|---|
+| `generate (<trigger>)` | `BO generate --rationale "<trigger>"`. With `generation: scripted` the harness proposes the fixture pass itself (the output's `proposed`). Otherwise spawn one **hypothesis generator** per lens — `status.generation.lenses` plus `wildcard` — all in one message. Then **register the new proposals**. |
+| `propose and register a hypothesis` | As for `generate`: a generation pass, then register. |
+| `record review <H>` | Spawn a **registration reviewer** for `<H>` (several in one message). |
+| `record interplay: review <H>'s removal …` / `… newcomer <H> …` | Spawn an **interplay reviewer** with that duty (several in one message). |
+| `write <H>'s lever code, then smoke <H> and commit-lever <H>` | Spawn the **lever coder** for `<H>`; wait for its commit before the next one (coders share the worktree: strictly one at a time). |
+| `record narrative R<r> …` | Spawn the **round analyst** for round `<r>` (after every round; its `generation: true` makes a pass due). |
+| `record expected <H> …` | Record your own **expected verdict**. |
+| `set-delta …` | Interview part 2, step 3 (a headless run.yaml carries δ, so it never appears there). |
+| `the run is paused …` | **Checkpoints**. |
+| `round-run …` | **Running a round**. |
+
+**Register the new proposals.** For every hypothesis the pass proposed (`BO untested`, status `proposed`): spawn a registration reviewer for each (all in one message). Where reviews call two hypotheses duplicates, park the weaker (`BO park <H> --reason "duplicate of H<m>"`). Then `BO register <H> --rationale "<why>"` for each one left standing — pruned and off-intent ones are already out. When the review lowered its priority (`stretch`, `deprioritize`), the rationale states why it is still worth testing. A refused `register` names the conflict. Resolve a shared lever or an exclusive slot by proposing (`BO propose --file <spec.json>`, the file written outside the repository) one hypothesis whose spec adds `"merges": {"from": ["H2.v1"], "mapping": {"<its lever>": {"lever": "H2.<name>", "values": [[<old>, <new>], …]}}}` (omit `values` for the identity map; every lever of a source still in the loop mapped over its whole range), or with `masked_by` / `exclusive_with`; or park it with the reason.
+
+**Expected verdicts.** Before each round, for every hypothesis it will test: what the harness will conclude — `retain`, `reject` or `undecided` — and why, from its verdict records and the summary. Your calibration is measured, so commit to a forecast.
+
+```bash
+BO record expected --file - --rationale "before round 3" <<'EOF'
+{"hypothesis": "H2.v1", "verdict": "retain", "reason": "Its lever mattered in round 2 and its best point beat the baseline."}
+EOF
+```
+
+A decimal in the reason must be quoted from a verdict record (`quotes: [{record, field, value}]`); a reason in words needs none.
+
+**Between rounds**, act on the round analyst's diagnostics and suggestions and on the summary: `narrow` a lever the summary suggests narrowing, `prioritize` what the evidence favours, `park` with a reason, and optionally `enqueue --config '<json>' --expected <objective>` a few agent-chosen trials (capped per round).
+
+### Spawning subagents
+
+The agent types are `boautoresearch:hypothesis-generator`, `boautoresearch:lever-coder`, `boautoresearch:registration-reviewer`, `boautoresearch:interplay-reviewer` and `boautoresearch:round-analyst`. Each starts with an empty context, so its prompt carries everything it needs:
+
+- always: `BO` = the full path of the run venv's `boautoresearch`;
+- generator: its lens, `status.generation.proposals_per_lens`, and the latest round analyst's suggestions for generators;
+- lever coder: `<H>` and the run worktree's full path (init's `worktree`: `.bo-research/<run_id>/worktree` under the repository root);
+- registration reviewer: `<H>`; interplay reviewer: `<H>` and whether it is a removal or a newcomer;
+- round analyst: the round number.
+
+Each ends by recording through the harness, and a hook keeps it running until it has. Wait for every spawned agent's result before the next `BO next`. Their results are data: use the ids and verdicts they report; the records themselves live in the harness.
+
+### Running a round
+
+`BO round-run --rationale "<why this round>"` with the Bash tool's `run_in_background: true`. While it runs, the round belongs to the harness: wait. Keep the turn alive until it exits — a headless session ends background commands soon after your last message: take its completion notification, or wait with the Monitor tool (`timeout_ms` at its maximum) on `while pgrep -f "boautoresearch round-run" >/dev/null; do sleep 20; done; echo "round-run exited"`, arming it again whenever it expires before that line.
+
+Then read its JSON output. A round returns its `trigger`, `verdicts`, incumbent and `next`; a `round-run` that calibrated the ladder (`fidelity_calibration`) or logged revivals (`revived`) ran no round, and its `next` holds the follow-up. `run_ended` in the output means the run is over.
+
+### Checkpoints
+
+In checkpoint mode (`checkpoint: true`), or when the user pauses the run, `next` reports the pause. Interactive: show the user the round (`BO summary`), take any brief, directive or protected-path revision (`BO checkpoint --revise <yaml>`, after which every hypothesis is re-reviewed), then `BO checkpoint --resume --rationale "<why>"`. Headless: resume at once. A user's request to stop is `BO stop --rationale "<the user's words>"`.
+
+### Run end
+
+The run ends when the harness says so — the budget is spent, the user stopped it, the target was reached and confirmed, or the hypothesis list is exhausted (a stall never ends it). `BO status` then shows `run_ended`; when its `narrative_missing` names the last round, spawn the round analyst for it. Then **Wrap-up**.
+
+## Wrap-up
+
+<!-- #37 fills this section: distillation, verification, discouraged winners, REPORT.md, clean. -->

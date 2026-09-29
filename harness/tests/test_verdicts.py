@@ -234,6 +234,7 @@ def test_a_stuck_hypothesis_escalates_then_is_inconclusive_at_the_evidence_cap(t
     assert outs[-1]["trigger"] == "search_space" and not of_type(run_dir, "hypothesis_rejected")
     assert bo(run_dir.parents[1], "status")[1]["next"] == [
         "propose and register a hypothesis",
+        f"record narrative R{outs[-1]['round']} (the round analyst: a cited narrative, diagnostics, suggestions)",
         "record interplay: review H1.v1's removal against the untested list",
         "generate (the queue holds 0, below 2x the 1 slot(s) per round)"]
 

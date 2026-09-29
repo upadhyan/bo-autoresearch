@@ -572,7 +572,7 @@ def cmd_check_write(a) -> dict:
     return _decide(con, "write", a.agent, str(p), _write_refusal(run_dir, st, p))
 
 
-PROBES = {"status", "summary", "trials", "verdict", "next", "show", "untested", "sensitivity"}  # what read-only agents may run
+PROBES = {"status", "summary", "trials", "verdict", "next", "show", "untested", "sensitivity", "registry"}  # what read-only agents may run
 
 
 def cmd_check_bash(a) -> dict:
@@ -1257,6 +1257,9 @@ def _gate(run_dir: Path, st: dict) -> dict[str, str]:
         failing["registry"] = ("the research brief is missing from the directive registry: state it "
                                "(purpose, contribution, complexity, provenance) with `checkpoint` then "
                                "`checkpoint --revise <yaml>`")
+    if untold := _narrative_missing(st):
+        failing["narrative"] = (f"record narrative R{untold[0]} first: the round analyst reads every round "
+                                "(its narrative cites the round's verdict records) before the next one runs")
     if unreviewed := _review_missing(st):
         failing["review"] = (f"record review {', '.join(unreviewed)} first: the registration reviewer reviews "
                              "every hypothesis at registration, at revival, and after a registry revision")
@@ -1935,6 +1938,7 @@ def _status(st: dict) -> dict:
                            for h in st["hypotheses"].values()],
             "schedule": _schedule_status(st), "paused": st["paused"],
             "interplay_missing": _interplay_missing(st), "review_missing": _review_missing(st),
+            "narrative_missing": _narrative_missing(st),
             "generation": {"mode": run["generation"], "passes": len(st["passes"]),
                            "due": _generation_due(st), "lenses": run.get("lenses"),
                            "proposals_per_lens": run.get("proposals_per_lens")},
@@ -2071,6 +2075,14 @@ def _expected_missing(st: dict) -> list[str]:
     return [h["id"] for h in _selected(st) if h["id"] not in have] if st["r0_complete"] else []
 
 
+def _narrative_missing(st: dict) -> list[int]:
+    """The latest ended BO round, while the round analyst has recorded no narrative for it (an
+    interrupted round is resumed, not read)."""
+    ended = [r for r, x in st["rounds"].items() if r >= 1 and x["ended"] not in (None, "interrupted")]
+    told = {x["record"]["round"] for x in st["records"] if x["kind"] == "narrative"}
+    return [max(ended)] if ended and max(ended) not in told else []
+
+
 def _schedule_status(st: dict) -> dict:
     selected = _selected(st)
     return {"selected": [h["id"] for h in selected], "queue": [h["id"] for h in _queue(st)],
@@ -2095,6 +2107,8 @@ def _next(st: dict) -> list[str]:
         duties.append("propose and register a hypothesis")
     if st["delta"] is None:
         duties.append(_delta_duty(st))
+    duties += [f"record narrative R{r} (the round analyst: a cited narrative, diagnostics, suggestions)"
+               for r in _narrative_missing(st)]
     duties += [f"record review {h} (the registration reviewer: directive, intent and conflict verdicts)"
                for h in _review_missing(st)]
     duties += [f"record interplay: review {m['removed']}'s removal against the untested list"
@@ -2352,6 +2366,13 @@ def cmd_sensitivity(a) -> dict:
                         for r in h["verdicts"]]}
 
 
+def cmd_registry(a) -> dict:
+    """The directive registry as it stands: its version, the research brief, directives, protected paths."""
+    _, con = _open_run(recover=False)
+    reg = elog.load(con)["registry"]
+    return {"registry": {k: reg[k] for k in ("version", *sorted(directives.REGISTRY_KEYS))}}
+
+
 def cmd_summary(a) -> dict:
     """The research summary (SUMMARY.md) as the log stands now."""
     _, con = _open_run(recover=False)
@@ -2482,6 +2503,7 @@ def _parser() -> argparse.ArgumentParser:
         v.add_argument("hypothesis")
         v.set_defaults(fn=fn, action=False)
     sub.add_parser("untested").set_defaults(fn=cmd_untested, action=False)
+    sub.add_parser("registry").set_defaults(fn=cmd_registry, action=False)
     return p
 
 

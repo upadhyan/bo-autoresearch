@@ -244,7 +244,7 @@ def test_round_summaries_hold_the_mechanical_sections_and_the_analyst_narrative(
     assert r1["Narrative"][0] == f"{outs[0]['verdicts'][0]['id']} opened the round; the useless lever went first."
     assert "- the replicates spread wider than in the calibration round" in r1["Narrative"]
     assert r1["Narrative"][-1].endswith("By round-analyst (ra).")
-    assert sections((run_dir / "rounds" / "002.md").read_text())["Narrative"][0].startswith("_No narrative yet")
+    assert sections((run_dir / "rounds" / "003.md").read_text())["Narrative"][0].startswith("_No narrative yet")
     # the incumbent (x ≈ 0.8) breaks keep-x-low: the best logged trial that honours it, and the gap
     [line] = r1["Discouraged directives"]
     trial = int(line.split("trial ")[1].split(" ")[0])

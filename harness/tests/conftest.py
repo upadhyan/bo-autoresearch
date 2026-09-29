@@ -52,10 +52,20 @@ def register(cwd, ref, rationale="reviewed", **verdict):
 
 
 def expect_all(cwd):
-    """Settle the routine duties before a round: an `allow` review of each hypothesis owed one, an
+    """Settle the routine duties before a round: the last round's narrative, an `allow` review of each hypothesis owed one, an
     interplay review flagging nothing for each one
     owed, a generation pass when one is due, and an `undecided` expected verdict for each hypothesis
     the next round still lacks one for."""
+    status = bo(cwd, "status")[1]
+    for r in status["narrative_missing"]:
+        cites = [v["id"] for h in status["hypotheses"] for v in bo(cwd, "verdict", h["id"])[1]["records"]
+                 if v["round"] == r]
+        f = Path(cwd).parent / f"narrative-R{r}.json"
+        f.write_text(json.dumps({"round": r, "text": "the round as the records show it", "cites": cites,
+                                 "diagnostics": [], "suggestions": [], "generation": False}))
+        code, out = bo(cwd, "record", "narrative", "--file", str(f), "--agent-id", f"an-R{r}", "--actor",
+                       "round-analyst", "--rationale", "the round's narrative")
+        assert code == 0, out
     for h in bo(cwd, "status")[1]["review_missing"]:
         code, out = review(cwd, h)
         assert code == 0, out
@@ -88,9 +98,10 @@ SPARE = {"title": "A spare proposal", "rationale": "Any valid spec will do.",
 
 
 def ready(out):
-    """Nothing but routine duties (expected verdicts, interplay reviews, a generation pass) stands
+    """Nothing but routine duties (a narrative, reviews, a generation pass, expected verdicts) stands
     before round-run."""
-    return out["next"] == ["round-run"] or all(d.startswith(("record expected", "record interplay", "record review", "generate"))
+    return out["next"] == ["round-run"] or all(d.startswith(("record expected", "record interplay", "record review",
+                                                             "record narrative", "generate"))
                                                for d in out["next"])
 
 
