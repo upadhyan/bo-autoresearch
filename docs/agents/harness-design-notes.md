@@ -735,4 +735,6 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   .53 / 4.76 at df 4, 2.5% / .19 / .69 / 4.34 at df 20; verification 11.6% / .30 / .68 / 6 → 4.2% / .18 / .55 / 6.35 (df 4),
   3.0% / .19 / .65 / 6.18 (df 20); drift 5.7% (df 4; 9% at df 2) / .17 / .35 / 2 → 5.0% / .15 / .32 / 2 (df 4), 5.0% / .17 /
   .39 / 2 (df 20). End to end: a no-op check (k = 2, df 2) failed 5 of 40 on the first look alone, 2 of 40 in full; a faithful
-  proxy broke 2 of 20 before, 1 of 20 after; an exactly reversed proxy was caught 19 of 20 before, 20 of 20 after.
+  proxy broke 2 of 20 before, 1 of 20 after; an exactly reversed proxy was caught 19 of 20 before, 20 of 20 after, and 7
+  → 20 of 20 with a useless co-active lever (test_a_broken_proxy_downgrades…, noise off). Tests that declare
+  `deterministic: true` must turn the toy's noise off (σ̂ = 0 lets noise pass for a proxy order).

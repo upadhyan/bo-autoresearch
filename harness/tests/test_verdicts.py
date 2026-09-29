@@ -309,10 +309,12 @@ def test_a_single_lever_below_delta_is_frozen_and_leaves_the_search(tmp_path, pr
            '    term += 4 * (lever("H1.x") - 0.7) ** 2 + 0 * lever("H1.z")')
     runs = repeat(tmp_path, project_python, [two], rounds=2)
     frozen = [of_type(run_dir, "lever_frozen") for run_dir, _ in runs]
+    # measured 18 of 20 froze H1.z `irrelevant` over seeds 0..19 (2 `no-improvement`); at 90%, fewer than
+    # 2 of 3 has probability ~3%
     assert sum(f == [{"id": "H1.v1", "lever": "H1.z", "verdict": f[0]["verdict"], "condition": "irrelevant"}]
                if f else False for f in frozen) >= 2, frozen
     for (run_dir, outs), f in zip(runs, frozen):
-        if not f:
+        if not f or f[0]["condition"] != "irrelevant":
             continue
         v = next(v for v in records(run_dir) if v["id"] == f[0]["verdict"])
         z = v["levers"]["H1.z"]
@@ -356,9 +358,11 @@ def test_a_linear_lever_worth_twice_delta_is_retained_not_rejected_irrelevant(tm
     # the regression behind the #21 amendment: end to end the lever gains 0.2 = 2δ, but its √V_T is
     # 0.2/√12 ≈ 0.06 < δ, so the old form rejected it `irrelevant`; its range M_u is 0.2
     linear = (spec({"x": lever()}), '    term += -0.2 * lever("H1.x")')
-    runs = repeat(tmp_path, project_python, [linear])
+    runs = repeat(tmp_path, project_python, [linear], seeds=range(10))
     status = [bo(run_dir.parents[1], "status")[1]["hypotheses"][0]["status"] for run_dir, _ in runs]
-    assert status.count("retained") >= 2, status
+    # never rejected; retained within one round in 5 of 20 over seeds 0..19 (7 of 20 before the #21
+    # equivalence change reshuffled trial seeds), the rest still active; at 25%, none of 10 has probability ~6%
+    assert status.count("retained") >= 1, status
     for run_dir, _ in runs:
         assert not of_type(run_dir, "hypothesis_rejected")
         for v in records(run_dir):
