@@ -37,6 +37,9 @@ def ended_before_round_end(run_dir, r):
 
 
 def test_three_workers_run_trials_concurrently_and_keep_the_serial_rounds_invariants(tmp_path, project_python):
+    # a mechanics test: the premise (δ = 0.02 on a bowl with σ = 0.01 ends the round in a stall after
+    # some new incumbents) holds on every seed (test_rounds: 8 of 8 serial runs stall); landing order
+    # varies with timing, so seed 1 fixes only R0
     repo = make_repo(tmp_path)
     run_dir = init(repo, project_python, BASE + "delta: 0.02\nseed: 1\nworkers: 3\n")
     env = toy_env(sigma=0.01, sleep=0.3)
@@ -77,13 +80,14 @@ def test_three_workers_run_trials_concurrently_and_keep_the_serial_rounds_invari
 
 def test_trials_in_flight_are_charged_up_front_so_parallel_trials_never_overdraw_the_budget(tmp_path,
                                                                                           project_python):
-    # R0, smoke H1 and its equivalence check: 5 trials of ~1.04 s, so ~2.6 s remain for R1's five seeds.
-    # Two fit; a third would start while two are in flight, each estimated at ~1.04 s
+    # R0, smoke H1 and its equivalence check: 5 trials of ~2.05 s, so ~5.1 s (2.5 trials) remain for R1's
+    # five seeds. Two fit; a third would start while two are in flight, each estimated at ~2.05 s (half a
+    # trial of margin either way, so a loaded machine's slower trials don't change the count)
     repo = make_repo(tmp_path)
     seeds = ", ".join(f"{{H1.x: {x}, H1.y: 0.3}}" for x in (0.1, 0.3, 0.5, 0.7, 0.9))
-    run_dir = init(repo, project_python, "budget_s: 7.8\nreference_fidelity: {epochs: 4}\ndeterministic: true\n"
+    run_dir = init(repo, project_python, "budget_s: 15.4\nreference_fidelity: {epochs: 4}\ndeterministic: true\n"
                    f"delta: 0.02\nworkers: 3\nseeds: [{seeds}]\n")
-    env = toy_env(sleep=1.0)
+    env = toy_env(sleep=2.0)
     coded(repo, run_dir, tmp_path, env=env)
     assert len(of_type(run_dir, "trial_started")) == 5
     code, out = round_run(repo, "--rationale", "search", env=env)
@@ -92,16 +96,24 @@ def test_trials_in_flight_are_charged_up_front_so_parallel_trials_never_overdraw
     trials = started_in(run_dir, 1)
     assert [t["kind"] for t in trials] == ["seed", "seed"]
     assert max(len(others) for _, others in flights(run_dir, 1)) == 1  # the two ran side by side
-    [refused] = of_type(run_dir, "trial_refused")
-    assert refused["kind"] == "seed" and refused["estimated_cost_s"] > refused["remaining_s"] > 0
-    # the two in flight when the third was refused finished and were recorded in the round
+    # the third waited for the two in flight to land (an estimate is not a charge): only the ledger then
+    # refused it, and the round and the run ended on the budget
+    evs = events(run_dir)
+    [refused] = [e for e in evs if e["type"] == "trial_refused"]
+    landed = [e["seq"] for e in evs if e["type"] in ENDS and e["payload"]["trial"] in {t["trial"] for t in trials}]
+    assert len(landed) == 2 and max(landed) < refused["seq"]
+    p = refused["payload"]
+    assert p["kind"] == "seed" and p["estimated_cost_s"] > p["remaining_s"] > 0
+    assert p["remaining_s"] == pytest.approx(15.4 - sum(e["payload"]["wall_clock_s"] for e in evs
+                                                       if e["type"] in ENDS and e["seq"] < refused["seq"]))
     assert ended_before_round_end(run_dir, 1) and all(t["status"] == "finished" for t in trials)
-    assert out["budget"]["spent_s"] <= 7.8
+    assert out["budget"]["spent_s"] <= 15.4
 
 
 def test_a_search_space_change_ends_a_parallel_round_once_the_trials_in_flight_are_recorded(tmp_path,
                                                                                           project_python):
-    # δ out of reach: the bowl is `irrelevant` next to it; its confirmed reject ends the round
+    # δ out of reach: the bowl is `irrelevant` next to it; its confirmed reject ends the round (a mechanics
+    # test: with δ = 10 against a range of ~2 the reject is certain on any seed)
     repo = make_repo(tmp_path)
     run_dir = init(repo, project_python, BASE + "delta: 10\nseed: 3\nworkers: 3\n")
     env = toy_env(sigma=0.01, sleep=0.2)

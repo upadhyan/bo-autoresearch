@@ -731,3 +731,10 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   replicates. A crash leaves every in-flight trial running with a dead pid: recovery abandons and killpgs each (no
   change); a main-thread exception killpgs the in-flight runners. Timing makes parallel runs non-replayable (the log
   still rebuilds every file). workers: 1 takes the same path with at most one trial in flight (same events).
+- workers (review): the in-flight estimate never ends the run: `launch` (in `_run_round`) checks `_headroom` first, and while
+  trials are in flight and the next would not fit, it lands one and asks again; only the ledger (nothing in flight) refuses,
+  so budget_spent means spent. A worker error in a landing (also during the budget/ceiling end) goes through
+  `_abort_round` (killpg the in-flight runners, round_ended failed). Kept: confirmations owed by a trial that landed after
+  a round-ending trigger are not carried to the next round (the stall window and owed list restart per round; serial
+  rounds already dropped them on a cap); an unknown cost (0) charges nothing, so a round at a never-measured fidelity could
+  start `workers` trials uncharged (R1+ fidelities are always measured by R0 or ladder calibration).

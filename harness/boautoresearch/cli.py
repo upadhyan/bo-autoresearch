@@ -331,8 +331,7 @@ def _start(run_dir: Path, con, a, kind: str, levers: dict, fidelity: dict, workt
             _regenerate(run_dir, con)
             raise ProhibitedRefused(f"a {kind} trial at {json.dumps(levers, sort_keys=True)} breaks prohibited "
                                     f"directive {d['id']} ({d['predicate']}): it never runs")
-        remaining = _remaining(st) - _in_flight(st)
-        estimate = _cost(st["trials"], fidelity)
+        remaining, estimate = _headroom(st, fidelity)
         if run["max_trials"] is not None and n > run["max_trials"]:
             elog.append(con, "trial_refused", "harness", {"kind": kind, "fidelity": fidelity,
                                                           "max_trials": run["max_trials"], **extra})
@@ -368,6 +367,11 @@ def _outcome(run_dir: Path, con, trial: dict, outcome: dict) -> dict:
 def _in_flight(st: dict) -> float:
     """The estimated cost of the trials still running (0 when trials run one at a time)."""
     return sum(_cost(st["trials"], t["fidelity"]) for t in st["trials"] if t["status"] == "running")
+
+
+def _headroom(st: dict, fidelity: dict) -> tuple[float, float]:
+    """(the budget remaining once the trials in flight are paid, a trial's estimated cost at `fidelity`)."""
+    return _remaining(st) - _in_flight(st), _cost(st["trials"], fidelity)
 
 
 def _mask(st: dict, sampled: dict) -> tuple[dict, dict]:
@@ -1660,19 +1664,27 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
     flight: dict = {}  # future -> (the started trial, its sampler ask or None)
     runners: dict = {}  # trial -> runner pid: a failing round kills the runners still in flight
 
-    def launch(kind: str, levers: dict, asked=None, **extra) -> None:
-        """Start a trial (its gates may refuse it) in a worker; with every worker busy, land one."""
+    def launch(kind: str, levers: dict, asked=None, **extra) -> bool:
+        """Start a trial (its gates may refuse it) in a worker; with every worker busy, land one.
+        False, and nothing started, while it fits the budget only if the trials in flight cost less
+        than estimated: one of them lands first (an estimate is not a charge; the ledger refuses)."""
+        remaining, estimate = _headroom(elog.load(con), fidelity)
+        if flight and (remaining <= 0 or estimate > remaining):
+            land()
+            return False
         trial = _start(run_dir, con, None, kind, levers, fidelity, round=r, **extra)
         flight[pool.submit(_run_trial, run_dir, run["runner"], trial, run_dir / "worktree", runners)] = (trial, asked)
         if len(flight) >= workers:
             land()
+        return True
 
     def land(every: bool = False) -> None:
         """Log the in-flight trials that finished (in trial order): at least one, or every one."""
         done, _ = futures.wait(flight, return_when=futures.ALL_COMPLETED if every else futures.FIRST_COMPLETED)
         for f in sorted(done, key=lambda f: flight[f][0]["trial"]):
+            outcome = f.result()  # (a worker's error leaves its trial in flight, for the kill below)
             trial, asked = flight.pop(f)
-            t = _outcome(run_dir, con, trial, f.result())
+            t = _outcome(run_dir, con, trial, outcome)
             if asked is not None:
                 study.tell(asked, t)
             elif t["status"] == "finished":
@@ -1703,7 +1715,8 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
                 elog.append(con, "agent_trial_skipped", "harness",
                             {"round": r, "kind": kind, "config": cfg, "reason": why, **extra})
                 continue
-            launch(kind, {**baseline, **cfg}, **extra)
+            while not launch(kind, {**baseline, **cfg}, **extra):
+                pass
         while trigger is None:
             st = elog.load(con)
             inc = best(st["trials"])
@@ -1761,13 +1774,14 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
                     land()
                     continue
                 try:
-                    launch("sampler", {**baseline, **asked.params}, asked=asked)
+                    started = launch("sampler", {**baseline, **asked.params}, asked=asked)
                 except ProhibitedRefused:  # a point between the grid registration checked
-                    refusals += 1
+                    started, refusals = False, refusals + 1
                     # ponytail: ends the round after 10 refused asks (the sampler learns nothing from
                     # a FAIL); reparameterise the region into a box if a hypothesis keeps hitting it
                     if refusals >= 10:
                         trigger = "prohibited"
+                if not started:
                     study.tell(asked, {"status": "refused"})
         land(every=True)  # any other trigger: the trials in flight finish and are recorded in this round
         st = elog.load(con)
@@ -1776,23 +1790,20 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
         if fidelity != ref and inc and not st["run_ended"]:  # a stopped run runs no more trials
             drift = _drift_check(run_dir, con, r, inc, eligible, sign)
     except TrialRefused as e:
-        if flight:  # the trials already running finish and are recorded
-            land(every=True)
-            inc = best(elog.load(con)["trials"])
+        try:
+            if flight:  # (the trial ceiling) the trials already running finish and are recorded
+                land(every=True)
+                inc = best(elog.load(con)["trials"])
+        except BaseException:
+            _abort_round(run_dir, con, r, inc, [runners[tr["trial"]] for tr, _ in flight.values()
+                                                if tr["trial"] in runners])
+            raise
         _finalise_rejects(con, r, None)
         return {**_end_run(run_dir, con, {"round": r, "trigger": e.reason, "incumbent": inc}),
                 "verdicts": _round_verdicts(elog.load(con), r)}
     except BaseException:
-        # ponytail: a runner spawned in the instant between its submit and its pid landing in
-        # `runners` escapes the kill; this process then waits for it at exit, and recovery abandons it
-        for tr, _ in flight.values():
-            if tr["trial"] in runners:
-                try:
-                    os.killpg(runners[tr["trial"]], signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
-        elog.append(con, "round_ended", "harness", {"round": r, "trigger": "failed", "incumbent": inc})
-        _regenerate(run_dir, con)
+        _abort_round(run_dir, con, r, inc, [runners[tr["trial"]] for tr, _ in flight.values()
+                                            if tr["trial"] in runners])
         raise
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
@@ -1809,6 +1820,21 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
     st = elog.load(con)
     return {"round": r, "trigger": trigger, "incumbent": inc, "drift": drift, "noise_estimate": noise,
             "verdicts": _round_verdicts(st, r), **_status(st)}
+
+
+def _abort_round(run_dir: Path, con, r: int, inc: dict | None, runners: list[int]) -> None:
+    """A round failing with trials in flight: their runners are killed (their trials stay running
+    until recovery abandons them, as a crash leaves them), and the round ends `failed`."""
+    # ponytail: a runner spawned in the instant between its submit and its pid landing in `runners`
+    # escapes the kill (this process then waits for it at exit, and recovery abandons it); register
+    # the pid under a lock with an abort flag if that ever bites
+    for pid in runners:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    elog.append(con, "round_ended", "harness", {"round": r, "trigger": "failed", "incumbent": inc})
+    _regenerate(run_dir, con)
 
 
 def _eligibility(st: dict, space: dict, baseline: dict, fidelity: dict):
@@ -2216,7 +2242,7 @@ def _run_trial(run_dir: Path, runner: str, trial: dict, worktree: Path, runners:
                              cwd=worktree, env=env, stdout=out, stderr=err)
         if runners is not None:
             runners[trial["trial"]] = p.pid
-        beat =threading.Thread(target=heartbeat, args=(p.pid,), daemon=True)
+        beat = threading.Thread(target=heartbeat, args=(p.pid,), daemon=True)
         beat.start()
         try:
             _, status, usage = os.wait4(p.pid, 0)  # per-child rusage gives this trial's peak memory
