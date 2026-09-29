@@ -144,25 +144,39 @@ def _written(prog: str, args: list[str]) -> list[str]:
     return []
 
 
-RAW_NAMES = ("log.db", "log.db-wal", "artifacts")  # what a glob's last part must not be able to match
+def raw_paths(bo: Path) -> list[str]:
+    """What the orchestrator must not read: each run's directory, log and artifacts (with a trial
+    directory standing in before the first trial) and every file under them."""
+    out = [str(bo)]
+    for run in (d for d in bo.iterdir() if d.is_dir()) if bo.is_dir() else ():
+        a = run / "artifacts"
+        out += [str(run), str(a), str(a / "trial-0"), *(str(run / n) for n in ("log.db", "log.db-wal", "log.db-shm"))]
+        out += [os.path.join(d, f) for d, ds, fs in os.walk(a) for f in ds + fs]
+    return out
 
 
-def raw_glob(word: str) -> bool:
-    """A glob (brace, variable and command expansions counted as wildcards) whose last path part
-    could match a run's log.db or its artifacts directory. A lone `$VAR` is no glob: Bash calls
-    share no variables, so one naming the log was set in the same command, in plain sight."""
-    if re.fullmatch(r"\$\w+|\$\{\w+\}", word.rstrip("/").rsplit("/", 1)[-1]):
+def raw_glob(word: str, cwd: Path, raw: list[str]) -> bool:
+    """A glob that could match a raw path, from `cwd`: brace and variable expansions count as `*`,
+    and `*` crosses `/` (as `**` does). A lone `$VAR` is no glob: Bash calls share no variables and
+    the orchestrator's compute none (COMPUTED), so one naming the log was set in plain sight."""
+    if re.fullmatch(r"\$\w+|\$\{\w+\}", word):
         return False
-    pat = re.sub(r"\{[^{}]*\}|\$\{[^}]*\}|\$\w+|\$\(.*?\)|`.*?`", "*", word)
-    last = pat.rstrip("/").rsplit("/", 1)[-1]
-    return bool(re.search(r"[*?[]", pat)) and any(fnmatch.fnmatchcase(n, last) for n in RAW_NAMES)
+    pat = re.sub(r"\{[^{}]*\}|\$\{[^}]*\}|\$\w+", "*", os.path.expanduser(word))
+    if not re.search(r"[*?[]", pat):
+        return False
+    pat = pat if pat.startswith(("/", "*")) else os.path.join(os.path.realpath(cwd), pat)  # a leading $VAR may be absolute
+    return any(fnmatch.fnmatchcase(p, os.path.normpath(pat)) for p in raw)
 
 
-def names_raw(text: str) -> bool:
+def names_raw(text: str, cwd: Path, raw: list[str]) -> bool:
     """Text naming a run's raw logs, or holding a glob that could match them: shell and inline code
     alike, so no parser has to follow what runs it."""
     return bool(re.search(r"log\.db|artifacts/trial-", text)) or any(
-        raw_glob(w) for w in re.split(r"[\s'\"<>|&;()=:]+", text))
+        raw_glob(w, cwd, raw) for w in re.split(r"[\s'\"<>|&;()=:]+", text) if w)
+
+
+COMPUTED = ("the orchestrator's Bash computes no words at run time (no $(..), backticks, $'..' or <(..)): "
+            "write paths out in plain sight, and read the run through probes")
 
 
 RAW_READ = ("the orchestrator reads the run through probes (`boautoresearch status|summary|trials|verdict`) "
@@ -181,10 +195,13 @@ def bash_refusal(cmd: str, cwd: Path, agent: str, bo: Path, probes: set[str], wr
     except ValueError as e:
         return f"the command can't be parsed ({e}): run it in a simpler form"
     r = role(agent)
+    raw = raw_paths(bo) if r == "orchestrator" else []
+    if r == "orchestrator" and re.search(r"\$\(|`|\$'|[<>]\(", _command_text(cmd)):
+        return COMPUTED
     # fail closed: a command that isn't only harness calls (and `cd`) names no raw log anywhere (its
     # words with the quoting undone, inline code, a heredoc it's fed), nor a glob that could match one
-    if r == "orchestrator" and ("`" in cmd or any(_program(w)[0] not in ("boautoresearch", "cd") for w, _ in segs)) and (
-            names_raw(cmd) or any(names_raw(t) for t in toks)):
+    if r == "orchestrator" and any(_program(w)[0] not in ("boautoresearch", "cd") for w, _ in segs) and (
+            names_raw(cmd, cwd, raw) or any(names_raw(t, cwd, raw) for t in toks)):
         return RAW_READ
     for words, targets in segs:
         prog, args = _program(words)
@@ -221,7 +238,7 @@ def bash_refusal(cmd: str, cwd: Path, agent: str, bo: Path, probes: set[str], wr
             return ("leave out --agent-id and --actor: the hook adds a subagent's own (the orchestrator "
                     "records as itself), so no one records in another agent's name")
         if r == "orchestrator" and prog != "boautoresearch" and any(
-                raw_read(resolve(cwd, w), bo) for w in args + targets):
+                raw_read(resolve(cwd, w), bo) or raw_glob(w, cwd, raw) for w in args + targets):
             return RAW_READ
     return None
 

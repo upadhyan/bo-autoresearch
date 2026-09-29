@@ -212,16 +212,16 @@ def _config_reads(tree: ast.AST) -> Counter:
     return sites
 
 
-DYNAMIC = {"__import__", "import_module", "exec", "eval"}  # load a module named at run time (not `.eval()`)
-IMPORTERS = {"importlib", "runpy", "pkgutil", "imp"}
+LOADERS = {"__import__", "import_module", "run_module", "run_path", "exec_module", "load_module"}  # by attribute too
+BUILTIN_LOADERS = {"__import__", "exec", "eval", "modules"}  # bare, or on builtins/sys (not a model's `.eval()`)
 
 
 def harness_imports(source: str, path: str) -> Counter:
     """Every site through which a module imports or could load boautoresearch: its static imports
-    (`boautoresearch`, `boautoresearch.lever`, ...), a string naming it, and each dynamic importer
-    (a name built at run time is invisible, so the importer itself counts)."""
-    # ponytail: a denylist of the usual routes; a determined author can still reach it (getattr on
-    # builtins, a .pth file). The verification runs the branch either way.
+    (`boautoresearch`, `boautoresearch.lever`, ...), a string naming it, and each dynamic loader
+    (a module name built at run time is invisible, so the loader itself counts)."""
+    # ponytail: a denylist of the usual routes; a subprocess or a .pth file still reaches it. Upgrade
+    # path: run the distilled replicates under a runner that imports the harness in another process.
     try:
         tree = ast.parse(source, path)
     except SyntaxError as e:
@@ -229,13 +229,16 @@ def harness_imports(source: str, path: str) -> Counter:
     out: Counter = Counter()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            out.update(a.name for a in node.names if a.name.split(".")[0] in {"boautoresearch"} | IMPORTERS)
-        elif isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] in {"boautoresearch"} | IMPORTERS:
-            out.update(f"{node.module}.{a.name}" for a in node.names)
-        elif isinstance(node, ast.Name) and node.id in DYNAMIC:
+            out.update(a.name for a in node.names if a.name.split(".")[0] in ("boautoresearch", "builtins"))
+        elif isinstance(node, ast.ImportFrom):
+            harness = (node.module or "").split(".")[0] == "boautoresearch"
+            out.update(f"{node.module}.{a.name}" for a in node.names
+                       if harness or a.name in LOADERS | BUILTIN_LOADERS)
+        elif isinstance(node, ast.Name) and node.id in BUILTIN_LOADERS - {"modules"}:
             out[f"{node.id}()"] += 1
-        elif isinstance(node, ast.Attribute) and node.attr in ("__import__", "import_module"):
-            out[f"{node.attr}()"] += 1
+        elif isinstance(node, ast.Attribute) and (node.attr in LOADERS or node.attr in BUILTIN_LOADERS and (
+                isinstance(node.value, ast.Name) and node.value.id in ("builtins", "__builtins__", "sys"))):
+            out[f".{node.attr}"] += 1
         elif isinstance(node, ast.Constant) and isinstance(node.value, str) and re.search(r"\bboautoresearch\b", node.value):
             out[repr(node.value)] += 1
     return out

@@ -692,24 +692,16 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   reject as undecided. `sensitivity` adds m_u. `_kernel` accumulates per lever (no (n, m, D) array). Measured: 1 flat lever,
   σ = δ/2: reject at 30 fresh 6/6 before and after; 3 flat levers, σ = δ: before 6/6 at 45, after 4/6 at 45, 1 at 75, 1 still
   active at 70 (the sup statistics' power cost).
-- #34 follow-up (orchestrator raw reads by name): `check bash` refuses the orchestrator any command that isn't only
-  `boautoresearch` calls (and `cd`; a backtick anywhere counts as not-only) whose text names `log.db` or
-  `artifacts/trial-`, or holds a glob whose LAST path part could match `log.db`, `log.db-wal` or `artifacts` (braces,
-  `${..}`, `$(..)`, backticks and a var glued to other text count as `*`; a lone `$VAR` doesn't: Bash calls share no
-  variables). Scanned: the raw text (so inline code and a heredoc body fed to a non-harness program count) and the
-  shlex words (quote tricks like `l''og.db` undone). Chosen over parsing `python -c`/`xargs`/`find`: names are the
-  one thing every route must carry. False positives accepted for the orchestrator only (whose lane is `BO`):
-  `ls *`, `cat *.db`, a user file named log.db. Residual: names built at run time inside code (`'lo'+'g.db'`), a
-  script file outside the repo, recursive reads from above the run dir that name nothing (`grep -r x .`).
-- #34 follow-up (orchestrator globs): `check read` also refuses the orchestrator a path that is a glob (a wildcard
-  anywhere, same expansion rules as above) whose last part could match `log.db`/`log.db-wal`/`artifacts` — so Glob
-  `**/log.db` or Grep glob `**/log*` from the repo root, which never resolve under the run dir. `**/*.py` stays allowed;
-  `**/*` and a Grep glob of `*` are refused. Residual: a recursive glob naming a file INSIDE artifacts by its own name
-  (`**/trial-*/note.txt`) lists it; the Read of that path is still refused by resolved path.
-- #37 follow-up (distilled branch, dynamic imports): `hypotheses.harness_imports` now returns a Counter of sites —
-  static imports of boautoresearch or an importer module (importlib, runpy, pkgutil, imp), `__import__`/`import_module`
-  (name or attribute), bare `exec`/`eval` names (not `.eval()`), and any str constant matching `\bboautoresearch\b`
-  (so a docstring naming it counts too). `_distill_allowed` refuses sites added against the base (Counter difference:
-  one more importlib call than the base had counts). Chosen over verifying with the harness unimportable: the
-  harness-supplied runner imports boautoresearch in the same process, so it is always importable there.
-  Residual: getattr on builtins, a .pth file, a name smuggled through data files.
+- #34 follow-up (orchestrator raw reads, no parser): the orchestrator's Bash may compute no words (`$(`, backticks,
+  `$'`, `<(`/`>(` outside a trailing heredoc → `checks.COMPUTED`); a command not only `boautoresearch`/`cd` may not
+  name `log.db`/`artifacts/trial-` in its raw text (inline code, heredoc bodies) or its shlex words; and every word,
+  in Bash or as a Read/Grep/Glob path, is refused if as a glob (braces, `$VAR` glued to text → `*`; `*` crosses `/`)
+  resolved from its cwd it fnmatches a `checks.raw_paths` entry (bo dir, run dirs, log.db*, artifacts, a stand-in
+  trial-0, every file under artifacts). Names over parsing: every route must carry one. Known false positives
+  (orchestrator only): a lone `*` word (`ls *`, `-m '* fix'`), a user file named log.db. Residual: names built in code
+  (`'lo'+'g.db'`), a script file outside the repo, recursive reads naming nothing (`grep -r x .`).
+- #37 follow-up (distilled branch, dynamic loads): `harness_imports` returns a Counter of sites (static harness imports,
+  `import builtins`, loaders `__import__`/`import_module`/`run_module`/`run_path`/`exec_module`/`load_module`, bare
+  `exec`/`eval`, `builtins|sys.<exec|eval|modules|__import__>`, any str matching `\bboautoresearch\b`); refused when
+  added against the base (Counter difference). Not "verify with the harness unimportable": the harness runner imports
+  it in-process. Residual: a subprocess, a .pth file.

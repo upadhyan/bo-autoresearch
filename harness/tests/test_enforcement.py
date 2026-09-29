@@ -145,7 +145,14 @@ BASH_CASES = [
      False, "another agent's name"),
     # the orchestrator's raw reads through forms no parser follows: named, globbed or fed as stdin
     ("orchestrator", "REPO", "python -c \"import sqlite3; sqlite3.connect('.bo-research/r/log.db')\"", False, "probes"),
-    ("orchestrator", "REPO", "cat $(find . -name log.db)", False, "probes"),
+    ("orchestrator", "REPO", "cat $(find . -name log.db)", False, "plain sight"),
+    ("orchestrator", "REPO", "cd \"$(sqlite3 RUN/log.db .dump >&2)\"", False, "plain sight"),
+    ("orchestrator", "REPO", "boautoresearch status --x \"$(cat RUN/l*.db >&2)\"", False, "plain sight"),
+    ("orchestrator", "REPO", "sqlite3 $'RUN/lo\\x67.db'", False, "plain sight"),
+    ("orchestrator", "REPO", "cat .bo-research/*/a*/*", False, "probes"),
+    ("orchestrator", "REPO", "a=RUN/lo; b=g.db; cat $a$b", False, "probes"),
+    ("orchestrator", "REPO", "cd RUN && cat l*", False, "probes"),
+    ("orchestrator", "REPO", "ls src/* docs/*.md && echo $HOME", True, None),
     ("orchestrator", "REPO", "cat **/log*", False, "probes"),
     ("orchestrator", "REPO", "find . -name '*.db' | xargs cat", False, "probes"),
     ("orchestrator", "REPO", "cat .bo-research/*/{log,x}.db", False, "probes"),
@@ -358,7 +365,8 @@ def test_the_adapter_blocks_the_orchestrators_globs_that_could_match_the_raw_log
         code, _, err = hook(repo, "PreToolUse", tool_name=tool, tool_input=ti)
         assert code == 2 and "probes" in err, (tool, ti)
     assert [b["check"] for b in blocks(guarded)] == ["read"] * 4
-    for tool, ti in [("Glob", {"pattern": "**/*.py"}), ("Grep", {"pattern": "log.db", "glob": "*.py"})]:
+    for tool, ti in [("Glob", {"pattern": "**/*.py"}), ("Glob", {"pattern": "src/**"}),
+                     ("Grep", {"pattern": "log.db", "glob": "*.py"})]:
         assert hook(repo, "PreToolUse", tool_name=tool, tool_input=ti)[0] == 0, (tool, ti)
     assert hook(repo, "PreToolUse", tool_name="Glob", agent_type="boautoresearch:lever-coder", agent_id="c1",
                 tool_input={"pattern": "**/log.db"})[0] == 0  # only the orchestrator is kept off the raw log
