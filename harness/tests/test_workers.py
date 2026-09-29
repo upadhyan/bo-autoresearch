@@ -112,7 +112,7 @@ def test_trials_in_flight_are_charged_up_front_so_parallel_trials_never_overdraw
 
 def test_a_search_space_change_ends_a_parallel_round_once_the_trials_in_flight_are_recorded(tmp_path,
                                                                                           project_python):
-    # δ out of reach: the bowl is `irrelevant` next to it; its confirmed reject ends the round (a mechanics
+    # δ out of reach: the bowl is rejectable next to it (Δ's bound is far below δ); its confirmed reject ends the round (a mechanics
     # test: with δ = 10 against a range of ~2 the reject is certain on any seed)
     repo = make_repo(tmp_path)
     run_dir = init(repo, project_python, BASE + "delta: 10\nseed: 3\nworkers: 3\n")

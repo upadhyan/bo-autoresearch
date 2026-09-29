@@ -1329,32 +1329,67 @@ def cmd_commit_change(a) -> dict:
 FREEZE_FILE = "requirements-freeze.txt"  # the run venv's exact freeze, committed in the worktree
 
 
+def _lock_command(worktree: Path, python: Path, requirement: str) -> tuple[str, list[str]] | None:
+    """The project's own lock file and the command that adds `requirement` to it (and to
+    pyproject.toml) without installing anything; None when the project locks with neither uv nor poetry."""
+    if (worktree / "uv.lock").exists():
+        return "uv.lock", ["uv", "add", "-q", "--no-sync", "--python", str(python), requirement]
+    if (worktree / "poetry.lock").exists():
+        return "poetry.lock", ["poetry", "add", "--lock", requirement]
+    return None
+
+
 def cmd_add_dependency(a) -> dict:
-    """A new requirement, installed into the run venv only (never the user's environment); the
-    venv's updated freeze is committed."""
+    """A new requirement, installed into the run venv only (never the user's environment). A uv or
+    poetry project's pyproject.toml and lock file are updated (the tool only locks: the harness
+    installs); any other project commits the venv's freeze instead."""
     run_dir, con = _open_run()
     st, worktree = elog.load(con), run_dir / "worktree"
     if not a.requirement.strip() or a.requirement.startswith("-"):
         raise Refused("add-dependency takes one requirement (a name, specifier, path or URL), not options")
     if _git(worktree, "status", "--porcelain"):
         raise Refused("the worktree has uncommitted changes: commit them with commit-change first")
-    _change_allowed(run_dir, st, [FREEZE_FILE])
     python = run_dir / "venv" / "bin" / "python"
+    # a local path is the caller's: the lock tool runs in the worktree
+    local = os.sep in a.requirement and Path(a.requirement).exists()
+    req = str(Path(a.requirement).resolve()) if local else a.requirement
+    lock_file, lock_cmd = _lock_command(worktree, python, req) or (FREEZE_FILE, None)
+    _change_allowed(run_dir, st, [FREEZE_FILE] if lock_cmd is None else ["pyproject.toml", lock_file])
+
+    def restore() -> None:  # the tree was clean: as it was
+        _git(worktree, "checkout", "--", ".")
+        _git(worktree, "clean", "-fdq")
+    if lock_cmd:  # first, so a failed resolution installs nothing
+        try:
+            p = subprocess.run(lock_cmd, cwd=worktree, capture_output=True, text=True)
+        except FileNotFoundError:
+            raise Refused(f"the project locks with {lock_file}, but {lock_cmd[0]} is not on PATH")
+        if p.returncode:
+            restore()
+            raise Refused(f"adding {a.requirement} to {lock_file} failed: {(p.stderr or p.stdout).strip()}")
+        try:  # whatever the tool wrote, not only what it was expected to
+            _change_allowed(run_dir, st, _changed_paths(worktree, _worktree_tree(worktree)))
+        except Refused:
+            restore()
+            raise
     uv = shutil.which("uv")
-    cmd = ([uv, "pip", "install", "-q", "--python", str(python), a.requirement] if uv else
-           [str(python), "-m", "pip", "install", "-q", "--disable-pip-version-check", a.requirement])
+    cmd = ([uv, "pip", "install", "-q", "--python", str(python), req] if uv else
+           [str(python), "-m", "pip", "install", "-q", "--disable-pip-version-check", req])
     p = subprocess.run(cmd, capture_output=True, text=True)
     if p.returncode:  # ponytail: trusts the installer to leave the venv as it was on failure
+        restore()
         raise Refused(f"installing {a.requirement} into the run venv failed: {p.stderr.strip()}")
-    # ponytail: writes its own freeze file, not the project's lock file (uv.lock, poetry.lock);
-    # update that one when a project needs it
+    # ponytail: installs the requirement on its own, so the venv may resolve versions other than the
+    # lock's (the run venv comes from the user's environment's freeze, not the lock); install from
+    # the lock (`uv export`, `poetry export`) if the two drift apart
     freeze = [r for r in _freeze(str(python)) if re.split(r"[=<>@ ]", r)[0].lower() != "boautoresearch"]
-    (worktree / FREEZE_FILE).write_text("".join(f"{r}\n" for r in freeze))
+    if lock_cmd is None:
+        (worktree / FREEZE_FILE).write_text("".join(f"{r}\n" for r in freeze))
     if not _git(worktree, "status", "--porcelain"):
         raise Refused(f"{a.requirement} is already in the run venv: nothing changed")
     sha = _commit(worktree, f"add-dependency: {a.requirement}")
     elog.append(con, "dependency_added", a.actor, {"rationale": a.rationale, "requirement": a.requirement,
-                                                   "commit": sha, "freeze": freeze})
+                                                   "commit": sha, "freeze": freeze, "lock_file": lock_file})
     return {"requirement": a.requirement, "commit": sha,
             **_after_change(run_dir, con, sha, "dependency_added")}
 
@@ -1521,25 +1556,53 @@ def _new_epoch(run_dir: Path, con, sha: str, change: str, breaking: bool) -> dic
     """Earlier trials become telemetry; σ is re-estimated from baseline replicates in the new epoch
     (burn-in restarts, since only this epoch's trials are eligible)."""
     st = elog.load(con)
-    run, fidelity, baseline = st["run"], st["fidelity"]["fidelity"], _baseline(run_dir)
+    fidelity = st["fidelity"]["fidelity"]
     payload = {"epoch": st["epoch"]["epoch"] + 1, "round": max(st["rounds"]) + 1, "commit": sha,
                "change": change, "breaking": breaking}
     elog.append(con, "epoch_started", "harness", payload)
-    # ponytail: re-measures σ at the current fidelity only; other rungs (and the ladder calibration)
-    # keep the earlier epoch's until a code change's effect on them needs re-measuring too
-    done = []
+    # σ at once only at the fidelity the run searches; every other rung when it is next used
+    # (_remeasure_stale), and the ladder calibration is stale (_ladder_stale)
+    try:
+        _measure_sigma(run_dir, con, fidelity)
+    except TrialRefused:
+        pass  # σ stays unmeasured in this epoch (None); the budget ends the run
+    return payload
+
+
+def _measure_sigma(run_dir: Path, con, fidelity: dict) -> None:
+    """σ at this fidelity in the current epoch, from k baseline replicates (1 for a deterministic
+    objective: the epoch's baseline mean). Logged even when the budget refuses a replicate, then
+    the refusal is raised."""
+    st = elog.load(con)
+    run, done, refused = st["run"], [], None
     try:
         for _ in range(1 if run["deterministic"] else run["replicates_k"]):
-            done.append(_trial(run_dir, con, None, "baseline", baseline, fidelity))
-    except TrialRefused:
-        pass  # σ stays unmeasured in this epoch (None below); the budget ends the run
+            done.append(_trial(run_dir, con, None, "baseline", _baseline(run_dir), fidelity))
+    except TrialRefused as e:
+        refused = e
     ys = [t["objective"] for t in done if t["status"] == "finished"]
     sigma = 0.0 if run["deterministic"] else calibration.sigma(ys) if len(ys) >= 2 else None
     elog.append(con, "noise_estimate", "harness", {
-        "epoch": payload["epoch"], "fidelity": fidelity, "sigma": sigma, "n": len(ys),
+        "epoch": st["epoch"]["epoch"], "fidelity": fidelity, "sigma": sigma, "n": len(ys),
         "trials": [t["trial"] for t in done], "mean": statistics.fmean(ys) if ys else None,
         "previous_sigma": _sigma(st, fidelity)})
-    return payload
+    if refused:
+        raise refused
+
+
+def _remeasure_stale(run_dir: Path, con, fidelities: list[dict]) -> None:
+    """σ at each of these fidelities that the current epoch has not tried to measure yet (once: a
+    measurement whose replicates failed is not retried every round)."""
+    st = elog.load(con)
+    tried = [b["fidelity"] for b in st["baselines"] if b["epoch"] == st["epoch"]["epoch"]]
+    for f in dict.fromkeys(json.dumps(f, sort_keys=True) for f in fidelities):
+        if json.loads(f) not in tried:
+            _measure_sigma(run_dir, con, json.loads(f))
+
+
+def _ladder_stale(st: dict) -> bool:
+    """The ladder was calibrated in an earlier epoch: its rung validations no longer count."""
+    return bool(st["calibration"]) and st["calibration"].get("epoch", 0) != st["epoch"]["epoch"]
 
 
 def _workspace(run_dir: Path, st: dict) -> dict[str, str]:
@@ -1630,7 +1693,7 @@ def cmd_round_run(a) -> dict:
     waits = {"calibration"} | ({"delta", "expected"} if st["delta"] is None else set())
     if "calibration" in failing and set(failing) <= waits:
         try:
-            _calibrate_ladder(run_dir, con, st["noise"], _space(_selected(st)))
+            _calibrate_ladder(run_dir, con, _space(_selected(st)))
         except TrialRefused as e:
             # R0 itself has ended: only the run ends
             return _end_run(run_dir, con, {"round": 0, "trigger": e.reason}, log_round=False)
@@ -1640,7 +1703,14 @@ def cmd_round_run(a) -> dict:
         failing = _gate(run_dir, st)  # the chosen rung's cost moves the dimension cap, so the selection too
     if failing:
         _refuse(_upcoming(st), failing)
-    return _run_round(run_dir, con, a, st)
+    # a rung the round uses (its fidelity, and the reference for a proxy's drift check) that the
+    # current epoch hasn't measured σ at gets its baseline replicates now, before the round starts
+    fid, ref = st["fidelity"]["fidelity"], st["run"]["reference_fidelity"]
+    try:
+        _remeasure_stale(run_dir, con, [fid, ref])
+    except TrialRefused as e:
+        return _end_run(run_dir, con, {"round": _upcoming(st), "trigger": e.reason}, log_round=False)
+    return _run_round(run_dir, con, a, elog.load(con))
 
 
 def _run_r0(run_dir: Path, con, a, st: dict) -> dict:
@@ -2127,13 +2197,16 @@ def _escalate(con, st: dict, r: int) -> None:
         elif up is not None:
             elog.append(con, "hypothesis_escalated", "harness", {
                 "id": h["id"], "round": r, "step": "rung", "fidelity": up,
-                "proxy": "reference" if up == ref else "validated"})
+                "proxy": "reference" if up == ref else "validated", "stale_ladder": _ladder_stale(st)})
 
 
 def _next_rung(st: dict) -> dict:
-    """The cheapest validated rung dearer than the current fidelity, else the reference."""
+    """The cheapest validated rung dearer than the current fidelity, else the reference. A ladder
+    calibrated in an earlier epoch validates nothing: the reference."""
+    # ponytail: a stale ladder escalates straight to the reference (no re-calibration: ~5 configs at
+    # every rung); re-calibrate here if reference-only escalation after a new epoch proves too dear
     fid, ref = st["fidelity"]["fidelity"], st["run"]["reference_fidelity"]
-    rungs = (st["calibration"] or {}).get("rungs", [])
+    rungs = [] if _ladder_stale(st) else (st["calibration"] or {}).get("rungs", [])
     cost = [(x["fidelity"], x["cost_s"]) for x in st["noise"]["rungs"]]
     here = next(c for f, c in cost if f == fid)
     passed = [x["fidelity"] for x in rungs if x.get("passed")]
@@ -2274,9 +2347,13 @@ def _estimate_noise(run_dir: Path, con, baseline: dict) -> None:
         "replication": any(r["sigma"] > 0 for r in rows), "rungs": rows})
 
 
-def _calibrate_ladder(run_dir: Path, con, noise: dict, space: dict) -> dict:
-    """Ladder calibration: ~5 diverse configs over the selected hypotheses' levers at every rung."""
+def _calibrate_ladder(run_dir: Path, con, space: dict) -> dict:
+    """Ladder calibration: ~5 diverse configs over the selected hypotheses' levers at every rung
+    (its spread test needs each rung's σ in the current epoch: an epoch started since R0 re-measures it)."""
     run = elog.load(con)["run"]
+    _remeasure_stale(run_dir, con, [run["reference_fidelity"], *run["ladder"]])
+    st = elog.load(con)
+    noise = st["noise"]
     # a quasi-random point can fall in a hole of a region that isn't box-shaped: it never runs
     cfgs = [c for c in calibration.configs(space, _baseline(run_dir), _rng(run, "calibration"))
             if not _prohibited(c, elog.load(con))]
@@ -2292,7 +2369,7 @@ def _calibrate_ladder(run_dir: Path, con, noise: dict, space: dict) -> dict:
         r["cost_s"] = _cost(trials, r["fidelity"])
     chosen, fallback = calibration.choose(rows[0], rows[1:])
     elog.append(con, "fidelity_calibration", "harness", {
-        "round": 0, "configs": cfgs, "reference": rows[0], "rungs": rows[1:],
+        "round": 0, "epoch": st["epoch"]["epoch"], "configs": cfgs, "reference": rows[0], "rungs": rows[1:],
         "chosen": chosen, "fallback": fallback})
     return elog.load(con)["calibration"]
 
@@ -2776,6 +2853,8 @@ def cmd_accept_proxy(a) -> dict:
         raise Refused(f"--fidelity must be JSON, e.g. '{{\"epochs\": 2}}': {e}")
     if not st["r0_complete"] or not st["calibration"]:
         raise Refused("accept-proxy needs a completed ladder calibration in R0")
+    if _ladder_stale(st):
+        raise Refused("the ladder was calibrated in an earlier epoch: its rung results no longer hold")
     rung = next((r for r in st["calibration"]["rungs"] if r["fidelity"] == fidelity), None)
     if rung is None:
         raise Refused(f"{a.fidelity} is not a rung of the ladder")

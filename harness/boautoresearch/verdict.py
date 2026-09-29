@@ -28,8 +28,11 @@ FIT_MAX_Z2, HOMOGENEITY_MAX, HOMOGENEITY_MIN_TRIALS = 2.0, 3.0, 8
 # signal-to-noise data and its posterior is certain the lever is flat (a gain of exactly δ, σ = 1.5δ:
 # rejected in 10 of 20 runs). So the signal sd is at least SIGNAL_DELTAS·δ and each lengthscale at
 # most the box's width (1) times signal sd / (SIGNAL_DELTAS·δ): the prior's slope along a lever never
-# drops below the floor's, however large the other levers make the signal. A lengthscale below LS_MIN
-# turns noise into wiggles whose max inflates Δ.
+# drops below the floor's, however large the other levers make the signal (the floor never goes below
+# 1e-3 standardised, which only matters when δ is tiny next to the objective's spread). A lengthscale
+# below LS_MIN turns noise into wiggles whose max inflates Δ. The price (#21 amendment): `irrelevant`
+# needs M_u's bound below δ across the other levers' box, so next to a curved partner whose box BO left
+# unexplored a flat lever is rejected `no-improvement`.
 SIGNAL_DELTAS, LS_MIN = 1.5, 0.1
 
 
@@ -105,7 +108,9 @@ class GP:
     def _parts(self, theta):
         D = self.X.shape[1]
         var = math.exp(theta[D])
-        # the cap as a clamp, not a bound: L-BFGS-B takes box bounds only
+        # ponytail: the cap as a clamp, not a bound (L-BFGS-B takes box bounds only), so the likelihood is
+        # flat in a lengthscale past it and a restart can stall there; reparametrise as the cap's
+        # fraction if fits misbehave
         return np.minimum(np.exp(theta[:D]), math.sqrt(var / self.sfloor)), var, math.exp(theta[D + 1])
 
     def _chol(self, theta):

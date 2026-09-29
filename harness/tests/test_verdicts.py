@@ -6,6 +6,8 @@ effect on the loss is the planted truth. δ = 0.1 and the toy's noise σ = 0.05 
 import json
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
+
 from conftest import bo, ready, round_run, register
 from test_rounds import BASE, init, make_repo, of_type, started_in, toy_env
 
@@ -78,6 +80,7 @@ def records(run_dir, h="H1.v1"):
     return [v for v in of_type(run_dir, "verdict") if v["hypothesis"] == h]
 
 
+@pytest.mark.slow
 def test_a_useless_lever_is_rejected_irrelevant_after_burn_in_and_a_confirming_check(tmp_path,
                                                                                   project_python):
     useless = (spec({"x": lever()}), '    term += 0 * lever("H1.x")')
@@ -115,6 +118,7 @@ FIELDS = {"id", "hypothesis", "round", "check", "group", "outcome", "condition",
           "burn_in", "confirmation", "fidelity", "proxy", "prediction", "frozen", "trials", "context"}
 
 
+@pytest.mark.slow
 def test_a_harmful_lever_is_rejected_no_improvement_and_its_records_hold_every_field(tmp_path, project_python):
     harmful = (spec({"x": lever()}), '    term += 2 * lever("H1.x")')
     runs = repeat(tmp_path, project_python, [harmful])
@@ -160,6 +164,7 @@ def test_no_verdict_before_burn_in(tmp_path, project_python):
     assert probe["burn_in"] == {"fresh": fresh, "needed": 20, "spacing": 10, "cap": 80} and fresh < 20
 
 
+@pytest.mark.slow
 def test_a_useful_lever_is_retained(tmp_path, project_python):
     useful = (spec({"x": lever(0.2)}), '    term += 4 * (lever("H1.x") - 0.7) ** 2')
     runs = repeat(tmp_path, project_python, [useful])
@@ -174,6 +179,7 @@ def test_a_useful_lever_is_retained(tmp_path, project_python):
                 assert v["prediction"] == {"flag": None, "contradicted": []}
 
 
+@pytest.mark.slow
 def test_a_contradicted_prediction_flags_a_retain_without_changing_it(tmp_path, project_python):
     # predicted lower, but the improving values lie above the baseline 0.2 (the optimum is 0.7)
     wrong = (spec({"x": lever(0.2, "lower")}), '    term += 4 * (lever("H1.x") - 0.7) ** 2')
@@ -187,6 +193,7 @@ def test_a_contradicted_prediction_flags_a_retain_without_changing_it(tmp_path, 
                                            "contradicted": ["H1.x"]}
 
 
+@pytest.mark.slow
 def test_a_lever_that_helps_only_with_a_co_active_one_is_retained_never_rejected(tmp_path, project_python):
     # H1.a does nothing alone; with H2.b both up the loss drops by 2 (a product: √V_T is 2/6 per lever)
     alone = (spec({"a": lever()}), '    term += 0 * lever("H1.a")')
@@ -204,6 +211,7 @@ def test_a_lever_that_helps_only_with_a_co_active_one_is_retained_never_rejected
             assert v["delta_stat"]["lower"] > DELTA  # B optimised in both terms: A's Δ is real
 
 
+@pytest.mark.slow
 def test_noise_that_differs_by_region_is_inconclusive_not_a_reject(tmp_path, project_python):
     # a useless lever whose upper half of the range is 6x noisier
     hetero = (spec({"x": lever()}),
@@ -221,43 +229,43 @@ def test_noise_that_differs_by_region_is_inconclusive_not_a_reject(tmp_path, pro
                 assert out["trigger"] == "search_space"
 
 
+@pytest.mark.slow
 def test_a_stuck_hypothesis_escalates_then_is_inconclusive_at_the_evidence_cap(tmp_path, project_python):
     # a linear gain of exactly δ over the range: with σ = 0.15 Δ's interval keeps straddling δ
     stuck = (spec({"x": lever()}), '    term += -0.1 * lever("H1.x")')
     runs = repeat(tmp_path, project_python, [stuck], seeds=range(10), rounds=8, sigma=0.15)
     stuck_path = sum(stuck_run(run_dir, outs) for run_dir, outs in runs)
-    # the whole path in 20 of 20 runs over seeds 0..19 (19 of 20 before the #21 checks reshuffled trial
-    # seeds); at 95%, fewer than 8 of 10 has probability ~1% (before the GP's signal floor, 4 of 10)
+    # R1 stalled and escalated in 20 of 20 runs over seeds 0..19 (19 of 20 before the #21 checks
+    # reshuffled trial seeds); at 95%, fewer than 8 of 10 has probability ~1% (before the GP's signal
+    # floor, 4 of 10 seeds passed)
     assert stuck_path >= 8, stuck_path
 
 
 def stuck_run(run_dir, outs) -> bool:
-    """Checks what a run of the stuck lever shows; True when it took the whole stuck path: R1 ends
-    by a stall, the hypothesis escalates once, and is inconclusive at the evidence cap."""
+    """False unless R1 stalled with the hypothesis still active and escalated; then the rest of the
+    stuck path must follow: a larger replicate share in R2, one escalation, inconclusive at the cap."""
+    assert not of_type(run_dir, "hypothesis_rejected")
     esc = of_type(run_dir, "hypothesis_escalated")
-    assert len(esc) <= 1  # at the reference fidelity there is no rung to move up to
-    if esc:
-        assert {k: v for k, v in esc[0].items() if k != "round"} == {"id": "H1.v1", "step": "replicates", "replicate_share": 0.3}
-        before, after = started_in(run_dir, esc[0]["round"]), started_in(run_dir, esc[0]["round"] + 1)
-        if after:
-            assert sum("replicate_of" in t for t in after) >= 0.3 * len(after) - 1
-            assert (sum(t["kind"] == "replicate" for t in after) / len(after)
-                    > sum(t["kind"] == "replicate" for t in before) / len(before))
-    inc = of_type(run_dir, "hypothesis_inconclusive")
-    if inc:
-        [inc] = inc
-        last = records(run_dir)[-1]
-        assert inc == {"id": "H1.v1", "verdict": last["id"], "reason": "no verdict after 80 fresh sampler trials"}
-        assert last["burn_in"]["fresh"] == 80 and last["outcome"] == "inconclusive"
-        assert outs[-1]["trigger"] == "search_space" and not of_type(run_dir, "hypothesis_rejected")
-        assert bo(run_dir.parents[1], "status")[1]["next"] == [
-            "propose and register a hypothesis",
-            f"record narrative R{outs[-1]['round']} (the round analyst: a cited narrative, diagnostics, suggestions)",
-            "record interplay: review H1.v1's removal against the untested list",
-            "generate (the queue holds 0, below 2x the 1 slot(s) per round)"]
-    return bool(outs[0]["trigger"] == "stall" and esc and esc[0]["round"] == 1 and inc)
+    if not (outs[0]["trigger"] == "stall" and esc and esc[0]["round"] == 1):
+        return False
+    assert esc == [{"id": "H1.v1", "round": 1, "step": "replicates", "replicate_share": 0.3}]  # no rung at the reference
+    r1, r2 = started_in(run_dir, 1), started_in(run_dir, 2)
+    assert sum("replicate_of" in t for t in r2) >= 0.3 * len(r2) - 1
+    assert sum(t["kind"] == "replicate" for t in r2) / len(r2) > sum(t["kind"] == "replicate" for t in r1) / len(r1)
+    [inc] = of_type(run_dir, "hypothesis_inconclusive")
+    last = records(run_dir)[-1]
+    assert inc == {"id": "H1.v1", "verdict": last["id"], "reason": "no verdict after 80 fresh sampler trials"}
+    assert last["burn_in"]["fresh"] == 80 and last["outcome"] == "inconclusive"
+    assert outs[-1]["trigger"] == "search_space"
+    assert bo(run_dir.parents[1], "status")[1]["next"] == [
+        "propose and register a hypothesis",
+        f"record narrative R{outs[-1]['round']} (the round analyst: a cited narrative, diagnostics, suggestions)",
+        "record interplay: review H1.v1's removal against the untested list",
+        "generate (the queue holds 0, below 2x the 1 slot(s) per round)"]
+    return True
 
 
+@pytest.mark.slow
 def test_at_low_signal_to_noise_a_gain_of_delta_is_rarely_rejected_and_intervals_cover_it(tmp_path,
                                                                                           project_python):
     # a linear gain of exactly δ (Δ = M_u = δ) under noise σ = 1.5δ: the 95% one-sided bounds must
@@ -275,6 +283,7 @@ def test_at_low_signal_to_noise_a_gain_of_delta_is_rarely_rejected_and_intervals
     assert covered >= 0.7 * len(vs), (covered, len(vs))
 
 
+@pytest.mark.slow
 def test_a_fidelity_sensitive_lever_is_never_rejected_at_a_proxy(tmp_path, project_python):
     # the lever pays off only at the reference fidelity (4 epochs): at the 1-epoch rung it is flat
     late = (spec({"x": lever()}, fidelity_sensitive=True, fidelity_reason="pays off late"),
@@ -295,6 +304,7 @@ def test_a_fidelity_sensitive_lever_is_never_rejected_at_a_proxy(tmp_path, proje
         assert at_ref and all(v["outcome"] in ("active", "retained") for v in at_ref)
 
 
+@pytest.mark.slow
 def test_a_broken_proxy_downgrades_its_rounds_rejects_to_inconclusive(tmp_path, project_python):
     # H1 is useless everywhere; H2's bowl ranks backwards at the proxy, so the drift check breaks it
     useless = (spec({"x": lever()}), '    term += 0 * lever("H1.x")')
@@ -335,6 +345,7 @@ def test_a_proxy_that_orders_nothing_defers_the_rounds_rejects(tmp_path, project
     assert bo(run_dir.parents[1], "status")[1]["hypotheses"][0]["status"] == "active"
 
 
+@pytest.mark.slow
 def test_a_flat_lever_next_to_a_curved_one_is_frozen_no_improvement_and_leaves_the_search(tmp_path,
                                                                                          project_python):
     # z does nothing, but next to the bowl in x BO leaves most of x's box unexplored with z moved, so
@@ -388,6 +399,7 @@ def test_a_held_fidelity_sensitive_lever_waits_for_escalation_and_never_breaks_t
     assert all(a["H1.x"] == b["H1.x"] and a != b for a, b in pairs)
 
 
+@pytest.mark.slow
 def test_a_linear_lever_worth_twice_delta_is_retained_not_rejected_irrelevant(tmp_path, project_python):
     # the regression behind the #21 amendment: end to end the lever gains 0.2 = 2δ, but its √V_T is
     # 0.2/√12 ≈ 0.06 < δ, so the old form rejected it `irrelevant`; its range M_u is 0.2
@@ -404,6 +416,7 @@ def test_a_linear_lever_worth_twice_delta_is_retained_not_rejected_irrelevant(tm
                 assert v["delta_stat"]["lower"] > DELTA and v["m_u"]["lower"] > DELTA
 
 
+@pytest.mark.slow
 def test_a_single_lever_is_frozen_by_its_own_delta_one_per_check(tmp_path, project_python):
     # z hurts (Δ_z ≈ 0 but its range is 2): frozen `no-improvement`, its trials filtered to its baseline;
     # w gains 0.2 = 2δ linearly (√V_T_w ≈ 0.06 < δ, what the old form froze on): never frozen
@@ -427,6 +440,7 @@ def test_a_single_lever_is_frozen_by_its_own_delta_one_per_check(tmp_path, proje
         assert any(t["levers"]["H1.z"] != 0.0 for t in r1)
 
 
+@pytest.mark.slow
 def test_two_substitute_levers_are_never_both_rejected_at_one_round_end(tmp_path, project_python):
     # H1.a alone gains 0.3, H2.b alone gains 0.3, both together still 0.3: each one's Δ is ≈ 0 because
     # the other is optimised in both terms, so both can reach a confirmed no-improvement reject at once

@@ -168,6 +168,7 @@ def random_search(n, seed, sigma=0.01):
     return true_loss(points[observed.index(min(observed))])
 
 
+@pytest.mark.slow
 def test_bo_beats_random_search_at_equal_trial_count(tmp_path, project_python):
     seeds = range(8)
     for s in seeds:
@@ -277,7 +278,7 @@ def gone(pid, within=10.0):
 
 
 def test_a_killed_round_is_resumed_from_the_log(bo_repo, bo_run, tmp_path):
-    # δ out of reach: the bowl is `irrelevant` next to it, so R2 ends with its confirmed reject
+    # δ out of reach: the bowl is rejectable next to it (Δ's bound is far below δ), so R2 ends with its confirmed reject
     run_dir = bo_run(BASE + "delta: 10\nseed: 3\n")
     coded(bo_repo, run_dir, tmp_path, env=toy_env(sigma=0.01))
     n = len(of_type(run_dir, "trial_started"))
@@ -379,6 +380,7 @@ def backwards_proxy_run(d, python, seed):
     return run_dir, out
 
 
+@pytest.mark.slow
 def test_a_proxy_that_ranks_backwards_is_flagged_broken_by_the_drift_check(tmp_path, project_python):
     runs = repeat_runs(tmp_path, project_python, backwards_proxy_run, range(8))
     broken = []
@@ -412,6 +414,7 @@ def no_stall_run(d, python, seed):
     return run_dir, out
 
 
+@pytest.mark.slow
 def test_no_stall_before_every_hypothesis_is_burned_in(tmp_path, project_python):
     # 3 levers: the burn-in is max(10·3, 20) = 30 fresh sampler trials, the stall window only 20;
     # δ out of reach, so the stall window is complete 20 sampler trials after the first confirmation
@@ -449,6 +452,7 @@ def drift_run(d, python, seed):
     return run_dir, out
 
 
+@pytest.mark.slow
 def test_reference_noise_alone_does_not_flag_a_faithful_proxy_broken(tmp_path, project_python):
     runs = repeat_runs(tmp_path, project_python, drift_run, range(10))
     drifts = [out["drift"] for _, out in runs]

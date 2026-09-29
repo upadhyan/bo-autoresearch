@@ -3,6 +3,8 @@ import csv
 import json
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
+
 from conftest import bo, review, register, round_run
 from test_rounds import BASE, init, make_repo, of_type, toy_env
 from test_verdicts import code_hypothesis, lever, repeat, spec, verdict_run
@@ -173,6 +175,7 @@ def rival_run(d, python, seed):
     return run_dir
 
 
+@pytest.mark.slow
 def test_rivals_are_both_tested_and_each_gets_its_own_verdict(tmp_path, project_python):
     with ThreadPoolExecutor(3) as pool:
         runs = list(pool.map(lambda s: rival_run(tmp_path / f"s{s}", project_python, s), (1, 2, 3)))

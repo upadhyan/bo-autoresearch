@@ -3,6 +3,8 @@ prohibited limits enforced mechanically, discouraged ones flagged, revisions at 
 the protected-path hash manifest."""
 import json
 
+import pytest
+
 from conftest import bo, events, register, review
 from test_rounds import BASE, init, make_repo, of_type
 from test_verdicts import lever, repeat, spec
@@ -161,6 +163,7 @@ seeds: [{H1.x: 0.4}, {H1.x: 0.9}]
 """
 
 
+@pytest.mark.slow
 def test_trials_outside_the_allowed_region_never_run_and_such_seeds_are_skipped(tmp_path, project_python):
     # the hole lies between the grid points registration checks: only the per-trial check stops it
     flat = (spec({"x": {**lever(), "path": "toy.x"}}), '    term += 0 * lever("H1.x")')

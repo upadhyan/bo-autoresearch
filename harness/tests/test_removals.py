@@ -6,6 +6,7 @@ the planted interactions at the end are statistical and asserted as rates over f
 import json
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
 import yaml
 
 from conftest import bo, events, round_run, write_run_yaml
@@ -365,12 +366,14 @@ def rate(toy_fn, tmp_path, python):
         return list(pool.map(lambda s: toy_fn(tmp_path / f"s{s}", python, s), SEEDS))
 
 
+@pytest.mark.slow
 def test_a_rejected_hypothesis_flagged_at_a_newcomers_registration_is_revived_and_both_retained(
         tmp_path, project_python):
     outcomes = rate(registration_toy, tmp_path, project_python)
     assert sum(outcomes) >= 2, outcomes
 
 
+@pytest.mark.slow
 def test_a_removal_flagged_by_its_interplay_review_is_revived_into_the_queued_partners_round(
         tmp_path, project_python):
     outcomes = rate(review_toy, tmp_path, project_python)
