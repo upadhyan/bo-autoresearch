@@ -21,9 +21,17 @@ def eligible(repo):
     return {t["trial"]: t["levers"] for t in out["trials"]}
 
 
-def finished(run_dir):
+def finished(run_dir, epoch=None):
+    """{trial: trial_started payload} of the finished trials (of `epoch` only, when given)."""
     ends = {p["trial"] for p in of_type(run_dir, "trial_finished")}
-    return {p["trial"]: p for p in of_type(run_dir, "trial_started") if p["trial"] in ends}
+    return {p["trial"]: p for p in of_type(run_dir, "trial_started")
+            if p["trial"] in ends and epoch in (None, p["epoch"])}
+
+
+def current(run_dir):
+    """The finished trials of the latest epoch (commit-lever's equivalence check fails a true no-op by
+    chance, and its new epoch leaves the earlier trials behind)."""
+    return finished(run_dir, max(p["epoch"] for p in of_type(run_dir, "trial_started")))
 
 
 NOOP_BOWL = BOWL  # the planted bowl is 0 at the baseline (0.5, 0.5): a true no-op
@@ -73,12 +81,12 @@ def test_each_removal_reason_applies_its_own_rule(tmp_path, project_python):
     assert [p["condition"] for p in of_type(no_gain, "hypothesis_rejected")] == ["no-improvement"]
 
     # credibly irrelevant: every trial kept, H1.x's key dropped, H2.y backfilled at its baseline
-    trials = finished(irrelevant)
+    trials = current(irrelevant)
     assert any(t["levers"].get("H1.x", 0.0) != 0.0 for t in trials.values())
     assert eligible(irrelevant.parents[1]) == {n: {"H2.y": 0.0} for n in trials}
 
     # no-improvement: only the trials that ran H1.x at its baseline
-    trials = finished(no_gain)
+    trials = current(no_gain)
     at_baseline = {n for n, t in trials.items() if t["levers"].get("H1.x", 0.0) == 0.0}
     assert at_baseline != set(trials)
     assert eligible(no_gain.parents[1]) == {n: {"H1.x": 0.0, "H2.y": 0.0} for n in at_baseline}
