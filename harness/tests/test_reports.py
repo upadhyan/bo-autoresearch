@@ -7,6 +7,7 @@ code committed, and a discouraged directive that H1's best breaks.
 """
 import csv
 import json
+import re
 import shlex
 import shutil
 from pathlib import Path
@@ -97,6 +98,7 @@ def test_trials_csv_has_a_row_per_trial_of_every_kind_and_the_lever_cell_rule(pl
     assert groups == sorted(groups, key=order.index)
     assert {"smoke", "baseline", "equivalence", "sampler", "confirmation"} <= {r["kind"] for r in table}
     assert "failed" in {r["status"] for r in table}
+    assert any(r["replicate_of"] for r in table)
     for r in table:
         t = started[int(r["trial"])]
         assert r["round"] == str(t.get("round", "")) and r["replicate_of"] == str(t.get("replicate_of", ""))
@@ -123,7 +125,6 @@ def sections(text):
 
 
 SECTIONS = ["Where we are", "Working", "Not working", "Still testing", "Set aside", "Up next"]
-IN_WORDS = {"irrelevant": "doesn't matter", "no-improvement": "matters, but doesn't help"}
 
 
 def test_summary_says_where_the_run_is_and_what_works_in_words_that_match_the_state(planted):
@@ -246,12 +247,13 @@ def test_round_summaries_hold_the_mechanical_sections_and_the_analyst_narrative(
     assert sections((run_dir / "rounds" / "002.md").read_text())["Narrative"][0].startswith("_No narrative yet")
     # the incumbent (x ≈ 0.8) breaks keep-x-low: the best logged trial that honours it, and the gap
     [line] = r1["Discouraged directives"]
-    trial = int(line.split("trial ")[1].split(",")[0])
+    trial = int(line.split("trial ")[1].split(" ")[0])
     table = {int(r["trial"]): r for r in rows(run_dir, "trials.csv")}
     honours = [r for r in table.values() if r["round"] == "1" and r["status"] == "finished"
                and r["compat:keep-x-low"] == "True"]
-    assert table[trial] in honours and all(float(r["objective"]) >= float(table[trial]["objective"]) for r in honours)
-    assert line.endswith("worse than the incumbent's mean")
+    assert table[trial] in honours and table[trial]["replicate_of"] == ""
+    gap, lo, hi = (float(x) for x in re.search(r"costs (\S+) \[(\S+), (\S+)\]", line).groups())
+    assert lo < gap < hi and gap > 0  # x ≤ 0.7 is off the bowl's bottom: honouring it costs loss
     # R3 searched the retained bowl alone: its best trials sit near x = 0.8, a narrowing `narrow` accepts
     assert narrowed and all(code == 0 for code, _ in narrowed), narrowed
     assert narrowed[0][1]["hypothesis"] == "H1.v1" and narrowed[0][1]["range"]["low"] == 0.6

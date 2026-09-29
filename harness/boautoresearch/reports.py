@@ -3,6 +3,7 @@ functions, no clock and no randomness, so deleting them and rebuilding reproduce
 import csv
 import io
 import json
+import math
 
 from . import directives
 
@@ -11,12 +12,14 @@ META = ["trial", "round", "epoch", "commit", "fidelity", "seed", "replicate_of",
 GROUPS = {"c:": "constraints", "t:": "telemetry", "compat:": "compat", "L:": "levers", "sampled:": "sampled"}
 
 
-def render(st: dict, status: dict, revivals: dict) -> dict[str, str]:
+def render(st: dict, view: dict) -> dict[str, str]:
     """Every generated file: {path relative to the run dir: contents}.
 
-    `status` is the CLI's status (the queue by priority, the conflicts); `revivals` maps each removed
-    hypothesis a revival is planned for to its partner."""
-    return {"SUMMARY.md": summary(st, status, revivals), "exports/trials.csv": trials_csv(st["trials"]),
+    `view` holds what the scheduler derives from the same state: `status` (the queue by priority, the
+    conflicts), `revivals` (each removed hypothesis a revival is planned for -> its partner) and
+    `testing` (each active hypothesis -> its current verdict record, or None, and its schedule)."""
+    status = view["status"]
+    return {"SUMMARY.md": summary(st, view), "exports/trials.csv": trials_csv(st["trials"]),
             "exports/hypotheses.csv": hypotheses_csv(st),
             **{f"rounds/{r:03d}.md": round_summary(st, status, r) for r, x in st["rounds"].items() if x["ended"]}}
 
@@ -43,19 +46,12 @@ def _capped(lines: list[str]) -> list[str]:
     return lines if len(lines) <= CAP else lines[:CAP - 1] + [f"- … and {len(lines) - CAP + 1} more: {MORE}"]
 
 
-def _since_entry(h: dict) -> list[dict]:
-    """H's verdict records since it (re-)entered the search."""
-    return [v for v in h["verdicts"] if v["round"] >= h.get("activated_round", 0)]
-
-
-def _progress(h: dict) -> str:
-    """How far an active hypothesis is from a verdict."""
-    d = len([n for n in h["spec"]["levers"] if n not in h["frozen"]])
-    need, spacing, cap = max(10 * d, 20), max(5 * d, 10), max(40 * d, 80)
-    past = _since_entry(h)
-    if not past:
-        return f"burn-in: its first verdict check comes after {need} fresh sampler trials"
-    v = past[-1]
+def _progress(t: dict) -> str:
+    """How far an active hypothesis is from a verdict: its current record (None: in burn-in) and
+    its schedule (needed, spacing, cap)."""
+    v, spacing, cap = t["record"], t["spacing"], t["cap"]
+    if v is None:
+        return f"burn-in: its first verdict check comes after {t['needed']} fresh sampler trials"
     fresh = v["burn_in"]["fresh"]
     if v["outcome"] == "pending-reject":
         return f"a reject is pending, confirmed or dropped at {v['confirmation']['due_at']} fresh sampler trials"
@@ -63,22 +59,17 @@ def _progress(h: dict) -> str:
     return f"{held}undecided after {fresh} fresh sampler trials (next check at {fresh + spacing}, inconclusive at {cap})"
 
 
+ASIDE = {"parked": "parked: {}", "pruned": "pruned under {}", "inconclusive": "inconclusive: {}", "merged": "{}"}
+
+
 def _set_aside(h: dict) -> str | None:
-    if h["status"] == "parked":
-        return f"parked: {h['park_reason']}"
-    if h["status"] == "pruned":
-        return f"pruned under {h['pruned_by']}: {h['prune_reason']}"
-    if h["status"] == "inconclusive":
-        return f"inconclusive: {h['reason']}"
-    if h["status"] == "merged":
-        return f"merged into {h['merged_into']}"
-    return None
+    return ASIDE[h["status"]].format(_reason(h)) if h["status"] in ASIDE else None
 
 
-def _baseline_mean(st: dict, fidelity: dict) -> float | None:
-    """The baseline's mean objective at this fidelity: its replicates (the current epoch's)."""
-    rungs = st["noise"]["rungs"] if st["noise"] else []
-    return next((x["mean"] for x in rungs if x["fidelity"] == fidelity), None)
+def _baseline_mean(st: dict, fidelity: dict, epoch: int) -> float | None:
+    """The mean of the baseline replicates at this fidelity in this epoch."""
+    return next((x["mean"] for x in reversed(st["baselines"]) if x["fidelity"] == fidelity and x["epoch"] == epoch),
+                None)
 
 
 def _where(st: dict, status: dict) -> list[str]:
@@ -86,11 +77,11 @@ def _where(st: dict, status: dict) -> list[str]:
     ended = [r for r in sorted(rounds) if r >= 1 and rounds[r]["ended"] and rounds[r].get("incumbent")]
     if ended:
         r = rounds[ended[-1]]
-        inc, base = r["incumbent"], _baseline_mean(st, r["fidelity"])
+        inc, base = r["incumbent"], _baseline_mean(st, r["fidelity"], r.get("epoch", 0))
         line = (f"- Incumbent: {run['objective']} {inc['mean']:.4g} (trial {inc['trial']}, "
                 f"{'confirmed' if inc['confirmed'] else 'unconfirmed'})")
         if base is not None:
-            gain = (base - inc["mean"]) * (1 if run["direction"] == "minimize" else -1)
+            gain = (base - inc["mean"]) * _sign(st)
             line += f" against the baseline's {base:.4g}: {abs(gain):.4g} {'better' if gain >= 0 else 'worse'}"
             if st["delta"]:
                 line += f", {abs(gain) / st['delta']:.3g}δ"
@@ -108,10 +99,10 @@ def _where(st: dict, status: dict) -> list[str]:
     return lines
 
 
-def summary(st: dict, status: dict, revivals: dict) -> str:
+def summary(st: dict, view: dict) -> str:
     """SUMMARY.md: one line per hypothesis (its title), each section capped, no statistics beyond one
     effect interval per line."""
-    hyps = st["hypotheses"]
+    hyps, status, revivals = st["hypotheses"], view["status"], view["revivals"]
     revived = {h["revived_from"]: h["id"] for h in hyps.values() if "revived_from" in h}
 
     def line(h: dict, what: str) -> str:
@@ -128,7 +119,7 @@ def summary(st: dict, status: dict, revivals: dict) -> str:
             elif h["id"] in revivals:
                 what += f"; a revival is planned with {revivals[h['id']]}"
             not_working.append(line(h, what))
-    testing = [line(h, _progress(h)) for h in hyps.values() if h["status"] == "active"]
+    testing = [line(hyps[i], _progress(t)) for i, t in view["testing"].items()]
     aside = [line(h, why) for h in hyps.values() if (why := _set_aside(h))]
     queue = status["schedule"]["queue"]
     prio = {h["id"]: h["priority"] for h in status["hypotheses"]}
@@ -267,12 +258,22 @@ def _narrowings(st: dict, r: int) -> list[str]:
     return out
 
 
+def _sigma(st: dict, r: int) -> float | None:
+    """σ in round r: its replicates' re-estimate, else the calibration round's at its fidelity."""
+    rnd = st["rounds"][r]
+    if (n := rnd.get("noise")) and n["sigma"] is not None:
+        return n["sigma"]
+    return next((x["sigma"] for x in (st["rounds"].get(0, {}).get("noise") or {}).get("rungs", [])
+                 if x["fidelity"] == rnd["fidelity"]), None)
+
+
 def _honouring(st: dict, r: int) -> list[str]:
-    """For each discouraged directive: the best trial logged up to this round, at its fidelity and
-    epoch, that honours it, and the gap to the incumbent (from the log only: no extra runs)."""
+    """For each discouraged directive the incumbent breaks: the best config logged up to this round (at
+    its fidelity and epoch; mean over the config's trials) that honours it, and the gap to the
+    incumbent with its 95% interval from σ (from the log only: no extra runs)."""
     rnd, sign, obj = st["rounds"][r], _sign(st), st["run"]["objective"]
     inc, out = rnd.get("incumbent"), []
-    trials = {t["trial"]: t for t in st["trials"]}
+    trials, sigma = {t["trial"]: t for t in st["trials"]}, _sigma(st, r)
     for d in st["registry"]["directives"]:
         if d["severity"] != "discouraged" or not inc:
             continue
@@ -285,10 +286,16 @@ def _honouring(st: dict, r: int) -> list[str]:
         if not ok:
             out.append(head + "no logged trial at the round's fidelity honours it")
             continue
-        best = min(ok, key=lambda t: (sign * t["objective"], t["trial"]))
-        gap = sign * (best["objective"] - inc["mean"])
-        out.append(head + f"trial {best['trial']}, {obj} {best['objective']:.4g}, "
-                   f"{abs(gap):.4g} {'worse' if gap >= 0 else 'better'} than the incumbent's mean")
+        configs: dict[int, list[float]] = {}
+        for t in ok:
+            configs.setdefault(t.get("replicate_of", t["trial"]), []).append(t["objective"])
+        root, ys = min(configs.items(), key=lambda c: (sign * sum(c[1]) / len(c[1]), c[0]))
+        mean = sum(ys) / len(ys)
+        gap = sign * (mean - inc["mean"])  # > 0: honouring it costs this much
+        half = 1.96 * sigma * math.sqrt(1 / len(ys) + 1 / (inc["replicates"] + 1)) if sigma is not None else None
+        out.append(head + f"trial {root} ({obj} {mean:.4g}, the mean over {len(ys)} trial{'s' * (len(ys) > 1)}) "
+                   f"costs {_num(gap)}" + (f" [{_num(gap - half)}, {_num(gap + half)}]" if half is not None else "")
+                   + " against the incumbent's mean")
     return out
 
 
@@ -297,7 +304,7 @@ def _proposed_directives(st: dict, r: int) -> list[str]:
     user may state (the reviewer never writes one)."""
     parks = {x["id"]: x["reason"][len("off-intent: "):] for x in st["removals"]
              if x["removal"] == "parked" and (x["reason"] or "").startswith("off-intent: ")
-             and x["seq"] < st["rounds"][r]["ended_seq"]}
+             and x["seq"] < st["rounds"][r]["ended_seq"] and st["hypotheses"][x["id"]]["status"] == "parked"}
     groups: list[list[str]] = []
     for hid, why in parks.items():
         g = next((g for g in groups if directives.similar(parks[g[0]], why)), None)
@@ -328,14 +335,14 @@ def round_summary(st: dict, status: dict, r: int) -> str:
 
     if r == 0:
         noise = [f"- σ at {json.dumps(x['fidelity'], sort_keys=True)}: {_num(x['sigma'])} from {x['n']} baseline "
-                 f"replicates, {x['cost_s']:.3g}s per trial" for x in (st["noise"] or {}).get("rungs", [])]
+                 f"replicates, {x['cost_s']:.3g}s per trial" for x in (rnd.get("noise") or {}).get("rungs", [])]
         if st["calibration"]:
             c = st["calibration"]
             noise.append(f"- ladder calibration chose {json.dumps(c['chosen'], sort_keys=True)}"
                          + (" (no rung passed: the reference fidelity)" if c["fallback"] else ""))
     else:
-        r0 = next((x["sigma"] for x in st["noise"]["rungs"] if x["fidelity"] == rnd["fidelity"]), None)
         n = rnd.get("noise")
+        r0 = n["r0_sigma"] if n else None
         noise = [(f"- σ {_num(n['sigma'])} from the round's replicates (df {n['df']})" if n and n["sigma"] is not None
                   else "- σ not re-estimated (too few replicates)")
                  + (f"; the calibration round's σ {_num(r0)}" if r0 is not None else "")

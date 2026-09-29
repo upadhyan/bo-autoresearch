@@ -81,6 +81,7 @@ def state(events: list[dict]) -> dict:
     removals: list[dict] = []  # rejects, inconclusives and parks, each owed an interplay review
     passes: list[dict] = []  # generation passes; a proposal belongs to the latest one
     noise = calib = proxy = delta = ended = escalated = paused = None
+    baselines: list[dict] = []  # each epoch's baseline mean per fidelity (the replicates' mean)
     epoch = {"epoch": 0, "round": 0}  # the first round whose trials the epoch's evidence counts
     commits: list[dict] = []  # the harness-made commits of the worktree
     registry: dict = {"version": 0, "brief": None, "directives": [], "protected_paths": [], "seq": 0}
@@ -135,13 +136,15 @@ def state(events: list[dict]) -> dict:
         elif e["type"] == "epoch_started":
             epoch = {"epoch": p["epoch"], "round": p["round"]}
         elif e["type"] == "noise_estimate" and "epoch" in p:  # σ re-estimated in a new epoch
+            baselines.append({"epoch": p["epoch"], "fidelity": p["fidelity"], "mean": p["mean"]})
             if noise and p["sigma"] is not None:
                 rungs = [{**x, "sigma": p["sigma"], "mean": p["mean"]} if x["fidelity"] == p["fidelity"]
                          else x for x in noise["rungs"]]
                 noise = {**noise, "rungs": rungs, "sigma": rungs[0]["sigma"],
                          "replication": any(x["sigma"] > 0 for x in rungs)}
         elif e["type"] == "noise_estimate" and p["round"] == 0:
-            noise = p
+            noise = rounds[0]["noise"] = p
+            baselines += [{"epoch": 0, "fidelity": x["fidelity"], "mean": x["mean"]} for x in p["rungs"]]
         elif e["type"] == "noise_estimate":  # σ re-estimated from a round's replicates
             rounds[p["round"]]["noise"] = p
         elif e["type"] == "fidelity_calibration":
@@ -225,7 +228,7 @@ def state(events: list[dict]) -> dict:
             "fidelity": fidelity, "delta": delta, "run_ended": ended, "epoch": epoch,
             "records": records, "paused": paused, "queue": queue, "removals": removals,
             "passes": passes, "registry": registry, "manifest": manifest,
-            "commits": commits}
+            "commits": commits, "baselines": baselines}
 
 
 def lever_paths(hyps: dict) -> dict:

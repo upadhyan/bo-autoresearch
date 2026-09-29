@@ -2144,7 +2144,7 @@ def cmd_summary(a) -> dict:
 def cmd_rebuild(a) -> dict:
     """Rewrite every generated file from the log (nothing is logged: they are derived)."""
     run_dir, con = _open_run(recover=False)
-    return {"rebuilt": _regenerate(run_dir, con)}
+    return {"rebuilt": _write(run_dir, elog.load(con))}
 
 
 def _next_eligibility(run_dir: Path, st: dict):
@@ -2160,16 +2160,25 @@ def cmd_trials(a) -> dict:
 
 
 def _render(st: dict) -> dict[str, str]:
-    return reports.render(st, _status(st), {old["id"]: p for old, p in _pending_links(st)})
+    return reports.render(st, {
+        "status": _status(st), "revivals": {old["id"]: p for old, p in _pending_links(st)},
+        "testing": {h["id"]: {"record": _latest(h, st), **_schedule(h)} for h in _in_search(st)
+                    if h["status"] == "active"}})
 
 
 def _regenerate(run_dir: Path, con) -> list[str]:
-    """Rewrite every generated file from the events (after every state change); -> their paths."""
+    """After every state change: log the round summary of each round just ended (the analyst's
+    narrative fills it later), then rewrite every generated file."""
     st = elog.load(con)
     if ended := [n for n, r in st["rounds"].items() if r["ended"] and not r.get("summarised")]:
-        for n in ended:  # its round summary is written (the analyst's narrative fills it later)
+        for n in ended:
             elog.append(con, "round_summary", "harness", {"round": n, "path": f"rounds/{n:03d}.md"})
         st = elog.load(con)
+    return _write(run_dir, st)
+
+
+def _write(run_dir: Path, st: dict) -> list[str]:
+    """Rewrite every generated file from the state; -> their paths."""
     files = _render(st)
     for rel, text in files.items():
         path = run_dir / rel
