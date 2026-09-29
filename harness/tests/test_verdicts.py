@@ -257,11 +257,6 @@ def test_a_fidelity_sensitive_lever_is_never_rejected_at_a_proxy(tmp_path, proje
         assert of_type(run_dir, "hypothesis_escalated")[1]["fidelity"] == {"epochs": 4}
         at_ref = [v for v in records(run_dir) if v["fidelity"] == {"epochs": 4}]
         assert at_ref and all(v["outcome"] in ("active", "retained") for v in at_ref)
-        # the drift check never blames the proxy for the tail it was never trusted with: both of its configs
-        # run the incumbent's fidelity-sensitive levers
-        drift = {t["trial"]: t["levers"] for t in of_type(run_dir, "trial_started") if t["kind"] == "drift"}
-        checks = of_type(run_dir, "drift_check")
-        assert checks and all(drift[a]["H1.x"] == drift[b]["H1.x"] for a, b in (c["trials"] for c in checks))
 
 
 def test_a_broken_proxy_downgrades_its_rounds_rejects_to_inconclusive(tmp_path, project_python):
@@ -300,7 +295,8 @@ def test_a_single_lever_below_delta_is_frozen_and_leaves_the_search(tmp_path, pr
         assert not of_type(run_dir, "hypothesis_rejected")
 
 
-def test_a_held_fidelity_sensitive_lever_waits_for_escalation_past_the_evidence_cap(tmp_path, project_python):
+def test_a_held_fidelity_sensitive_lever_waits_for_escalation_and_never_breaks_the_drift_check(
+        tmp_path, project_python):
     # an 8-lever flat hypothesis burns in over 80 fresh trials, so no stall (and no escalation) comes first:
     # the tail's proxy trials say nothing about it, so the evidence cap can't make it inconclusive there
     late = (spec({"x": lever()}, fidelity_sensitive=True, fidelity_reason="pays off late"),
@@ -313,3 +309,8 @@ def test_a_held_fidelity_sensitive_lever_waits_for_escalation_past_the_evidence_
     assert at_cap, [v["burn_in"]["fresh"] for v in records(run_dir)]
     assert all(v["outcome"] == "active" for v in at_cap)
     assert not [e for e in of_type(run_dir, "hypothesis_inconclusive") if e["id"] == "H1.v1"]
+    # the drift check never blames the proxy fidelity for the tail it can't show: its two configs differ
+    # in the other levers only, and both run the incumbent's fidelity-sensitive one
+    drift = {t["trial"]: t["levers"] for t in of_type(run_dir, "trial_started") if t["kind"] == "drift"}
+    pairs = [[drift[t] for t in c["trials"]] for c in of_type(run_dir, "drift_check")]
+    assert pairs and all(a["H1.x"] == b["H1.x"] and a != b for a, b in pairs)

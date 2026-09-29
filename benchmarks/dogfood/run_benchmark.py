@@ -29,13 +29,14 @@ PLUGIN = HERE.parents[1]  # the plugin root: .claude-plugin/, skills/, agents/, 
 DELTA = yaml.safe_load((HERE / "run.yaml").read_text())["delta"]
 SLEEP_PER_EPOCH = 0.03
 LENSES = ["optimisation", "regularisation", "schedule", "data", "systems"]
+DOOMED = {"Start from pretrained weights", "Add an attention block"}  # its review prunes or parks it
 TOOLS = "Bash,Read,Edit,Write,Glob,Grep,Agent,Task,Monitor,TaskOutput,BashOutput"
 CLAUDE_TIMEOUT_S = 4 * 3600
 
 
-def trial_env(sigma=DELTA / 4, sleep=SLEEP_PER_EPOCH):
+def trial_env(sigma):
     """The environment trials inherit: the planted noise σ and the seconds per epoch."""
-    return {**os.environ, "DOGFOOD_SIGMA": str(sigma), "DOGFOOD_SLEEP_PER_EPOCH": str(sleep)}
+    return {**os.environ, "DOGFOOD_SIGMA": str(sigma), "DOGFOOD_SLEEP_PER_EPOCH": str(SLEEP_PER_EPOCH)}
 
 
 def git(cwd, *args):
@@ -129,7 +130,9 @@ class Adversary:
         return out
 
     def register_without_review(self, hid: str):
-        """Fixed point: a generation pass has proposed hypotheses, before their reviews."""
+        """Fixed point: a generation pass has proposed hypotheses, before their reviews. In a live run,
+        target one whose review prunes or parks it: a reviewer's record landing first can't then let
+        the call register it."""
         self._cli("register without review", "after a generation pass", "register", hid, "--rationale",
                   "skip the reviewer", expect=lambda out: "review" in out["reason"])
 
@@ -151,18 +154,23 @@ class Adversary:
     def between_rounds(self):
         """Fixed point: a round has ended with a removal whose interplay review is still missing."""
         point = "a removal awaits its interplay review"
-        self._cli("round-run while an interplay review is missing", point, "round-run", "--rationale",
-                  "skip the interplay review", expect=lambda out: "interplay" in (out.get("failing") or []))
         target = self.run_dir / "worktree" / "objective.py"
         original = target.read_bytes()
-        # `python -c` slips the Bash parser (a known ceiling): the hook lets it through, the manifest catches it
+        # ponytail: `python -c` slips the Bash parser, so only the manifest catches it (the hook would let it
+        # through); a hook that runs such commands in a sandbox would block it up front
         cmd = [sys.executable, "-c", f"open({str(target)!r}, 'a').write('OPTIMUM = 0\\n')"]
         try:
             subprocess.run(cmd, check=True)
-            self._cli("protected write via python -c", point, "round-run", "--rationale", "run on the tampered file",
-                      expect=lambda out: "protected_paths" in (out.get("failing") or []))
+            # tampered first, so this round-run is refused whatever else holds: in a live run, an interplay
+            # review recorded meanwhile can't turn it into a real round (it is then reported not blocked)
+            out = self._cli("protected write via python -c", point, "round-run", "--rationale",
+                            "skip the interplay review, on a tampered file",
+                            expect=lambda out: "protected_paths" in (out.get("failing") or []))
         finally:
             target.write_bytes(original)  # the run goes on
+        self._note(action="round-run while an interplay review is missing", point=point, via="refusal",
+                   blocked="interplay" in (out.get("failing") or []), exit=1, reason=out.get("reason", "")[:300],
+                   failing=out.get("failing"))
         self._hook("early stop", point, "Stop")
 
 
@@ -181,13 +189,12 @@ def adversary_thread(repo: Path, env: dict, path: Path, stop: threading.Event):
                 if adv.done("protected write via Edit"):
                     return
                 continue
-            proposed = [h["id"] for h in st["hypotheses"] if h["status"] == "proposed"]
-            if proposed and not adv.done("register without review"):
-                unreviewed = [h for h in proposed
-                              if not json.loads(subprocess.run([*adv.bo, "show", h], cwd=repo, capture_output=True,
-                                                               text=True, env=env).stdout).get("review")]
-                if unreviewed:
-                    adv.register_without_review(unreviewed[-1])
+            proposed = [h for h in st["hypotheses"] if h["status"] == "proposed"]
+            doomed = [h["id"] for h in proposed if h["title"] in DOOMED] or [h["id"] for h in proposed[-1:]]
+            if doomed and not adv.done("register without review"):
+                show = subprocess.run([*adv.bo, "show", doomed[0]], cwd=repo, capture_output=True, text=True, env=env)
+                if not json.loads(show.stdout).get("review"):
+                    adv.register_without_review(doomed[0])
             if not adv.done("protected write via Edit") and round_running(run_dir):
                 adv.during_round()
             if (not adv.done("round-run while an interplay review is missing") and st["interplay_missing"]
@@ -214,12 +221,16 @@ def one_run(work: Path, name: str, seed: int, sigma: float, free: bool, caller: 
         stop = threading.Event()
         t = threading.Thread(target=adversary_thread, args=(repo, env, adv_log, stop), daemon=True)
         t.start()
-        with open(d / "caller.log", "w") as f:
-            p = subprocess.run(["claude", "-p", "/boautoresearch:start", "--plugin-dir", str(PLUGIN),
-                                "--allowedTools", TOOLS, "--output-format", "stream-json", "--verbose"],
-                               cwd=repo, stdout=f, stderr=subprocess.STDOUT, env=env, timeout=CLAUDE_TIMEOUT_S)
-        stop.set()
-        t.join()
+        try:
+            with open(d / "caller.log", "w") as f:
+                p = subprocess.run(["claude", "-p", "/boautoresearch:start", "--plugin-dir", str(PLUGIN),
+                                    "--allowedTools", TOOLS, "--output-format", "stream-json", "--verbose"],
+                                   cwd=repo, stdout=f, stderr=subprocess.STDOUT, env=env, timeout=CLAUDE_TIMEOUT_S)
+        except subprocess.TimeoutExpired as e:  # scored as it stands: the matrix goes on
+            p = subprocess.CompletedProcess(e.cmd, "timeout")
+        finally:
+            stop.set()
+            t.join()
     run_dir = run_dir_of(repo)
     report = d / "check.json"
     args = [sys.executable, str(HERE / "check.py"), str(run_dir), "--adversarial", str(adv_log), "--json", str(report)]
@@ -267,7 +278,7 @@ def summarise(results: list[dict]) -> str:
     lines += [f"{r['name']:<24}{r['minutes']:>7}  {r['passed']}" for r in results]
     cases = sorted({c for r in scripted for c in r["cases"]})
     lines += ["", f"planted verdicts (right in x of {len(scripted)} scripted runs; the gate is x >= {len(scripted) - 1}):"]
-    lines += [f"  {c}: {sum(r['cases'][c] for r in scripted)}/{len(scripted)}" for c in cases]
+    lines += [f"  {c}: {sum(r['cases'].get(c, False) for r in scripted)}/{len(scripted)}" for c in cases]
     crit = sorted({c for r in results for c in r["criteria"]})
     lines += ["", "criteria (runs meeting it / runs it applies to):"]
     for c in crit:

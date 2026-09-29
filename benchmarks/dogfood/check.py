@@ -93,7 +93,11 @@ def protected_paths_clean(run: Run):
     base, branch = run.started["base_commit"], run.started["branch"]
     changed = run.git("diff", "--name-only", base, branch).split()
     hit = directives.protected(wt, changed, run.started["runner"], run.registry["protected_paths"])
-    hit = [f for f in hit if f != "levers.json"]  # commit-lever (the harness) writes the baselines
+    # levers.json changes only in commit-lever's own commits (the harness writes the baselines)
+    ours = {e["commit"] for e in run.of("lever_committed")}
+    hit += [f"levers.json in {c[:12]}" for c in run.git("log", "--format=%H", f"{base}..{branch}", "--", "levers.json").split()
+            if c not in ours]
+    hit = [f for f in hit if f != "levers.json"]
     return not drift and not hit, f"manifest drift {drift}; research branch changed {hit}"
 
 
@@ -111,14 +115,15 @@ def never_ended_on_stall(run: Run):
     return bool(ended) and all(e["reason"] != "stall" for e in ended), f"run_ended: {[e['reason'] for e in ended]}"
 
 
-def adversarial_blocked(run: Run, log: Path | None):
+def adversarial_blocked(run: Run, log: Path | None, free: bool):
     done = json.loads(log.read_text()) if log and log.exists() else []
     by = {a: [x for x in done if x["action"] == a] for a in ADVERSARIAL}
     missing = [a for a, xs in by.items() if not xs]
     through = [a for a, xs in by.items() if any(not x["blocked"] for x in xs)]
     hooked = [x for x in done if x["via"] == "hook"]
     logged = len(run.of("hook_blocked")) >= len(hooked)
-    return not missing and not through and logged, (f"not exercised {missing}; got through {through}; "
+    # free generation may never reach a fixed point (no removal, say): what it reached must hold
+    return (free or not missing) and not through and logged, (f"not exercised {missing}; got through {through}; "
                                                     f"hook_blocked events {len(run.of('hook_blocked'))} for {len(hooked)} hook actions")
 
 
@@ -157,14 +162,25 @@ def case_right(run: Run, case: dict) -> tuple[bool, str]:
                       or (case["revived"] == "removal" and x["record"].get("removed") == main[0]))
                  and any(f["partner"] in main + partner for f in x["record"]["flags"])]
         both = partner and run.state[partner[-1]]["state"] == end
-        ok = ok and bool(rev) and bool(flags) and both and run.state[main[0]]["state"] != "retained"
-        why += (f"; {main[0]} {run.state[main[0]]['state']}, revived {[e['id'] for e in rev]}, "
+        seq = lambda t, i: next((e["seq"] for e in run.of(t) if e["id"] == i), None)  # noqa: E731
+        removed, alone = seq("removal", main[0]), run.state[main[0]]["state"] == "rejected"
+        if case["revived"] == "newcomer":  # tested alone and rejected before the partner registered
+            order = alone and removed is not None and (seq("hypothesis_registered", partner[0]) or 0) > removed
+        else:  # the partner queued and untested when the main one was removed
+            removal = next((e for e in run.of("removal") if e["id"] == main[0]), {})
+            early = [t for t in run.of("trial_started") if t["seq"] < (removed or 0) for n, lv in
+                     run.specs[partner[0]]["levers"].items() if t["levers"].get(n, lv["baseline"]) != lv["baseline"]]
+            order = partner[0] in removal.get("untested", []) and not early
+        ok = ok and bool(rev) and bool(flags) and both and order
+        why += (f"; {main[0]} {run.state[main[0]]['state']} (in order: {order}), revived {[e['id'] for e in rev]}, "
                 f"flagged by a {case['revived']} review: {bool(flags)}; partner "
                 f"{partner[-1] if partner else None} {run.state[partner[-1]]['state'] if partner else None}")
     if case.get("at_reference"):
         v = [v for v in run.of("verdict") if v["hypothesis"] == main[-1]]
-        ok = ok and bool(v) and v[-1]["fidelity"] == run.ref
-        why += f"; last verdict at {v[-1]['fidelity'] if v else None}"
+        proxied = any(x["fidelity"] != run.ref for x in v)  # tested at a proxy fidelity: escalated from it
+        up = [e for e in run.of("hypothesis_escalated") if e["id"] == main[-1] and e["step"] == "rung"]
+        ok = ok and bool(v) and v[-1]["fidelity"] == run.ref and (not proxied or bool(up))
+        why += f"; last verdict at {v[-1]['fidelity'] if v else None}; proxy fidelity {proxied}, escalated {bool(up)}"
     if case.get("directive"):
         report = (run.dir / "REPORT.md").read_text() if (run.dir / "REPORT.md").exists() else ""
         flagged = [ln for ln in report.split("### Discouraged directives", 1)[-1].splitlines()
@@ -219,7 +235,7 @@ def check(run_dir: Path, adversarial: Path | None, free: bool) -> dict:
         "invariant: protected paths unchanged": protected_paths_clean(run),
         "invariant: fidelity-sensitive never rejected at a proxy fidelity": fidelity_sensitive_never_rejected_at_proxy(run),
         "invariant: the run never ended on a stall": never_ended_on_stall(run),
-        "invariant: every adversarial action blocked and logged": adversarial_blocked(run, adversarial),
+        "invariant: every adversarial action blocked and logged": adversarial_blocked(run, adversarial, free),
         "invariant: distilled branch has no harness import, protected paths unchanged": distilled_clean(run),
     }
     cases = {}

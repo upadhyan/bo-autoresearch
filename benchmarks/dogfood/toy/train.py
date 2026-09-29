@@ -1,6 +1,6 @@
 """A small training loop over a synthetic task: the dogfood benchmark's toy trainer.
 
-Its knobs live in CONFIG. A research change sets them in `train_and_eval` (where the comment says),
+Its settings live in CONFIG. A research change sets them in `train_and_eval` (where the comment says),
 before training starts; CONFIG itself holds the values the code runs with today. The validation loss
 comes from objective.py (protected). runner.py passes in the epochs and the seed.
 """

@@ -1848,9 +1848,10 @@ def _verdict_checks(con, st: dict, r: int, space: dict, baseline: dict, eligible
                      "no-improvement" if dl["upper"] < delta else None)
         pending = last is not None and last["outcome"] == "pending-reject"
         held, reason = None, None
+        late = h["spec"]["fidelity_sensitive"] and at_proxy  # this fidelity can't show its effect
         if not gates["homogeneity"]["passed"]:  # v1 models constant noise only: never a reject
             outcome, reason = "inconclusive", "noise differs by region"
-        elif gated and condition and h["spec"]["fidelity_sensitive"] and at_proxy:
+        elif gated and condition and late:
             outcome, held = "active", "fidelity-sensitive: never rejected at a proxy fidelity"
         elif gated and condition:
             outcome = "reject" if pending else "pending-reject"
@@ -1858,8 +1859,10 @@ def _verdict_checks(con, st: dict, r: int, space: dict, baseline: dict, eligible
             outcome = "retained"
         else:
             outcome = "active"
-        # a proxy can't show a fidelity-sensitive effect: there the evidence cap waits for escalation
-        if outcome == "active" and len(fresh) >= sched["cap"] and not (h["spec"]["fidelity_sensitive"] and at_proxy):
+        # at a proxy fidelity the evidence cap waits for escalation (a stall moves the run up a rung)
+        # ponytail: unbounded there until a stall or the budget ends it; escalate a held hypothesis at its
+        # round's end if stalls prove too rare
+        if outcome == "active" and len(fresh) >= sched["cap"] and not late:
             outcome, reason = "inconclusive", f"no verdict after {len(fresh)} fresh sampler trials"
         frozen = []
         if gated and outcome in ("active", "retained") and len(group) > 1:
@@ -2024,17 +2027,20 @@ def _drift_check(run_dir: Path, con, r: int, inc: dict, eligible, sign: int) -> 
     """The incumbent and one random config of the round, re-run at the reference fidelity."""
     st = elog.load(con)
     ref = st["run"]["reference_fidelity"]
+    # fidelity-sensitive levers are declared to show (almost) nothing at a proxy fidelity and may pay off
+    # only at the reference: the other config runs the incumbent's, so its proxy fidelity mean still stands
+    # for it and the check compares only the levers the proxy fidelity is trusted to rank
+    late = {n for h in _in_search(st) if h["spec"]["fidelity_sensitive"] for n in _group(h)}
+
+    def trusted(levers: dict) -> dict:
+        return {**levers, **{n: v for n, v in inc["levers"].items() if n in late}}
     others = [t for t in eligible(st["trials"])
-              if t.get("round") == r and "replicate_of" not in t and t["levers"] != inc["levers"]]
+              if t.get("round") == r and "replicate_of" not in t and trusted(t["levers"]) != inc["levers"]]
     if not others:
         return None
     other = _rng(st["run"], f"R{r}", "drift").choice(others)
     proxy = {c["trial"]: c["mean"] for c in bo_study.ranked(eligible(st["trials"]), sign)}
-    # the proxy was never trusted with fidelity-sensitive levers (they may pay off only at the reference):
-    # both configs run the incumbent's, so only the levers the proxy ranks are compared
-    late = {n for h in _in_search(st) if h["spec"]["fidelity_sensitive"] for n in _group(h)}
-    pair = [(inc["trial"], inc["levers"]),
-            (other["trial"], {**other["levers"], **{n: v for n, v in inc["levers"].items() if n in late}})]
+    pair = [(inc["trial"], inc["levers"]), (other["trial"], trusted(other["levers"]))]
     baseline = _baseline(run_dir)
     runs = [_trial(run_dir, con, None, "drift", {**baseline, **levers}, ref, round=r, drift_of=root)
             for root, levers in pair]

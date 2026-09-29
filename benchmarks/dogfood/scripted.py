@@ -62,7 +62,7 @@ class Caller:
         self.record("review", body, "registration-reviewer", "the registration review")
 
     def lever_code(self, hid, run_dir):
-        """The lever coder: each lever sets its CONFIG knob (the lever's path) in train_and_eval."""
+        """The lever coder: each lever sets its CONFIG key (the lever's path) in train_and_eval."""
         spec = self.cli("show", hid)["spec"]
         train = run_dir / "worktree" / "train.py"
         src = train.read_text()
@@ -112,7 +112,7 @@ class Caller:
                 self.narrative(st["narrative_missing"][0], st)
             elif proposed := [h for h in st["hypotheses"] if h["status"] == "proposed"]:
                 if adversary and not adversary.done("register without review"):
-                    adversary.register_without_review(proposed[-1]["id"])
+                    adversary.register_without_review(next((h["id"] for h in proposed if h["title"] in rb.DOOMED), proposed[-1]["id"]))
                 for h in proposed:  # review all, then register those left standing
                     self.review(h["id"], h["title"], ids)
                 for h in self.status()["hypotheses"]:
@@ -163,7 +163,7 @@ class Caller:
                 bullets = [f"{v} retained its hypothesis." for v in cites[:5]] or ["Nothing was retained."]
                 self.record("takeaways", {"takeaways": bullets, "cites": cites}, "round-analyst", "wrap-up")
             elif duty.startswith("record distill_spec"):
-                content = ("Keep every retained mechanism by setting its CONFIG knob in train.py to the wrap-up "
+                content = ("Keep every retained mechanism by setting its CONFIG key in train.py to the wrap-up "
                            "config's value; drop the lever() calls, the boautoresearch import and every "
                            "hypothesis that was not retained.")
                 changes = [{"commit": c["commit"], "decision": "keep", "reason": "part of the run"}
@@ -181,7 +181,7 @@ class Caller:
         return out
 
     def distil(self, wt, config, st):
-        """The lever coder in distill mode: the retained knobs as constants, no harness import."""
+        """The lever coder in distill mode: the retained levers' values as constants, no harness import."""
         paths = {}
         for h in st["hypotheses"]:
             spec = self.cli("show", h["id"])["spec"]
