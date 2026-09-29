@@ -23,8 +23,12 @@ decision, APPEND it to the "Decision log" at the bottom (one line, ticket number
 - Do NOT run the whole suite per ticket. Run only the tests the change can affect: the ticket's new
   test file(s) plus the existing files whose behaviour you touched (e.g. `tests/test_scheduler.py
   tests/test_rounds.py`). Pick them by what your diff changes; say which you ran in your report.
-- Run tests in parallel: `cd harness && .venv/bin/python -m pytest -q -n auto <files>` (pytest-xdist is
-  installed). Tests must stay independent (own tmp repo each) so `-n auto` is safe.
+- Run tests in parallel: `cd harness && .venv/bin/python -m pytest -q -n 4 <files>` (pytest-xdist is
+  installed). Use `-n 4`, not `-n auto`: more workers overheat the dev laptop. Tests must stay independent
+  (own tmp repo each). conftest caps numpy/torch at one math thread.
+- Slow tests: multi-seed statistical rate tests carry `@pytest.mark.slow` and are skipped by default.
+  While iterating, run only the fast tests; run the slow ones (`--slow`, or `-m slow` for just them) once
+  before merging. Mark any new multi-seed rate test `slow`.
 
 ## Dev commands
 - Dev venv: `harness/.venv` (Python 3.10, editable harness + pytest; optuna 5.0, torch, scipy, numpy
@@ -807,3 +811,31 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
 - #36 (empty passes): `record proposal` accepts `{"hypotheses": []}` (a generator whose lane holds nothing new), and an
   llm pass counts toward `final_pass_empty` once any proposal record follows its `generation_pass`. Before, a free run
   couldn't exhaust (the condition wanted a hypothesis from the final pass) and empty-handed generators were held forever.
+- workers (user decision): sequential is the default (`workers: 1`) and the interview recommends it; parallel trials only
+  when the user asks. Trials sharing a machine skew runtime/throughput/memory objectives, so the interview warns about that.
+- #28 limit (epoch σ; spec "σ is re-estimated", #7 resolution 2 "k runs per candidate rung"): a new epoch measures σ at once
+  only at the searched fidelity (`_new_epoch` → `_measure_sigma`, k baseline replicates, `noise_estimate` with `epoch`).
+  Every other rung is re-measured lazily, when next used: `round-run` re-measures the round's fidelity and, at a proxy,
+  the reference (drift check) before `round_started` (`_remeasure_stale`; a budget refusal there ends the run like
+  any refused trial); a ladder calibration run in a later epoch re-measures every rung first. The fold tags each rung's σ
+  with the epoch that measured it. The replicates are ordinary epoch trials at baseline, so `_pooled_noise` pools them.
+  The ladder calibration is stale once an epoch starts after it (`fidelity_calibration.epoch`, `_ladder_stale`): it
+  validates no rung, so a stalled proxy escalates straight to the reference (`hypothesis_escalated.stale_ladder`).
+  Chosen over re-calibrating (~5 configs × every rung) at the epoch boundary: cheaper, and the reference is always a
+  correct rung. The searched rung itself stays (#7 resolution 12: fidelity changes only at a round boundary, by the
+  harness); the drift check still guards it. Not re-measured before an equivalence check on a rung this epoch never
+  measured: the check's replicates run the new commit and would become the logged mean it compares against.
+- #28 limit (lock file; #12 resolution 8 "commits the updated lock or freeze file"): `add-dependency` in a project with
+  `uv.lock` runs `uv add --no-sync --python <run venv>`, with `poetry.lock` `poetry add --lock`, in the worktree: the tool
+  only updates pyproject.toml and the lock (a sync would drop the harness from the run venv); the harness then installs
+  into the run venv as before and commits pyproject.toml + the lock (no freeze file). Lock first, so a failed resolution
+  installs nothing; either failure restores the (clean) tree. uv.lock wins when both exist. A lock file whose tool is
+  missing is refused, not silently frozen. Other projects keep the freeze file. `dependency_added.lock_file` names it.
+- #28 limits (review): a rung's σ is re-measured once per epoch, tried or not (`_remeasure_stale` reads the epoch's
+  `noise_estimate`s via `baselines`, so a measurement whose replicates failed is not re-bought every round); `accept-proxy`
+  is refused on a stale ladder; `stale_ladder` is false when no ladder was calibrated. `add-dependency` checks every path
+  the lock tool actually wrote (not only pyproject.toml + the lock) against the protected paths, and a failure restores
+  the tree with checkout + clean. A requirement is taken as a local path only when it contains a path separator.
+  Residual: the harness installs the requirement on its own, so the venv can resolve versions other than the lock's
+  (the run venv comes from the user environment's freeze, not the lock); poetry locks against the project's Python
+  constraint, not the run venv's interpreter.
