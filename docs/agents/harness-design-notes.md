@@ -858,3 +858,16 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   and the drift check's proxy σ̂ now read the round's fidelity (`st["rounds"][r]["fidelity"]`), not the run's.
   Residual: at a proxy that stays undecidable a freeze can recur and be undone every round (ending each round early);
   the evidence cap, which a freeze no longer restarts, now bounds that churn.
+- #38 limit (held hypothesis at its cap; supersedes "#38 (dogfood findings, harness): … exempt from the evidence cap"):
+  #38 exempted a fidelity-sensitive hypothesis at a proxy fidelity from the cap because its proxy trials say nothing
+  about it (a proxy inconclusive would remove the planted late-payoff lever before the reference ever saw it); that left
+  it unbounded until a stall or the budget. Now its cap still counts, but only at the current fidelity (`_evidence`: a
+  proxy's trials are no evidence about it at a dearer rung), and reaching it at a proxy is a rung escalation instead of
+  an inconclusive (spec escalation order: replicates, a higher rung, then inconclusive; replicates can't show an effect
+  the fidelity hides, so it goes straight to the rung): the check's record stays `active` + held, and
+  `hypothesis_escalated` {id, round, step rung, fidelity (`_next_rung`), proxy, stale_ladder, verdict, reason "evidence
+  cap"} is logged; the fold moves the run up a rung, and the round loop ends the round on it, trigger `fidelity` (spec's
+  round-end "a fidelity change"; checked before `search_space`). Bounded: cap × (rungs above the proxy + 1) before the
+  reference's cap makes it inconclusive. Also: no check freezes a lever of a fidelity-sensitive hypothesis at a proxy
+  fidelity (a freeze is a lever's reject; spec "can't be rejected at a proxy"); before, a flat-at-the-proxy 2-lever tail
+  was frozen there.

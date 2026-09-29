@@ -1866,6 +1866,9 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
             if checked:  # SUMMARY.md changes after every verdict; a reject just gone pending must hold
                 _regenerate(run_dir, con)  # the round open below
                 st = elog.load(con)
+            if st["fidelity"]["fidelity"] != fidelity:  # a held hypothesis's cap moved the run up a rung
+                trigger = "fidelity"
+                break
             if any(v["frozen"] or v["outcome"] in ("reject", "inconclusive") for v in checked):
                 trigger = "search_space"  # a confirmed reject, a freeze or an inconclusive
                 break
@@ -2062,7 +2065,8 @@ def _verdict_checks(con, st: dict, r: int, space: dict, baseline: dict, eligible
     at_proxy = fid["fidelity"] != run["reference_fidelity"]
     sigma = _sigma(st, fid["fidelity"])
     trials = eligible(st["trials"])
-    checked = []
+    checked: list[dict] = []
+    up: dict | None = None  # one rung up per step, however many held hypotheses reach their cap
     for h in _in_search(st):
         sched, group, last = _schedule(h), _group(h), _latest(h, st)
         fresh = _fresh(st, h, eligible)
@@ -2094,13 +2098,11 @@ def _verdict_checks(con, st: dict, r: int, space: dict, baseline: dict, eligible
             outcome = "active"
         evidence = _evidence(st, h)
         capped = outcome == "active" and evidence >= sched["cap"]
-        # at a proxy fidelity the evidence cap waits for escalation (a stall moves the run up a rung)
-        # ponytail: unbounded there until a stall or the budget ends it; escalate a held hypothesis at its
-        # round's end if stalls prove too rare
         if capped and not late:
             outcome, reason = "inconclusive", f"no verdict after {evidence} sampler trials"
         frozen = []
-        if gated and outcome in ("active", "retained") and len(group) > 1:
+        # a freeze is a lever's reject: never one of a fidelity-sensitive hypothesis at a proxy fidelity
+        if gated and outcome in ("active", "retained") and len(group) > 1 and not late:
             # one lever per check, the least helpful first: two substitutes each show Δ_i ≈ 0 (the
             # other is optimised in both terms), so freezing both at once would lose their gain
             low = [(b["delta_stat"]["upper"], n, c) for n, b in stats["levers"].items()
@@ -2133,6 +2135,12 @@ def _verdict_checks(con, st: dict, r: int, space: dict, baseline: dict, eligible
             elog.append(con, "hypothesis_inconclusive", "harness",
                         {"id": h["id"], "verdict": vid, "reason": reason})
             _removal(con, h["id"], "inconclusive", reason)
+        elif capped:  # held at a proxy fidelity: its cap moves the run up a rung (the round ends on it)
+            up = up or _next_rung(st)
+            elog.append(con, "hypothesis_escalated", "harness", {
+                "id": h["id"], "round": r, "step": "rung", "fidelity": up,
+                "proxy": "reference" if up == run["reference_fidelity"] else "validated",
+                "stale_ladder": _ladder_stale(st), "verdict": vid, "reason": "evidence cap"})
         checked.append(record)
     return checked
 

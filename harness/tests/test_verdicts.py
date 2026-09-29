@@ -375,19 +375,32 @@ def test_a_flat_lever_next_to_a_curved_one_is_frozen_no_improvement_and_leaves_t
         assert not of_type(run_dir, "hypothesis_rejected")
 
 
-def test_a_held_fidelity_sensitive_lever_waits_for_escalation_and_never_breaks_the_drift_check(
+def test_a_held_fidelity_sensitive_hypothesis_at_its_cap_moves_the_run_up_a_rung_and_never_breaks_the_drift_check(
         tmp_path, project_python):
-    # an 8-lever flat hypothesis burns in over 80 fresh trials, so no stall (and no escalation) comes first:
-    # the tail's proxy trials say nothing about it, so the evidence cap can't make it inconclusive there
-    late = (spec({"x": lever()}, fidelity_sensitive=True, fidelity_reason="pays off late"),
-            '    term += 0 * lever("H1.x") if cheap else -lever("H1.x")')
+    # an 8-lever flat hypothesis burns in over 80 fresh trials, so no stall (and no stall escalation) comes
+    # first. The tail's proxy trials say nothing about it: its evidence cap can't make it inconclusive there,
+    # and no check may freeze one of its levers there (a lever's reject); at the cap it escalates a rung
+    late = (spec({"x": lever(), "u": lever()}, fidelity_sensitive=True, fidelity_reason="pays off late"),
+            '    term += 0 * (lever("H1.x") + lever("H1.u")) if cheap else -lever("H1.x") - lever("H1.u")')
     names = "abcdefgh"
     wide = (spec({n: lever() for n in names}),
             "    term += 0 * (" + " + ".join(f'lever("H2.{n}")' for n in names) + ")")
     run_dir, outs = verdict_run(tmp_path / "r", project_python, 1, [late, wide], proxy=True, rounds=2)
-    at_cap = [v for v in records(run_dir) if v["burn_in"]["fresh"] >= 80 and v["fidelity"] == {"epochs": 1}]
-    assert at_cap, [v["burn_in"]["fresh"] for v in records(run_dir)]
-    assert all(v["outcome"] == "active" for v in at_cap)
+    at_proxy = [v for v in records(run_dir) if v["fidelity"] == {"epochs": 1}]
+    assert at_proxy and all(v["outcome"] == "active" and v["frozen"] == [] for v in at_proxy), at_proxy
+    assert not [f for f in of_type(run_dir, "lever_frozen") if f["id"] == "H1.v1"]
+    *before, cap = at_proxy
+    assert cap["burn_in"]["evidence"] == 80 and all(v["burn_in"]["evidence"] < 80 for v in before)
+    [esc] = [e for e in of_type(run_dir, "hypothesis_escalated") if e["id"] == "H1.v1"]
+    assert esc == {"id": "H1.v1", "round": 1, "step": "rung", "fidelity": {"epochs": 4}, "proxy": "reference",
+                   "stale_ladder": False, "verdict": cap["id"], "reason": "evidence cap"}
+    assert outs[0]["trigger"] == "fidelity"  # a fidelity change ends the round
+    [r2] = [s for s in of_type(run_dir, "round_started") if s["round"] == 2]
+    assert r2["fidelity"] == {"epochs": 4}
+    # at the reference its count restarts (the proxy fidelity's trials were no evidence about it)
+    at_ref = [v for v in records(run_dir) if v["fidelity"] == {"epochs": 4}]
+    assert at_ref and all(v["outcome"] in ("active", "retained") for v in at_ref), at_ref
+    assert all(v["burn_in"]["evidence"] == v["burn_in"]["fresh"] for v in at_ref)
     assert not [e for e in of_type(run_dir, "hypothesis_inconclusive") if e["id"] == "H1.v1"]
     # the drift check never blames the proxy fidelity for the tail it can't show: when it runs a pair, the
     # two configs differ in the other levers only and both run the incumbent's fidelity-sensitive one; here
