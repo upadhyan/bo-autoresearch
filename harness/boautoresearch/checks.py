@@ -205,6 +205,9 @@ def bash_refusal(cmd: str, cwd: Path, agent: str, bo: Path, probes: set[str], wr
         return RAW_READ
     for words, targets in segs:
         prog, args = _program(words)
+        if r != "orchestrator" and args[:1] == ["record"] and prog != "boautoresearch":
+            return ("write `record` behind the full path of the run's boautoresearch (never a shell variable "
+                    "like $BO): the hook tags a subagent's record with its agent id only on the literal path")
         if r in READ_ONLY:
             harness = prog == "boautoresearch" and bool(args) and (args[0] in probes or args[0] == "record")
             if targets or "$(" in cmd or "`" in cmd or not (harness or prog == "cd"):
