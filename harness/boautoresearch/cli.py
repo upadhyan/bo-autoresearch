@@ -548,13 +548,15 @@ def cmd_record(a) -> dict:
         _between_rounds(st, "a hypothesis in the search is reviewed")  # its verdict may park it
     ids = ([_propose(run_dir, con, s, a.actor, a.rationale) for s in body["hypotheses"]]
            if a.kind == "proposal" else [])
-    elog.append(con, "record", a.actor, {"rationale": a.rationale, "kind": a.kind,
-                                         "agent_id": a.agent_id, "record": body,
-                                         **({"hypotheses": ids} if ids else {})})
+    for item in records.items(a.kind, body):  # a batch logs one record per item, as if recorded one by one
+        elog.append(con, "record", a.actor, {"rationale": a.rationale, "kind": a.kind,
+                                             "agent_id": a.agent_id, "record": item,
+                                             **({"hypotheses": ids} if ids else {})})
     if a.kind == "review":
         _apply_review(con, body)
     _regenerate(run_dir, con)
-    return {"recorded": a.kind, "agent_id": a.agent_id, **({"hypotheses": ids} if ids else {})}
+    return {"recorded": a.kind, "agent_id": a.agent_id, **({"hypotheses": ids} if ids else {}),
+            **({"items": len(body["expected"])} if records.batch(a.kind, body) else {})}
 
 
 def _check_run() -> tuple[Path, sqlite3.Connection, dict] | None:
