@@ -18,6 +18,7 @@ import sys
 import tempfile
 import threading
 import time
+from concurrent import futures
 from pathlib import Path
 
 import yaml
@@ -193,8 +194,6 @@ def _load_run_yaml(path: Path) -> dict:
     workers = cfg.setdefault("workers", 1)
     if isinstance(workers, bool) or not isinstance(workers, int) or workers < 1:
         raise Refused("run.yaml: workers must be a positive whole number")
-    if workers > 1:  # ponytail: one trial at a time (see _run_round); parallel asks need a constant liar
-        raise Refused("run.yaml: workers > 1 is not supported yet: trials run one at a time (workers: 1)")
     missing = ([] if delta is not None else ["delta"]) + (
         [] if lenses is not None or generation == "scripted" else ["lenses (or generation: scripted)"])
     if cfg["go"] and missing:
@@ -313,6 +312,15 @@ def _trial(run_dir: Path, con, a, kind: str, levers: dict, fidelity: dict, workt
     `a` is the caller's action; None for a trial the harness schedules itself. A wrap-up trial (kind
     `wrapup`, in `worktree`: the research one unless given) is outside the budget and the trial ceiling.
     """
+    trial = _start(run_dir, con, a, kind, levers, fidelity, worktree, **extra)
+    return _outcome(run_dir, con, trial, _run_trial(run_dir, elog.load(con)["run"]["runner"], trial,
+                                                    worktree or run_dir / "worktree"))
+
+
+def _start(run_dir: Path, con, a, kind: str, levers: dict, fidelity: dict, worktree: Path | None = None,
+           **extra) -> dict:
+    """The gates, then `trial_started`: -> the trial to run. Trials still running (in flight beside
+    this one) are charged their estimated cost up front, so parallel trials never overdraw the budget."""
     st = elog.load(con)
     run, n = st["run"], len(st["trials"]) + 1
     levers, masking = _mask(st, levers)
@@ -323,8 +331,7 @@ def _trial(run_dir: Path, con, a, kind: str, levers: dict, fidelity: dict, workt
             _regenerate(run_dir, con)
             raise ProhibitedRefused(f"a {kind} trial at {json.dumps(levers, sort_keys=True)} breaks prohibited "
                                     f"directive {d['id']} ({d['predicate']}): it never runs")
-        remaining = _remaining(st)
-        estimate = _cost(st["trials"], fidelity)
+        remaining, estimate = _headroom(st, fidelity)
         if run["max_trials"] is not None and n > run["max_trials"]:
             elog.append(con, "trial_refused", "harness", {"kind": kind, "fidelity": fidelity,
                                                           "max_trials": run["max_trials"], **extra})
@@ -347,10 +354,24 @@ def _trial(run_dir: Path, con, a, kind: str, levers: dict, fidelity: dict, workt
         elog.append(con, "trial_started", a.actor, {"rationale": a.rationale, **started})
     else:
         elog.append(con, "trial_started", "harness", started)
-    outcome = _run_trial(run_dir, run["runner"], trial, worktree)
-    elog.append(con, "trial_" + outcome.pop("status"), "harness", {"trial": n, **outcome})
+    return trial
+
+
+def _outcome(run_dir: Path, con, trial: dict, outcome: dict) -> dict:
+    """Log the trial's outcome: -> the trial as the log now folds it."""
+    elog.append(con, "trial_" + outcome.pop("status"), "harness", {"trial": trial["trial"], **outcome})
     _regenerate(run_dir, con)
-    return elog.load(con)["trials"][-1]
+    return next(t for t in elog.load(con)["trials"] if t["trial"] == trial["trial"])
+
+
+def _in_flight(st: dict) -> float:
+    """The estimated cost of the trials still running (0 when trials run one at a time)."""
+    return sum(_cost(st["trials"], t["fidelity"]) for t in st["trials"] if t["status"] == "running")
+
+
+def _headroom(st: dict, fidelity: dict) -> tuple[float, float]:
+    """(the budget remaining once the trials in flight are paid, a trial's estimated cost at `fidelity`)."""
+    return _remaining(st) - _in_flight(st), _cost(st["trials"], fidelity)
 
 
 def _mask(st: dict, sampled: dict) -> tuple[dict, dict]:
@@ -1058,15 +1079,29 @@ def _advance_wrapup(run_dir: Path, con) -> dict:
     elog.append(con, "distill_committed", "harness", {"attempt": attempt, "commit": sha, "paths": [p for p in paths if p]})
     research = (w["verifications"][0]["research"] if w["verifications"]
                 else _replicates(run_dir, con, "research"))
-    distilled = _replicates(run_dir, con, "distilled", wt, attempt)
     st = elog.load(con)
-    sigma = _sigma(st, w["fidelity"]) if st["noise"] else None
+    # σ̂ from the research epoch's trials, measured before this attempt (the wrap-up trials stay out)
+    sigma, df = _pooled_noise(st, w["fidelity"]) if st["noise"] else (0.0, 0)
     r = len(research["trials"])
-    tol = 2 * (sigma or 0.0) * math.sqrt(2 / r) + 1e-9 * max(1.0, abs(research["mean"] or 0.0))
-    gap = (distilled["mean"] - research["mean"]
-           if distilled["mean"] is not None and research["mean"] is not None else None)
-    v = {"attempt": attempt, "commit": sha, "research": research, "distilled": distilled, "sigma": sigma,
-         "replicates": r, "tolerance": tol, "gap": gap, "passed": gap is not None and abs(gap) <= tol}
+    ftol = 1e-9 * max(1.0, abs(research["mean"] or 0.0))
+
+    def look(distilled: dict, tol: float) -> dict:
+        gap = (distilled["mean"] - research["mean"]
+               if distilled["mean"] is not None and research["mean"] is not None else None)
+        return {"distilled": distilled, "tolerance": tol, "gap": gap, "passed": gap is not None and abs(gap) <= tol}
+    # the equivalence check's two looks: r replicates within 2σ̂·√(2/r); a gap outside it gets r more
+    # distilled replicates and fails only if the 2r still differ in a two-sided t-test at CHECK_ALPHA
+    first = final = look(_replicates(run_dir, con, "distilled", wt, attempt), 2 * sigma * math.sqrt(2 / r) + ftol)
+    if not first["passed"] and first["gap"] is not None and sigma:
+        more, d = _replicates(run_dir, con, "distilled", wt, attempt), first["distilled"]
+        both = {"trials": d["trials"] + more["trials"], "commit": d["commit"],
+                "mean": (d["mean"] + more["mean"]) / 2 if more["mean"] is not None else None}
+        final = look(both, _t(1 - CHECK_ALPHA / 2, df) * sigma * math.sqrt(1 / (2 * r) + 1 / r) + ftol)
+    stage1 = None if final is first else {"trials": first["distilled"]["trials"], "mean": first["distilled"]["mean"],
+                                          **{k: first[k] for k in ("tolerance", "gap", "passed")}}
+    distilled = final["distilled"]
+    v = {"attempt": attempt, "commit": sha, "research": research, "sigma": sigma, "df": df, "alpha": CHECK_ALPHA,
+         "replicates": r, **final, "stage1": stage1}
     elog.append(con, "verification", "harness", v)
     if v["passed"]:
         return _finish(run_dir, con, "verified", {"branch": w["distilled"]["branch"], "commit": sha,
@@ -1115,9 +1150,7 @@ def _replicates(run_dir: Path, con, branch: str, wt: Path | None = None, attempt
     levers = w["config"] if branch == "research" else _baseline(run_dir, wt)
     runs = [_trial(run_dir, con, None, WRAPUP_KIND, levers, w["fidelity"], wt, wrapup_of=branch,
                    **({"attempt": attempt} if attempt else {})) for _ in range(r)]
-    ys = [t["objective"] for t in runs if t["status"] == "finished"]
-    return {"trials": [t["trial"] for t in runs], "commit": runs[0]["commit"],
-            "mean": statistics.fmean(ys) if len(ys) == len(runs) else None}
+    return {"trials": [t["trial"] for t in runs], "commit": runs[0]["commit"], "mean": _mean(runs)}
 
 
 def _confirmed(st: dict, research: dict) -> dict:
@@ -1402,9 +1435,42 @@ def _after_change(run_dir: Path, con, sha: str, change: str, breaking: bool = Fa
     return {"equivalence_check": check, "epoch_started": epoch, **_status(st)}
 
 
+CHECK_ALPHA = 0.05  # false-alarm rate of the equivalence check, the branch verification and the drift check
+
+
+def _pooled_noise(st: dict, fidelity: dict) -> tuple[float, int]:
+    """σ̂ pooled within configs (same lever values) over the current epoch's finished trials at
+    `fidelity`, wrap-up trials aside, and its df = Σ(n_c − 1). With no replicated config there yet, the
+    recorded σ at `fidelity` on its k − 1 df."""
+    configs: dict[str, list[float]] = {}
+    for t in st["trials"]:
+        if (t["status"] == "finished" and t["fidelity"] == fidelity and t["kind"] != WRAPUP_KIND
+                and t.get("epoch", 0) == st["epoch"]["epoch"]):
+            configs.setdefault(json.dumps(t["levers"], sort_keys=True), []).append(t["objective"])
+    ss = sum((y - statistics.fmean(ys)) ** 2 for ys in configs.values() for y in ys)
+    df = sum(len(ys) - 1 for ys in configs.values())
+    if df:
+        return math.sqrt(ss / df), df
+    return _sigma(st, fidelity), max(st["run"]["replicates_k"] - 1, 1)
+
+
+def _t(p: float, df: int) -> float:
+    """Student-t quantile."""
+    from scipy.stats import t  # imported here so the hooks' checks start fast
+    return float(t.ppf(p, df))
+
+
+def _mean(runs: list[dict]) -> float | None:
+    """The trials' mean objective; None when one failed."""
+    ys = [t["objective"] for t in runs if t["status"] == "finished"]
+    return statistics.fmean(ys) if runs and len(ys) == len(runs) else None
+
+
 def _equivalence_check(run_dir: Path, con, sha: str, change: str) -> dict:
-    """The incumbent and the baseline, 2 replicates each at the current fidelity on the new commit,
-    against their logged means: within 2σ (a float tolerance when σ = 0)."""
+    """The incumbent and the baseline at the current fidelity on the new commit, against their logged
+    means. First look: 2 replicates each, within 2σ̂. A config outside it gets 4 more and fails only if
+    the 6 still differ in a two-sided t-test at CHECK_ALPHA split over the configs. σ̂ is pooled over the
+    epoch (`_pooled_noise`); σ̂ = 0 keeps the float tolerance and no second look."""
     st = elog.load(con)
     fidelity, baseline = st["fidelity"]["fidelity"], _baseline(run_dir)
     sign = 1 if st["run"]["direction"] == "minimize" else -1
@@ -1413,30 +1479,44 @@ def _equivalence_check(run_dir: Path, con, sha: str, change: str) -> dict:
     configs = [("baseline", baseline)]
     if inc and {**baseline, **inc["levers"]} != baseline:
         configs.append(("incumbent", {**baseline, **inc["levers"]}))
-    sigma = _sigma(st, fidelity)
-    logged = {name: [t["objective"] for t in trials if {**baseline, **t["levers"]} == levers]
-              for name, levers in configs}
+    sigma, df = _pooled_noise(st, fidelity)
+    q = _t(1 - CHECK_ALPHA / (2 * len(configs)), df)
+    logged = {name: [t for t in trials if {**baseline, **t["levers"]} == levers] for name, levers in configs}
+    if inc and len(logged.get("incumbent", [])) > 1:
+        # the trial that made it the incumbent is the best of many draws (the winner's curse): its
+        # replicates alone give an unbiased logged mean
+        logged["incumbent"] = [t for t in logged["incumbent"] if t["trial"] != inc["trial"]]
     rows, refused = [], None
     for name, levers in configs:
-        runs = []
+        before, m = _mean(logged[name]), len(logged[name])
+        ftol = 1e-9 * max(1.0, abs(before or 0.0))
+        runs: list[dict] = []
+
+        def look(n: int, tol: float) -> dict:
+            runs.extend(_trial(run_dir, con, None, "equivalence", levers, fidelity, equivalence_of=name,
+                               **({"replicate_of": inc["trial"]} if name == "incumbent" and inc else {}))
+                        for _ in range(n))
+            mean = _mean(runs)
+            # nothing logged at this config yet: nothing it could disagree with
+            return {"trials": [t["trial"] for t in runs], "mean": mean, "tolerance": tol,
+                    "passed": mean is not None and (before is None or abs(mean - before) <= tol)}
+        first = None
         try:
-            for _ in range(2):
-                runs.append(_trial(run_dir, con, None, "equivalence", levers, fidelity, equivalence_of=name,
-                                   **({"replicate_of": inc["trial"]} if name == "incumbent" and inc else {})))
+            first = second = look(2, 2 * sigma + ftol)
+            if not first["passed"] and first["mean"] is not None and sigma:  # σ̂ = 0: one look
+                second = look(4, q * sigma * math.sqrt(1 / 6 + 1 / m) + ftol)
         except TrialRefused as e:  # the run can't go on anyway: no round fits either
             refused = str(e)
+            if first:  # the budget refused the second look: the first look's failure stands
+                rows.append({"config": name, "levers": levers, "logged_mean": before, "logged_n": m, **first,
+                             "stage1": None})
             break
-        ys = [t["objective"] for t in runs if t["status"] == "finished"]
-        before = statistics.fmean(logged[name]) if logged[name] else None
-        mean = statistics.fmean(ys) if len(ys) == len(runs) else None
-        tol = 2 * sigma + 1e-9 * max(1.0, abs(before or 0.0))
-        # nothing logged at this config yet: nothing it could disagree with
-        passed = mean is not None and (before is None or abs(mean - before) <= tol)
-        rows.append({"config": name, "levers": levers, "logged_mean": before, "logged_n": len(logged[name]),
-                     "trials": [t["trial"] for t in runs], "mean": mean, "tolerance": tol,
-                     "passed": passed})
-    payload = {"commit": sha, "change": change, "fidelity": fidelity, "sigma": sigma, "configs": rows,
-               "passed": None if refused else all(r["passed"] for r in rows), "refused": refused}
+        rows.append({"config": name, "levers": levers, "logged_mean": before, "logged_n": m, **second,
+                     "stage1": first if second is not first else None})
+    failed = any(r["passed"] is False for r in rows)
+    payload = {"commit": sha, "change": change, "fidelity": fidelity, "sigma": sigma, "df": df,
+               "alpha": CHECK_ALPHA, "configs": rows,
+               "passed": False if failed else None if refused else True, "refused": refused}
     elog.append(con, "equivalence_check", "harness", payload)
     return payload
 
@@ -1622,6 +1702,9 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
     """R1+: GPSampler searches the selected hypotheses' levers until a round-end trigger fires."""
 
     run, r = st["run"], max(st["rounds"]) + 1
+    for n in _selection(st)[1]:  # the cap is tight: retained levers narrowed, never frozen
+        elog.append(con, "narrowed", "harness", {**n, "round": r, "cap": True})
+    st = elog.load(con)
     selected = _selected(st)
     space, baseline = _space(selected), _baseline(run_dir)
     fidelity, ref = st["fidelity"]["fidelity"], run["reference_fidelity"]
@@ -1640,7 +1723,38 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
         "pid": os.getpid(), "cap_s": cap, "seeded": [t["trial"] for t in seeds]})
     rng = _rng(run, f"R{r}")
     study = bo_study.Study(run_dir / "studies.db", run["direction"], space, seeds, rng.getrandbits(31))
-    # ponytail: one trial at a time; run.yaml `workers` needs asks with pending trials (constant liar)
+    # up to `workers` trials at once, each subprocess waited on in a worker thread; the log and the
+    # study are touched from this thread only. An ask not yet told stays RUNNING in the study, and
+    # GPSampler conditions its next asks on those pending points (qLogEI), so no constant liar is needed
+    workers, pool = run["workers"], futures.ThreadPoolExecutor(run["workers"])
+    flight: dict = {}  # future -> (the started trial, its sampler ask or None)
+    runners: dict = {}  # trial -> runner pid: a failing round kills the runners still in flight
+
+    def launch(kind: str, levers: dict, asked=None, **extra) -> bool:
+        """Start a trial (its gates may refuse it) in a worker; with every worker busy, land one.
+        False, and nothing started, while it fits the budget only if the trials in flight cost less
+        than estimated: one of them lands first (an estimate is not a charge; the ledger refuses)."""
+        remaining, estimate = _headroom(elog.load(con), fidelity)
+        if flight and (remaining <= 0 or estimate > remaining):
+            land()
+            return False
+        trial = _start(run_dir, con, None, kind, levers, fidelity, round=r, **extra)
+        flight[pool.submit(_run_trial, run_dir, run["runner"], trial, run_dir / "worktree", runners)] = (trial, asked)
+        if len(flight) >= workers:
+            land()
+        return True
+
+    def land(every: bool = False) -> None:
+        """Log the in-flight trials that finished (in trial order): at least one, or every one."""
+        done, _ = futures.wait(flight, return_when=futures.ALL_COMPLETED if every else futures.FIRST_COMPLETED)
+        for f in sorted(done, key=lambda f: flight[f][0]["trial"]):
+            outcome = f.result()  # (a worker's error leaves its trial in flight, for the kill below)
+            trial, asked = flight.pop(f)
+            t = _outcome(run_dir, con, trial, outcome)
+            if asked is not None:
+                study.tell(asked, t)
+            elif t["status"] == "finished":
+                study.add(t)
 
     def best(trials):
         return bo_study.incumbent(eligible(trials), sign, confirmations)
@@ -1654,11 +1768,12 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
     stall_after = max(5 * len(space), 20)
     share = ESCALATED_SHARE if any(e["step"] == "replicates" for h in selected
                                    for e in h["escalations"]) else REPLICATE_SHARE
-    # the agent-chosen trials first: R1's user-named seeds, then the ones enqueued for this round
-    # ponytail: a queued trial whose round was interrupted is not carried to the resuming round
+    # the agent-chosen trials first: R1's user-named seeds, then the ones queued for this round
+    # ponytail: R1's seeds are not carried past an interrupted R1 (queued trials are); give each seed
+    # an index on its trial and carry the unstarted ones like `_queued` if that bites
     chosen: list[tuple[str, dict, dict]] = [("seed", s, {}) for s in run["seeds"]] if r == 1 else []
     chosen += [("agent", q["config"], {"queued": q["queued"], "expected": q["expected"]})
-               for q in st["queue"] if q["round"] == r]
+               for q in _queued(st, r)]
     try:
         for kind, cfg, extra in chosen:
             if trigger := user_trigger(elog.load(con)):
@@ -1667,9 +1782,8 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
                 elog.append(con, "agent_trial_skipped", "harness",
                             {"round": r, "kind": kind, "config": cfg, "reason": why, **extra})
                 continue
-            t = _trial(run_dir, con, None, kind, {**baseline, **cfg}, fidelity, round=r, **extra)
-            if t["status"] == "finished":
-                study.add(t)
+            while not launch(kind, {**baseline, **cfg}, **extra):
+                pass
         while trigger is None:
             st = elog.load(con)
             inc = best(st["trials"])
@@ -1695,13 +1809,17 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
                           for h in _in_search(st))  # a pending reject holds the round open
             this = [t for t in st["trials"] if t.get("round") == r]
             spent = sum(t["wall_clock_s"] for t in this if t["status"] != "running")
-            # the drift check's two reference trials come out of the cap too; the first trial always
-            # runs (only the budget refuses it), so a round never ends empty
+            # the drift check's two reference trials come out of the cap too, and so do the trials in
+            # flight (at their estimated cost); the first trial always runs (only the budget refuses
+            # it), so a round never ends empty
             reserve = 2 * _cost(st["trials"], ref) if fidelity != ref else 0.0
-            if spent > 0 and spent + _cost(st["trials"], fidelity) + reserve > cap:
+            if (spent > 0 or flight) and spent + _in_flight(st) + _cost(st["trials"], fidelity) + reserve > cap:
                 trigger = "cap"
             elif (since >= stall_after and not pending and not holding
                   and _burned_in(st, selected, eligible)):
+                if flight:  # judged with nothing in flight: a trial still running may be a new incumbent
+                    land()
+                    continue
                 trigger = "stall"
             elif pending or (confirmations
                              and sum("replicate_of" in t for t in this) < share * len(this)):
@@ -1711,36 +1829,51 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
                     # ponytail: the least-replicated of the top 3 configs (escalation raises only the
                     # share); pick by posterior overlap if replicates are wasted on settled configs
                     top = bo_study.ranked(eligible(st["trials"]), sign)[:3]
-                    root, kind = min(top, key=lambda c: c["replicates"])["trial"], "replicate"
+                    running = [tr.get("replicate_of") for tr, _ in flight.values()]
+                    root = min(top, key=lambda c: c["replicates"] + running.count(c["trial"]))["trial"]
+                    kind = "replicate"
                 levers = next(t["levers"] for t in eligible(st["trials"]) if t["trial"] == root)
-                t = _trial(run_dir, con, None, kind, {**baseline, **levers}, fidelity, round=r,
-                           replicate_of=root)
-                if t["status"] == "finished":
-                    study.add(t)
+                launch(kind, {**baseline, **levers}, replicate_of=root)
             else:
                 asked = study.ask()
+                if any(q is not None and q.params == asked.params for _, q in flight.values()):
+                    study.tell(asked, {"status": "refused"})  # never the same point twice in flight
+                    land()
+                    continue
                 try:
-                    t = _trial(run_dir, con, None, "sampler", {**baseline, **asked.params}, fidelity, round=r)
+                    started = launch("sampler", {**baseline, **asked.params}, asked=asked)
                 except ProhibitedRefused:  # a point between the grid registration checked
-                    t, refusals = {"status": "refused"}, refusals + 1
+                    started, refusals = False, refusals + 1
                     # ponytail: ends the round after 10 refused asks (the sampler learns nothing from
                     # a FAIL); reparameterise the region into a box if a hypothesis keeps hitting it
                     if refusals >= 10:
                         trigger = "prohibited"
-                study.tell(asked, t)
+                if not started:
+                    study.tell(asked, {"status": "refused"})
+        land(every=True)  # any other trigger: the trials in flight finish and are recorded in this round
         st = elog.load(con)
         inc = best(st["trials"])
         noise = _reestimate_noise(con, st, r, eligible, fidelity) if confirmations else None
         if fidelity != ref and inc and not st["run_ended"]:  # a stopped run runs no more trials
             drift = _drift_check(run_dir, con, r, inc, eligible, sign)
     except TrialRefused as e:
+        try:
+            if flight:  # (the trial ceiling) the trials already running finish and are recorded
+                land(every=True)
+                inc = best(elog.load(con)["trials"])
+        except BaseException:
+            _abort_round(run_dir, con, r, inc, [runners[tr["trial"]] for tr, _ in flight.values()
+                                                if tr["trial"] in runners])
+            raise
         _finalise_rejects(con, r, None)
         return {**_end_run(run_dir, con, {"round": r, "trigger": e.reason, "incumbent": inc}),
                 "verdicts": _round_verdicts(elog.load(con), r)}
     except BaseException:
-        elog.append(con, "round_ended", "harness", {"round": r, "trigger": "failed", "incumbent": inc})
-        _regenerate(run_dir, con)
+        _abort_round(run_dir, con, r, inc, [runners[tr["trial"]] for tr, _ in flight.values()
+                                            if tr["trial"] in runners])
         raise
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
     _finalise_rejects(con, r, drift)
     if trigger == "stall":
         _escalate(con, elog.load(con), r)
@@ -1754,6 +1887,21 @@ def _run_round(run_dir: Path, con, a, st: dict) -> dict:
     st = elog.load(con)
     return {"round": r, "trigger": trigger, "incumbent": inc, "drift": drift, "noise_estimate": noise,
             "verdicts": _round_verdicts(st, r), **_status(st)}
+
+
+def _abort_round(run_dir: Path, con, r: int, inc: dict | None, runners: list[int]) -> None:
+    """A round failing with trials in flight: their runners are killed (their trials stay running
+    until recovery abandons them, as a crash leaves them), and the round ends `failed`."""
+    # ponytail: a runner spawned in the instant between its submit and its pid landing in `runners`
+    # escapes the kill (this process then waits for it at exit, and recovery abandons it); register
+    # the pid under a lock with an abort flag if that ever bites
+    for pid in runners:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    elog.append(con, "round_ended", "harness", {"round": r, "trigger": "failed", "incumbent": inc})
+    _regenerate(run_dir, con)
 
 
 def _eligibility(st: dict, space: dict, baseline: dict, fidelity: dict):
@@ -1931,7 +2079,8 @@ def _against(lv: dict, best) -> bool:
 
 def _finalise_rejects(con, r: int, drift: dict | None) -> None:
     """The round's confirmed rejects. At a proxy fidelity they stand only once the drift check
-    passed; a broken (or unchecked) proxy fidelity logs them as inconclusive instead."""
+    passed; a broken (or unchecked) proxy fidelity logs them as inconclusive instead, and an undecidable
+    drift check (the proxy ordered no config against the incumbent) defers them to a later round."""
     st = elog.load(con)
     at_proxy = st["fidelity"]["fidelity"] != st["run"]["reference_fidelity"]
     last = [(h, h["verdicts"][-1]) for h in _in_search(st) if h["verdicts"]]
@@ -1948,7 +2097,12 @@ def _finalise_rejects(con, r: int, drift: dict | None) -> None:
         if v["condition"] == "no-improvement" and (v["delta_stat"]["upper"], v["id"]) != first:
             elog.append(con, "reject_deferred", "harness", {"id": h["id"], "verdict": v["id"], "round": r})
             continue
-        if at_proxy and not (drift and drift["broken"] is False):
+        if at_proxy and drift and drift.get("undecidable"):
+            # ponytail: a proxy fidelity that never orders anything defers every round until the budget ends
+            # or a stall escalates; send it up a rung after one such deferral if that shows up in practice
+            elog.append(con, "reject_deferred", "harness", {"id": h["id"], "verdict": v["id"], "round": r,
+                                                            "reason": "undecidable proxy fidelity"})
+        elif at_proxy and not (drift and drift["broken"] is False):
             reason = "broken proxy fidelity" if drift and drift["broken"] else "proxy fidelity unchecked"
             elog.append(con, "hypothesis_inconclusive", "harness",
                         {"id": h["id"], "verdict": v["id"], "reason": reason})
@@ -2052,8 +2206,9 @@ def _burned_in(st: dict, selected: list[dict], eligible) -> bool:
                for h in selected)
 
 
-def _drift_check(run_dir: Path, con, r: int, inc: dict, eligible, sign: int) -> dict | None:
-    """The incumbent and one random config of the round, re-run at the reference fidelity."""
+def _drift_check(run_dir: Path, con, r: int, inc: dict, eligible, sign: int) -> dict:
+    """The incumbent and one random config of the round that the proxy fidelity orders against it,
+    re-run at the reference fidelity; undecidable (nothing run) when the proxy orders none."""
     st = elog.load(con)
     ref = st["run"]["reference_fidelity"]
     # fidelity-sensitive levers are declared to show (almost) nothing at a proxy fidelity and may pay off
@@ -2063,28 +2218,42 @@ def _drift_check(run_dir: Path, con, r: int, inc: dict, eligible, sign: int) -> 
 
     def trusted(levers: dict) -> dict:
         return {**levers, **{n: v for n, v in inc["levers"].items() if n in late}}
-    others = [t for t in eligible(st["trials"])
-              if t.get("round") == r and "replicate_of" not in t and trusted(t["levers"]) != inc["levers"]]
+    proxy = {c["trial"]: c for c in bo_study.ranked(eligible(st["trials"]), sign)}
+    p_sigma, p_df = _pooled_noise(st, st["fidelity"]["fidelity"])
+    p_q, top = _t(1 - CHECK_ALPHA, p_df), proxy[inc["trial"]]
+
+    def ordered(t: dict) -> bool:
+        """The proxy fidelity separates this config from the incumbent by more than its noise (a tie, or
+        a difference in a useless lever only, can't show a reversal)."""
+        c = proxy[t["trial"]]
+        se = math.sqrt(1 / (top["replicates"] + 1) + 1 / (c["replicates"] + 1))
+        return abs(c["mean"] - top["mean"]) > p_q * p_sigma * se + 1e-9 * max(1.0, abs(top["mean"]))
+    others = [t for t in eligible(st["trials"]) if t.get("round") == r and "replicate_of" not in t
+              and trusted(t["levers"]) != inc["levers"] and ordered(t)]
     if not others:
-        return None
+        payload = {"round": r, "configs": [inc["trial"]], "trials": [], "proxy": [], "reference": [],
+                   "margin": None, "broken": None, "undecidable": True}
+        elog.append(con, "drift_check", "harness", payload)
+        return payload
     other = _rng(st["run"], f"R{r}", "drift").choice(others)
-    proxy = {c["trial"]: c["mean"] for c in bo_study.ranked(eligible(st["trials"]), sign)}
     pair = [(inc["trial"], inc["levers"]), (other["trial"], trusted(other["levers"]))]
     baseline = _baseline(run_dir)
+    sigma, df = _pooled_noise(st, ref)  # before the drift trials: they are the sample it judges
     runs = [_trial(run_dir, con, None, "drift", {**baseline, **levers}, ref, round=r, drift_of=root)
             for root, levers in pair]
     at_ref = [t.get("objective") for t in runs]
-    at_proxy = [proxy[root] for root, _ in pair]
-    # broken: the reference reverses the proxy's order by more than noise alone would, 2 sd of the
-    # difference of two reference trials (0 for a deterministic objective)
+    at_proxy = [proxy[root]["mean"] for root, _ in pair]
+    # broken: the reference reverses the proxy's order by more than noise alone would, a one-sided
+    # t-test at CHECK_ALPHA on the difference of two reference trials (a float tolerance when σ̂ = 0)
     # ponytail: one pair; rank agreement over more configs (or against calibration ρ) if it misfires
-    margin = 2 * math.sqrt(2) * st["noise"]["rungs"][0]["sigma"]
+    margin = _t(1 - CHECK_ALPHA, df) * math.sqrt(2) * sigma + 1e-9 * max(1.0, abs(at_ref[0] or 0.0))
     broken = None  # unknown when a drift trial failed
     if at_ref[0] is not None and at_ref[1] is not None:
         d_proxy, d_ref = sign * (at_proxy[0] - at_proxy[1]), sign * (at_ref[0] - at_ref[1])
         broken = d_proxy * d_ref < 0 and abs(d_ref) > margin
     payload = {"round": r, "configs": [root for root, _ in pair], "trials": [t["trial"] for t in runs],
-               "proxy": at_proxy, "reference": at_ref, "margin": margin, "broken": broken}
+               "proxy": at_proxy, "reference": at_ref, "sigma": sigma, "df": df, "margin": margin,
+               "broken": broken, "undecidable": False}
     elog.append(con, "drift_check", "harness", payload)
     return payload
 
@@ -2132,7 +2301,9 @@ def _calibrate_ladder(run_dir: Path, con, noise: dict, space: dict) -> dict:
     return elog.load(con)["calibration"]
 
 
-def _run_trial(run_dir: Path, runner: str, trial: dict, worktree: Path) -> dict:
+def _run_trial(run_dir: Path, runner: str, trial: dict, worktree: Path, runners: dict | None = None) -> dict:
+    """Run the trial's subprocess and measure it; logs only heartbeats (on its own connection), so it
+    may run in a worker thread. `runners` (trial -> runner pid) lets the round kill parallel runners."""
     art = run_dir / trial["artifact_dir"]
     art.mkdir(parents=True)
     (art / "trial.json").write_text(json.dumps({**trial, "artifact_dir": str(art)}, indent=2))
@@ -2157,6 +2328,8 @@ def _run_trial(run_dir: Path, runner: str, trial: dict, worktree: Path) -> dict:
         # its own process group: recovery, or this process failing, kills the runner and its children
         p = subprocess.Popen([run_dir / "venv" / "bin" / "python", runner], start_new_session=True,
                              cwd=worktree, env=env, stdout=out, stderr=err)
+        if runners is not None:
+            runners[trial["trial"]] = p.pid
         beat = threading.Thread(target=heartbeat, args=(p.pid,), daemon=True)
         beat.start()
         try:
@@ -2269,17 +2442,37 @@ def _exclusive(a: dict, b: dict) -> bool:
 
 
 def _selected(st: dict) -> list[dict]:
+    return _selection(st)[0]
+
+
+def _selection(st: dict) -> tuple[list[dict], list[dict]]:
     """The hypotheses the next round searches, a deterministic function of the log: those in the
     search stay (retained ones included), then the queue joins in order while the lever dimensions
     fit the cap (a lower priority never jumps a higher one that doesn't fit; the first always fits an
-    empty round). A hypothesis exclusive with one already chosen is skipped."""
-    # ponytail: retained hypotheses keep their full ranges when the cap is tight; narrow the oldest
-    # concentrated ones (spec: "narrowed, not frozen") if they crowd the queue out
+    empty round). A hypothesis exclusive with one already chosen is skipped. When the cap is tight
+    (the next unit doesn't fit), the oldest retained hypotheses whose posterior is concentrated are
+    narrowed, never frozen, to their round's suggested windows, as few as let the unit fit: their
+    narrowed levers stay in the search as context, uncounted by the cap. -> (the selection, the
+    narrowings the round start logs: [{id, lever, before, after, verdict}])"""
     # ponytail: queued hypotheses flagged as interacting, and rivals, join together or not at all; a revived
     # version rides with its partner uncounted (spec: the same round), so it can take a round past the cap
     chosen, queue, hyps = _in_search(st), _queue(st), st["hypotheses"]
     linked = {frozenset((hyps[x]["number"], hyps[p]["number"])) for x, p in [*_links(st), *_rivals(st)]}
-    cap, dims = _dimension_cap(st), sum(len(_group(h)) for h in chosen)
+    # ponytail: context levers are still GP dimensions, so the searched space (status `dimensions`)
+    # can pass the cap; count context at a fraction of a dimension if rounds grow too wide to burn in
+    cap, dims = _dimension_cap(st), sum(len(_group(h)) - len(_context(h)) for h in chosen)
+    # the last round's suggested narrowings of levers not yet context, on the record `narrow` would
+    # read (its latest on the current fidelity, epoch, group and ranges: one narrowed at this
+    # boundary already has none)
+    # ponytail: none when the last round was interrupted before a record; the cap then stays exceeded
+    windows: dict[str, list[dict]] = {}
+    for n in reports.narrowings(st, max(st["rounds"])) if st["r0_complete"] else []:
+        h = hyps[n["id"]]
+        if n["lever"] not in _context(h) and (v := _latest(h, st)) is not None and v["id"] == n["verdict"]:
+            windows.setdefault(n["id"], []).append(n)
+    spare = sorted((h for h in chosen if h["status"] == "retained" and h["id"] in windows),
+                   key=lambda h: h["registered"])  # oldest first
+    narrowed: list[dict] = []
     for h in queue:
         if h in chosen or any(_exclusive(h, x) for x in chosen):
             continue
@@ -2290,10 +2483,21 @@ def _selected(st: dict) -> list[dict]:
                 unit.append(x)
         d = sum(len(_group(u)) for u in unit if "revived_from" not in u or u is h)
         if chosen and cap is not None and dims + d > cap:
-            break
+            k, free = 0, dims
+            while free + d > cap and k < len(spare):
+                free, k = free - len(windows[spare[k]["id"]]), k + 1
+            if free + d > cap:
+                break
+            narrowed += spare[:k]
+            spare, dims = spare[k:], free
         chosen += unit
         dims += d
-    return chosen
+    return chosen, [n for h in narrowed for n in windows[h["id"]]]
+
+
+def _context(h: dict) -> set[str]:
+    """A retained hypothesis's levers narrowed for a tight cap: searched as context, uncounted by it."""
+    return set(h.get("context", [])) & set(_group(h)) if h["status"] == "retained" else set()
 
 
 def _upcoming(st: dict) -> int:
@@ -2305,8 +2509,18 @@ def _agent_trials(st: dict) -> dict:
     """The next round's agent-chosen trials: max(1, 6 − R) per round (so the loop is never worse
     than plain BO), the user's run.yaml seeds counting against R1's."""
     r = _upcoming(st)
-    used = (len(st["run"]["seeds"]) if r == 1 else 0) + sum(q["round"] == r for q in st["queue"])
+    # (trials carried from an interrupted round count too, so `used` may pass the cap once: each was
+    # admitted under its own round's)
+    used = (len(st["run"]["seeds"]) if r == 1 else 0) + len(_queued(st, r))
     return {"round": r, "cap": max(1, 6 - r), "used": used}
+
+
+def _queued(st: dict, r: int) -> list[dict]:
+    """The agent-chosen trials round r runs: those enqueued for it, and those an interrupted earlier
+    round never reached (never started, never skipped). One that started is never run again."""
+    started = {t["queued"] for t in st["trials"] if "queued" in t}
+    return [q for q in st["queue"] if q["round"] == r or (
+        q["round"] < r and q["queued"] not in started and not q.get("skipped"))]
 
 
 def _config_error(cfg, space: dict) -> str | None:
@@ -2333,7 +2547,10 @@ def cmd_enqueue(a) -> dict:
         cfg = json.loads(a.config)
     except json.JSONDecodeError as e:
         raise Refused(f"--config must be JSON, e.g. '{{\"H1.x\": 0.5}}': {e}")
-    if why := _config_error(cfg, _space(_selected(st))):
+    selected, narrowing = _selection(st)
+    space = _space(selected)  # with the narrowings the round start will log
+    space.update({n["lever"]: {**space[n["lever"]], **n["after"]} for n in narrowing})
+    if why := _config_error(cfg, space):
         raise Refused(f"--config: {why}")
     q = _agent_trials(st)
     if q["used"] >= q["cap"]:
@@ -2361,8 +2578,11 @@ def _narrative_missing(st: dict) -> list[int]:
 
 
 def _schedule_status(st: dict) -> dict:
-    selected = _selected(st)
+    selected, narrowing = _selection(st)
     return {"selected": [h["id"] for h in selected], "queue": [h["id"] for h in _queue(st)],
+            # retained levers the next round start narrows for the cap, and those searched as context
+            "narrowing": narrowing, "context": sorted({h["id"] for h in selected if _context(h)}
+                                                      | {n["id"] for n in narrowing}),
             "dimension_cap": _dimension_cap(st), "dimensions": len(_space(selected)),
             "expected_missing": _expected_missing(st), "agent_trials": _agent_trials(st),
             # flagged to the user, never starved silently

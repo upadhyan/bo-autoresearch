@@ -328,7 +328,8 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   it passes; a budget refusal → passed None (no epoch). Fail or --breaking → `epoch_started` {epoch, round, commit,
   change, breaking}, then k baseline replicates (1 if deterministic) in the new epoch → `noise_estimate` {epoch,
   fidelity, sigma (None if <2 finished), n, trials, mean, previous_sigma}; the fold replaces that rung's σ/mean in
-  st["noise"]. NOTE: 2σ on 2 replicates fails a true no-op ~3–6% of the time (more when R0's 3-replicate σ is low):
+  st["noise"]. NOTE: 2σ on 2 replicates fails a true no-op ~15% of the time with R0's df = 4 σ̂ (~28% at k = 3; ~4.5%
+  only with a known σ; docs/research/equivalence-check-threshold.md; replaced by the two-stage rule, "#21 equivalence" below);
   tests now default to `seed: 0` (conftest.write_run_yaml) so runs replay identically.
 - #28: `narrow <H> --lever <name> --low/--high` (graded; ints must be integral) or `--options '<json list>'`
   (categorical, ≥2, proper subset); refused mid-round (it takes effect at the next round boundary — rounds only run
@@ -731,3 +732,72 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   orchestrator's while SubagentStop held the agent (which then dumped env hunting for its id).
 - #38 (headless isolation): claude runs with --setting-sources project,local --strict-mcp-config: the user's own
   hooks, plugins and MCP servers stay out; subscription auth still works (stored apart from settings).
+- workers (parallel trials, #21 story 16): a BO round (R1+) keeps up to `workers` trials in flight; everything else (R0, ladder
+  calibration, smoke, equivalence, drift, wrap-up) stays one at a time (ponytail: their trials are few). `cli._start` (gates +
+  trial_started) and `cli._outcome` (trial_finished/failed) run on the main thread; only the subprocess wait (`_run_trial`,
+  heartbeats on its own connection) runs in a `ThreadPoolExecutor` worker, so the log and the Optuna study have one writer.
+  Pending points: GPSampler (Optuna 5) already conditions asks on RUNNING trials (qLogEI, Kriging believer), and an ask
+  is RUNNING until told, so no constant liar is added; an ask equal to an in-flight ask is told FAIL and the round waits
+  for a landing. Budget: the gate charges running trials their estimated cost (`_in_flight`, 0 serially), and so does
+  the round cap (which now also exempts only the first trial: `spent > 0 or flight`). Budget stays summed per-trial
+  wall-clock (spec), so W workers spend it ~W× faster in real time. Triggers with trials in flight: a stall is judged
+  only with nothing in flight (wait for a landing, re-evaluate: a trial still running may be a new incumbent owed
+  confirmations); every other trigger (search_space, cap, target, user_stop/checkpoint, prohibited, and a budget/ceiling
+  refusal) stops launching, lets the in-flight trials finish, and records them in the round before round_ended. Landed
+  trials are logged in trial order within one wait; "new incumbent"/owed confirmations replay in trial (start) order as
+  before. A verdict check may see up to `workers` trials past its due count. Replicate-floor picks count in-flight
+  replicates. A crash leaves every in-flight trial running with a dead pid: recovery abandons and killpgs each (no
+  change); a main-thread exception killpgs the in-flight runners. Timing makes parallel runs non-replayable (the log
+  still rebuilds every file). workers: 1 takes the same path with at most one trial in flight (same events).
+- workers (review): the in-flight estimate never ends the run: `launch` (in `_run_round`) checks `_headroom` first, and while
+  trials are in flight and the next would not fit, it lands one and asks again; only the ledger (nothing in flight) refuses,
+  so budget_spent means spent. A worker error in a landing (also during the budget/ceiling end) goes through
+  `_abort_round` (killpg the in-flight runners, round_ended failed). Kept: confirmations owed by a trial that landed after
+  a round-ending trigger are not carried to the next round (the stall window and owed list restart per round; serial
+  rounds already dropped them on a cap); an unknown cost (0) charges nothing, so a round at a never-measured fidelity could
+  start `workers` trials uncharged (R1+ fidelities are always measured by R0 or ladder calibration).
+- #29 limit (queued trials): `cli._queued(st, r)` = trials enqueued for r plus those of an earlier round that never started
+  (no trial carries its `queued` seq) and were never skipped (the fold marks `agent_trial_skipped` {queued} entries
+  `skipped`). They run first in r, oldest first, and count against r's agent-trial cap (so `used` may exceed it once; they
+  were admitted under their own round's cap). A started one (abandoned in flight, or finished) is never run again. Kept:
+  R1's run.yaml seeds are not carried past an interrupted R1 (ponytail in `_run_round`).
+- #29 limit (tight cap; #10 resolution 14: "the oldest retained hypotheses whose posterior is concentrated are narrowed,
+  never frozen"): `cli._selection(st)` -> (selection, narrowings). When the next queued unit doesn't fit, the harness
+  takes retained hypotheses oldest first (registration seq) that have a window in the last round's suggested narrowings
+  (`reports.narrowings`, the summary's rule: best 5 sampler trials + baseline span ≤ half the range, last record of the
+  round passed every gate), as few as let the unit fit; none if even all of them wouldn't. The round start logs each
+  window as `narrowed` {id, lever, before, after, verdict, round, cap: true} (actor harness; the usual narrowing fold, so
+  its checks restart), and the fold keeps `context` [levers]: while retained, those levers are searched but uncounted by
+  the cap (what "stay in the search as context" buys; like a revived version riding uncounted). A lever narrowed at
+  this boundary already (by `narrow`) is not narrowed again. status.schedule gains `narrowing` (pending) and `context`
+  (ids). Kept: in-search dims can still exceed the cap when nothing retained is concentrated (unconcentrated retained
+  and active hypotheses are never narrowed or frozen for the cap).
+- #29 limit (review): a window counts only when its verdict is the hypothesis's `_latest` record (current fidelity,
+  epoch, group and ranges: what `narrow` reads; this also skips one narrowed at this boundary). `context` is cleared when
+  the hypothesis stops being retained (a verdict makes it active again, or it is parked), so its levers count again.
+  `enqueue` judges configs against the space with the pending windows applied. CONTEXT.md's Narrowing now covers
+  retained hypotheses and context. Kept (ponytail in `_selection`): context levers are still GP dimensions, so status
+  `dimensions` can pass `dimension_cap`; no window when the last round was interrupted before a record.
+- #21 equivalence (user decision; docs/research/equivalence-check-threshold.md): the three noise checks use a t quantile at
+  `CHECK_ALPHA` = 0.05 on σ̂ = `cli._pooled_noise(st, fidelity)`: pooled within configs (identical `levers` JSON) over the
+  current epoch's finished trials at that fidelity, wrap-up trials aside, df = Σ(n_c − 1); no replicated config → the
+  recorded σ (`_sigma`) on k − 1 df. `_sigma` itself stays R0's/the epoch's baseline σ everywhere else (GP noise floor, δ
+  advice, previous_sigma): the spec keeps those on the baseline σ and the per-round re-estimate as a flag only. σ̂ is taken
+  before a check's own trials. Equivalence: first look 2 replicates within 2σ̂ (+ float tol); a config outside it gets 4 more
+  and fails iff |mean₆ − logged| > t(1 − α/(2·#configs), df)·σ̂·√(1/6 + 1/m); σ̂ = 0 or a failed trial → no second look; epoch
+  iff a config fails (a budget refusal keeps any config's already-failed look: passed False, not None). The incumbent's logged mean excludes the trial that selected it when it has replicates (winner's curse).
+  Row: final `trials`/`mean`/`tolerance`/`passed` + `stage1` (the first look, only when a second ran); payload + `df`,
+  `alpha`. Verification: same shape, 3 + 3 more distilled replicates, t(1 − α/2, df)·σ̂·√(1/6 + 1/3); `distilled`, `gap`,
+  `tolerance`, `passed` are final, + `stage1`, `df`, `alpha` (σ = 0.0, not None, before R0). Drift: margin t(1 − α, df)·√2·σ̂
+  at the reference (one-sided: only a reversal breaks) + float tol; the other config is drawn only among the round's configs
+  the proxy orders against the incumbent (|Δ_proxy| > t(1 − α, df_p)·σ̂_p·√(1/n_i + 1/n_o) + float tol); none → `drift_check`
+  {undecidable: true, broken: None, trials: []} (also when the round has no other config at all), nothing run, and the
+  round's rejects log `reject_deferred` {…, reason "undecidable proxy fidelity"} (stay active; ponytail: a proxy that never
+  orders anything defers until budget/stall). Before → after (docs/research/check_rules_mc.py, seeds 0..19 × 20k, σ = 1,
+  δ = 2σ; false alarm / power δ/2 / power δ / trials per no-op check): equivalence 14.8% / .36 / .74 / 4.00 → 3.6% / .17 /
+  .53 / 4.76 at df 4, 2.5% / .19 / .69 / 4.34 at df 20; verification 11.6% / .30 / .68 / 6 → 4.2% / .18 / .55 / 6.35 (df 4),
+  3.0% / .19 / .65 / 6.18 (df 20); drift 5.7% (df 4; 9% at df 2) / .17 / .35 / 2 → 5.0% / .15 / .32 / 2 (df 4), 5.0% / .17 /
+  .39 / 2 (df 20). End to end: a no-op check (k = 2, df 2) failed 5 of 40 on the first look alone, 2 of 40 in full; a faithful
+  proxy broke 2 of 20 before, 1 of 20 after; an exactly reversed proxy was caught 19 of 20 before, 20 of 20 after, and 7
+  → 20 of 20 with a useless co-active lever (test_a_broken_proxy_downgrades…, noise off). Tests that declare
+  `deterministic: true` must turn the toy's noise off (σ̂ = 0 lets noise pass for a proxy order).

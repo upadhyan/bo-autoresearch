@@ -187,7 +187,9 @@ def test_the_distilled_branch_holds_only_the_retained_mechanism_without_the_harn
     code, out = bo(repo, "wrapup", "--rationale", "commit and verify", env=env)
     assert code == 0 and out["result"] == "verified", out
     [v] = of_type(run_dir, "verification")
-    assert v["passed"] and len(v["research"]["trials"]) == len(v["distilled"]["trials"]) == 3
+    # 3 replicates each; a gap outside 2σ̂·√(2/3) gets 3 more distilled replicates and the t-test
+    assert v["passed"] and len(v["research"]["trials"]) == 3 and v["alpha"] == 0.05 and v["df"] >= 2
+    assert len(v["distilled"]["trials"]) == (6 if v["stage1"] else 3)
     wrap = [t for t in of_type(run_dir, "trial_started") if t["kind"] == "wrapup"]
     assert [t["trial"] for t in wrap] == v["research"]["trials"] + v["distilled"]["trials"]
     assert all(t["fidelity"] == {"epochs": 4} for t in wrap)
@@ -255,6 +257,11 @@ def test_a_planted_distillation_bug_gets_two_retries_then_the_research_branch_is
         if attempt < 3:
             v = out["verification"]
             assert not v["passed"] and v["gap"] > v["tolerance"] and repr(bug) in out["diff"]
+            # the first look (3 replicates, within 2σ̂·√(2/3)) failed, so 3 more distilled replicates ran and
+            # the 6 failed the t-test, t(0.975, df)·σ̂·√(1/6 + 1/3)
+            first = v["stage1"]
+            assert not first["passed"] and first["trials"] == v["distilled"]["trials"][:3]
+            assert len(v["distilled"]["trials"]) == 6 and len(v["research"]["trials"]) == 3
             assert out["next"] == [f"fix the distilled branch in {run_dir / 'distilled'}: verification attempt "
                                    f"{attempt} of 3 failed (gap {v['gap']:.4g}, tolerance {v['tolerance']:.4g}; the "
                                    "lever coder in distill mode gets the gap and the diff), then `wrapup`"]
