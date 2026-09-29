@@ -1,4 +1,11 @@
 """Seam 1: drive the `boautoresearch` CLI as a scripted caller against a toy project."""
+import os
+
+# One math thread before numpy/torch load, here and in every CLI subprocess (they inherit os.environ):
+# the GPs are tiny, and xdist workers × BLAS threads oversubscribe the machine.
+for _v in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    os.environ[_v] = "1"
+
 import json
 import shutil
 import sqlite3
@@ -9,6 +16,23 @@ from pathlib import Path
 import pytest
 
 TOY = Path(__file__).parent / "toy_project"
+
+
+def pytest_addoption(parser):
+    parser.addoption("--slow", action="store_true", help="also run the slow multi-seed rate tests")
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "slow: a multi-seed statistical rate test; skipped unless --slow or -m slow")
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--slow") or "slow" in (config.getoption("-m") or ""):
+        return
+    skip = pytest.mark.skip(reason="slow rate test: run with --slow")
+    for item in items:
+        if "slow" in item.keywords:
+            item.add_marker(skip)
 
 
 def git(cwd, *args):

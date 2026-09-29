@@ -7,6 +7,8 @@ import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
+
 from conftest import bo, expect_all, git, round_run, register
 from test_rounds import BASE, BOWL, coded, init, make_repo, of_type, toy_env
 from test_verdicts import lever as vlever, spec as vspec, verdict_run
@@ -172,6 +174,7 @@ def no_op_check(d, python, seed):
     return out["equivalence_check"]
 
 
+@pytest.mark.slow
 def test_a_true_no_op_rarely_starts_a_new_epoch(tmp_path, project_python):
     with ThreadPoolExecutor(20) as pool:
         checks = list(pool.map(lambda s: no_op_check(tmp_path / f"s{s}", project_python, s), range(40)))

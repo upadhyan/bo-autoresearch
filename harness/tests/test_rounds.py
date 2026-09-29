@@ -168,6 +168,7 @@ def random_search(n, seed, sigma=0.01):
     return true_loss(points[observed.index(min(observed))])
 
 
+@pytest.mark.slow
 def test_bo_beats_random_search_at_equal_trial_count(tmp_path, project_python):
     seeds = range(8)
     for s in seeds:
@@ -379,6 +380,7 @@ def backwards_proxy_run(d, python, seed):
     return run_dir, out
 
 
+@pytest.mark.slow
 def test_a_proxy_that_ranks_backwards_is_flagged_broken_by_the_drift_check(tmp_path, project_python):
     runs = repeat_runs(tmp_path, project_python, backwards_proxy_run, range(8))
     broken = []
@@ -437,6 +439,7 @@ def drift_run(d, python, seed):
     return run_dir, out
 
 
+@pytest.mark.slow
 def test_reference_noise_alone_does_not_flag_a_faithful_proxy_broken(tmp_path, project_python):
     runs = repeat_runs(tmp_path, project_python, drift_run, range(10))
     drifts = [out["drift"] for _, out in runs]

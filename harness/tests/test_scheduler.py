@@ -353,6 +353,7 @@ def tight_cap_run(d, python, seed):
     return repo, run_dir
 
 
+@pytest.mark.slow
 def test_a_tight_dimension_cap_narrows_the_oldest_concentrated_retained_hypothesis_so_the_queue_joins(
         tmp_path, project_python):
     seeds = range(4)

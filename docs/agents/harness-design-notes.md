@@ -23,8 +23,12 @@ decision, APPEND it to the "Decision log" at the bottom (one line, ticket number
 - Do NOT run the whole suite per ticket. Run only the tests the change can affect: the ticket's new
   test file(s) plus the existing files whose behaviour you touched (e.g. `tests/test_scheduler.py
   tests/test_rounds.py`). Pick them by what your diff changes; say which you ran in your report.
-- Run tests in parallel: `cd harness && .venv/bin/python -m pytest -q -n auto <files>` (pytest-xdist is
-  installed). Tests must stay independent (own tmp repo each) so `-n auto` is safe.
+- Run tests in parallel: `cd harness && .venv/bin/python -m pytest -q -n 4 <files>` (pytest-xdist is
+  installed). Use `-n 4`, not `-n auto`: more workers overheat the dev laptop. Tests must stay independent
+  (own tmp repo each). conftest caps numpy/torch at one math thread.
+- Slow tests: multi-seed statistical rate tests carry `@pytest.mark.slow` and are skipped by default.
+  While iterating, run only the fast tests; run the slow ones (`--slow`, or `-m slow` for just them) once
+  before merging. Mark any new multi-seed rate test `slow`.
 
 ## Dev commands
 - Dev venv: `harness/.venv` (Python 3.10, editable harness + pytest; optuna 5.0, torch, scipy, numpy
