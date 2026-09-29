@@ -31,7 +31,7 @@ from . import experiment_log as elog
 HARNESS_SRC = Path(__file__).resolve().parents[1]  # holds pyproject.toml when run from the plugin
 RUN_KEYS = {"objective", "direction", "budget_s", "runner", "reference_fidelity", "python",
             "ladder", "deterministic", "replicates_k", "delta", "seed", "checkpoint", "target",
-            "max_trials", "seeds"}
+            "max_trials", "seeds", "generation", "fixtures"}
 CONFIRMATIONS = 2  # replicates of every new incumbent before it counts as the best
 ROUND_CAP = 0.25  # a round may spend this share of the budget remaining at its start
 REPLICATE_SHARE, ESCALATED_SHARE = 0.1, 0.3  # the replicate floor, raised for a stuck hypothesis
@@ -161,6 +161,16 @@ def _load_run_yaml(path: Path) -> dict:
     if (not isinstance(seeds, list) or len(seeds) > 5
             or not all(isinstance(s, dict) and s and all(isinstance(k, str) for k in s) for s in seeds)):
         raise Refused("run.yaml: seeds must list at most 5 configs, each mapping lever names to values")
+    generation, fixtures = cfg.setdefault("generation", "llm"), cfg.setdefault("fixtures", None)
+    if generation not in ("llm", "scripted"):
+        raise Refused("run.yaml: generation must be llm (generator subagents) or scripted (fixture passes)")
+    if generation == "scripted":
+        if not isinstance(fixtures, str) or not (path.parent / fixtures).is_dir():
+            raise Refused("run.yaml: generation: scripted needs fixtures: a directory of pass1.yaml, "
+                          "pass2.yaml, ...")
+        cfg["fixtures"] = str((path.parent / fixtures).resolve())
+    elif fixtures is not None:
+        raise Refused("run.yaml: fixtures are served only with generation: scripted")
     cfg["python"] = str(cfg.get("python") or sys.executable)
     return cfg
 
@@ -241,6 +251,7 @@ def cmd_init(a) -> dict:
         "deterministic": cfg["deterministic"], "replicates_k": cfg["replicates_k"],
         "delta": cfg["delta"], "seed": cfg["seed"], "checkpoint": cfg["checkpoint"],
         "target": cfg["target"], "max_trials": cfg["max_trials"], "seeds": cfg["seeds"],
+        "generation": cfg["generation"], "fixtures": cfg["fixtures"],
     })
     _regenerate(run_dir, con)
     return {"run_dir": str(run_dir), "worktree": str(run_dir / "worktree"),
@@ -492,9 +503,9 @@ def cmd_park(a) -> dict:
         raise Refused(f"{h['id']} is {h['status']}: only a hypothesis still in the loop can be parked")
     if not a.reason.strip():
         raise Refused("park needs a --reason")
-    # #30 adds here: parking is a removal, so it triggers an interplay review
     elog.append(con, "hypothesis_parked", a.actor,
                 {"rationale": a.rationale, "id": h["id"], "reason": a.reason, "from": h["status"]})
+    _removal(con, h["id"], "parked", a.reason)  # parking is a removal: it owes an interplay review
     _regenerate(run_dir, con)
     return _status(elog.load(con))
 
@@ -508,6 +519,8 @@ def cmd_unpark(a) -> dict:
     h = _hypothesis(st, a.hypothesis)
     if h["status"] != "parked":
         raise Refused(f"{h['id']} is {h['status']}, not parked")
+    if (latest := _hypothesis(st, f"H{h['number']}"))["id"] != h["id"]:
+        raise Refused(f"{h['id']} was revived as {latest['id']}: that version carries it on")
     if not a.reason.strip():
         raise Refused("unpark needs a --reason")
     # #31 adds here: the registration reviewer re-reviews a returning hypothesis
@@ -806,6 +819,18 @@ def cmd_round_run(a) -> dict:
                           "verdict (retain, reject or undecided, one-line reason) for every hypothesis it tests")
         return selected
 
+    if missing := _interplay_missing(st):
+        raise Refused(f"record interplay for {', '.join(_who(m) for m in missing)} first: every removal "
+                      "is weighed against the untested list, and every newcomer against past removals")
+    if due := _generation_due(st):
+        raise Refused(f"`generate` first: a generation pass is due ({'; '.join(due)})")
+    if all((conditions := _exhaustion(st)).values()):  # judged at the boundary, once a pass is in
+        elog.append(con, "run_ended", "harness", {"reason": "exhausted", "exhaustion": conditions})
+        _regenerate(run_dir, con)
+        return _status(elog.load(con))
+    if revived := _revive(con, st):  # into the round the partner joins, shown before it runs
+        _regenerate(run_dir, con)
+        return {"revived": revived, **_status(elog.load(con))}
     selected = ready_selection(st)
     if st["run"]["ladder"] and not st["calibration"]:  # still part of R0; needs the lever boxes
         try:
@@ -1118,6 +1143,7 @@ def _verdict_checks(con, st: dict, r: int, space: dict, baseline: dict, eligible
         if outcome == "inconclusive":
             elog.append(con, "hypothesis_inconclusive", "harness",
                         {"id": h["id"], "verdict": vid, "reason": reason})
+            _removal(con, h["id"], "inconclusive", reason)
         checked.append(record)
     return checked
 
@@ -1143,14 +1169,15 @@ def _finalise_rejects(con, r: int, drift: dict | None) -> None:
         if not v or v["round"] != r or v["outcome"] != "reject":
             continue
         if at_proxy and not (drift and drift["broken"] is False):
-            elog.append(con, "hypothesis_inconclusive", "harness", {
-                "id": h["id"], "verdict": v["id"],
-                "reason": "broken proxy fidelity" if drift and drift["broken"]
-                else "proxy fidelity unchecked"})
+            reason = "broken proxy fidelity" if drift and drift["broken"] else "proxy fidelity unchecked"
+            elog.append(con, "hypothesis_inconclusive", "harness",
+                        {"id": h["id"], "verdict": v["id"], "reason": reason})
+            _removal(con, h["id"], "inconclusive", reason)
         else:
             elog.append(con, "hypothesis_rejected", "harness", {
                 "id": h["id"], "verdict": v["id"], "condition": v["condition"],
                 "frozen": v["group"] if v["condition"] == "no-improvement" else []})
+            _removal(con, h["id"], "rejected", v["condition"])
 
 
 def _escalate(con, st: dict, r: int) -> None:
@@ -1396,7 +1423,11 @@ def _status(st: dict) -> dict:
             "hypotheses": [{"id": h["id"], "title": h["spec"]["title"], "status": h["status"],
                             "commit": h["commit"], "priority": h["priority"]}
                            for h in st["hypotheses"].values()],
-            "schedule": _schedule_status(st), "paused": st["paused"], "next": _next(st)}
+            "schedule": _schedule_status(st), "paused": st["paused"],
+            "interplay_missing": _interplay_missing(st),
+            "generation": {"mode": run["generation"], "passes": len(st["passes"]),
+                           "due": _generation_due(st)},
+            "exhaustion": _exhaustion(st), "next": _next(st)}
 
 
 def _suggested_delta(st: dict) -> float | None:
@@ -1438,18 +1469,25 @@ def _selected(st: dict) -> list[dict]:
     search stay (retained ones included), then the queue joins in order while the lever dimensions
     fit the cap (a lower priority never jumps a higher one that doesn't fit; the first always fits an
     empty round). A hypothesis exclusive with one already chosen is skipped."""
-    # #30 adds here: co-place hypotheses flagged as interacting (revivals join their partner's round)
     # ponytail: retained hypotheses keep their full ranges when the cap is tight; narrow the oldest
     # concentrated ones (spec: "narrowed, not frozen") if they crowd the queue out
-    chosen = _in_search(st)
+    # ponytail: a pair flagged as interacting joins together or not at all, so a revived version can
+    # push its partner past the cap; both then wait for a round with room
+    chosen, queue, hyps = _in_search(st), _queue(st), st["hypotheses"]
+    linked = {frozenset((hyps[x]["number"], hyps[p]["number"])) for x, p in _links(st)}
     cap, dims = _dimension_cap(st), sum(len(_group(h)) for h in chosen)
-    for h in _queue(st):
-        if any(_exclusive(h, x) for x in chosen):
+    for h in queue:
+        if h in chosen:
             continue
-        if chosen and cap is not None and dims + len(_group(h)) > cap:
+        unit = [h] + [x for x in queue if x is not h and x not in chosen
+                      and frozenset((h["number"], x["number"])) in linked]
+        if any(_exclusive(u, x) for u in unit for x in chosen + unit if x is not u):
+            continue
+        d = sum(len(_group(u)) for u in unit)
+        if chosen and cap is not None and dims + d > cap:
             break
-        chosen.append(h)
-        dims += len(_group(h))
+        chosen += unit
+        dims += d
     return chosen
 
 
@@ -1525,17 +1563,166 @@ def _next(st: dict) -> list[str]:
         return []
     if not st["r0_complete"]:
         return ["round-run (the calibration round)"]
+    if all(_exhaustion(st).values()):
+        return ["round-run (the hypothesis list is exhausted: it ends the run)"]
     duties = [f"write {h['id']}'s lever code, then smoke {h['id']} and commit-lever {h['id']}"
               for h in _selected(st) if not h["commit"]]
     if not _selected(st):
         duties.append("propose and register a hypothesis")
     if st["delta"] is None:
         duties.append(_delta_duty(st))
+    duties += [f"record interplay: review {m['removed']}'s removal against the untested list"
+               if "removed" in m else f"record interplay: review newcomer {m['newcomer']} against past removals"
+               for m in _interplay_missing(st)]
+    if due := _generation_due(st):
+        duties.append(f"generate ({'; '.join(due)})")
     duties += [f"record expected {h} (retain, reject or undecided, with a one-line reason) before the round"
                for h in _expected_missing(st)]
     if st["paused"]:
         duties.append(f"the run is paused: {RESUME_HINT}")
     return duties or ["round-run"]
+
+
+def _removal(con, hid: str, removal: str, reason: str | None) -> None:
+    """A reject, inconclusive or park: the evidence bundle its interplay review weighs against the
+    untested list."""
+    st = elog.load(con)
+    h = st["hypotheses"][hid]
+    last = h["verdicts"][-1] if h["verdicts"] else None
+    elog.append(con, "removal", "harness", {
+        "id": hid, "removal": removal, "reason": reason, "verdict": last["id"] if last else None,
+        "verdicts": [v["id"] for v in h["verdicts"]], "context": last["context"] if last else None,
+        "untested": [x["id"] for x in st["hypotheses"].values() if x["status"] in records.UNTESTED]})
+
+
+def _interplay_missing(st: dict) -> list[dict]:
+    """The interplay reviews owed: every removal since its last review, and every queued newcomer
+    (a revival excepted) against the removals no review weighed it against."""
+    reviews = [x for x in st["records"] if x["kind"] == "interplay"]
+
+    def reviewed(key: str, hid: str, since: int) -> bool:
+        return any(x["record"].get(key) == hid and x["seq"] > since for x in reviews)
+    owed = [{"removed": r["id"]} for r in st["removals"] if not reviewed("removed", r["id"], r["seq"])]
+    for h in _queue(st):
+        past = [r["seq"] for r in st["removals"] if r["seq"] < h["queued"] and r["id"] != h["id"]
+                and h["id"] not in r["untested"]]
+        if past and "revived_from" not in h and not reviewed("newcomer", h["id"], max(past)):
+            owed.append({"newcomer": h["id"]})
+    return owed
+
+
+def _who(m: dict) -> str:
+    return f"{m['removed']}'s removal" if "removed" in m else f"newcomer {m['newcomer']}"
+
+
+def _links(st: dict) -> list[tuple[str, str]]:
+    """The pairs the interplay reviews flagged: (removed hypothesis, untested partner)."""
+    out = []
+    for x in st["records"]:
+        if x["kind"] == "interplay":
+            r = x["record"]
+            out += [(r["removed"], f["partner"]) if r.get("removed") else (f["partner"], r["newcomer"])
+                    for f in r["flags"]]
+    return out
+
+
+def _pending_links(st: dict) -> list[tuple[dict, str]]:
+    """Flagged pairs still to revive (at most once per pair of hypothesis numbers): the removed
+    hypothesis's latest version, and its partner, still untested."""
+    hyps = st["hypotheses"]
+    done = {(h["number"], hyps[h["partner"]]["number"]) for h in hyps.values() if "revived_from" in h}
+    out = []
+    for x, p in _links(st):
+        pair = (hyps[x]["number"], hyps[p]["number"])
+        last = _hypothesis(st, f"H{pair[0]}")
+        if (pair not in done and last["status"] in records.REMOVED
+                and hyps[p]["status"] in records.UNTESTED):
+            out.append((last, p))
+            done.add(pair)
+    return out
+
+
+def _revive(con, st: dict) -> list[dict]:
+    """Each flagged removal whose partner the next round selects comes back as a new linked version,
+    its code already in place (same lever names) and its verdict schedule fresh; the scheduler
+    places it in its partner's round."""
+    # ponytail: revived without its own registration review; #31's review gate covers a revived
+    # version like a newcomer (it is logged before the round's refusals run)
+    selected = {h["id"] for h in _selected(st) if h["status"] == "registered"}
+    revived: list[dict] = []
+    for old, partner in _pending_links(st):
+        if partner not in selected or any(r["from"] == old["id"] for r in revived):
+            continue
+        k = old["version"] + 1
+        payload = {"id": f"H{old['number']}.v{k}", "number": old["number"], "version": k,
+                   "from": old["id"], "partner": partner, "spec": old["origin"], "commit": old["commit"],
+                   "round": _upcoming(st)}
+        elog.append(con, "hypothesis_revived", "harness", payload)
+        revived.append(payload)
+    return revived
+
+
+def _generation_due(st: dict) -> list[str]:
+    """What calls for a generation pass (once R0 is done): run start, the queue below 2x the round's
+    slots with a BO round run since the last pass, or a round analyst's flag since it."""
+    if not st["r0_complete"] or st["run_ended"]:
+        return []
+    last = st["passes"][-1]["seq"] if st["passes"] else 0
+    due = ["run start"] if not st["passes"] and not st["hypotheses"] else []
+    queue, slots = len(_queue(st)), max(1, len(_selected(st)))
+    if queue < 2 * slots and any(n >= 1 and r["seq"] > last for n, r in st["rounds"].items()):
+        due.append(f"the queue holds {queue}, below 2x the {slots} slot(s) per round")
+    if any(x["kind"] == "narrative" and x["record"]["generation"] and x["seq"] > last
+           for x in st["records"]):
+        due.append("the round analyst flagged new ground")
+    return due
+
+
+def _exhaustion(st: dict) -> dict:
+    """The run-end conditions of exhaustion; the next round-run ends the run once all of them hold
+    (a boundary: an llm pass opens before its generators record)."""
+    hyps = st["hypotheses"].values()
+    final = st["passes"][-1]["pass"] if st["passes"] else None
+    return {
+        "queue_empty": not _queue(st),
+        "none_undecided": not any(h["status"] == "active" for h in hyps),
+        "removals_reviewed": not _interplay_missing(st),
+        "revivals_run": not _pending_links(st) and not any(
+            "revived_from" in h and h["status"] == "registered" for h in hyps),
+        # the latest pass, with no trigger since, left nothing registered (nor undecided)
+        "final_pass_empty": final is not None and not _generation_due(st) and not any(
+            h["status"] == "proposed" or (h["pass"] == final and "registered" in h) for h in hyps),
+    }
+
+
+def cmd_generate(a) -> dict:
+    """Open a generation pass. Generator subagents record its proposals; with `generation: scripted`
+    the harness serves fixtures/pass<n>.yaml (a list of hypothesis specs) instead, and a pass past the
+    last fixture is empty."""
+    run_dir, con = _open_run()
+    st = elog.load(con)
+    _not_ended(st)
+    run, n = st["run"], len(st["passes"]) + 1
+    specs: list = []
+    fixture = Path(run["fixtures"]) / f"pass{n}.yaml" if run["generation"] == "scripted" else None
+    if fixture and fixture.exists():
+        try:
+            specs = yaml.safe_load(fixture.read_text()) or []
+            if not isinstance(specs, list):
+                raise ValueError("a pass lists hypothesis specs")
+            for i, s in enumerate(specs):
+                try:
+                    hypotheses.validate(s)
+                except ValueError as e:
+                    raise ValueError(f"[{i}]: {e}")
+        except (OSError, yaml.YAMLError, ValueError) as e:
+            raise Refused(f"fixture {fixture}: {e}")
+    elog.append(con, "generation_pass", a.actor, {"rationale": a.rationale, "pass": n, "mode": run["generation"],
+                                                  "triggers": _generation_due(st)})
+    served = argparse.Namespace(actor="harness", rationale=f"scripted generation pass {n}")
+    ids = [_propose(run_dir, con, s, served) for s in specs]
+    _regenerate(run_dir, con)
+    return {**_status(elog.load(con)), "pass": n, "mode": run["generation"], "proposed": ids}
 
 
 def cmd_accept_proxy(a) -> dict:
@@ -1642,6 +1829,7 @@ def _parser() -> argparse.ArgumentParser:
     action("register", cmd_register).add_argument("hypothesis")
     action("commit-lever", cmd_commit_lever).add_argument("hypothesis")
     action("stop", cmd_stop)
+    action("generate", cmd_generate)
     q = action("enqueue", cmd_enqueue)
     q.add_argument("--config", required=True)
     q.add_argument("--expected", required=True, type=float)

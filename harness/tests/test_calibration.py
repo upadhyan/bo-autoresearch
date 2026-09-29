@@ -7,7 +7,7 @@ import statistics
 
 import pytest
 
-from conftest import bo, events, round_run, write_run_yaml
+from conftest import SPARE, bo, events, round_run, write_run_yaml
 
 SHIFT = {  # a hypothesis shifting the toy's scale: its box is what the ladder is calibrated over
     "title": "Shift the scale", "rationale": "r", "mechanism": "m", "provenance": "novel",
@@ -184,8 +184,12 @@ def test_agreeing_replicates_give_zero_sigma_and_turn_off_replication(repo, init
 def test_round_run_after_r0_is_refused_until_a_hypothesis_is_registered(repo, init_run):
     run_dir = init_run("budget_s: 3600\nreference_fidelity: {epochs: 4}\n")
     assert round_run(repo, "--rationale", "calibrate")[0] == 0
+    code, out = bo(repo, "round-run", "--rationale", "again")  # run start: a generation pass first
+    assert code != 0 and out["refused"] and "generate" in out["reason"]
+    (run_dir / "spec.json").write_text(json.dumps(SPARE))
+    assert bo(repo, "propose", "--file", str(run_dir / "spec.json"), "--rationale", "idea")[0] == 0
     before = events(run_dir)
-    code, out = round_run(repo, "--rationale", "again")
+    code, out = bo(repo, "round-run", "--rationale", "again")
     assert code != 0 and out["refused"] and "hypothesis" in out["reason"]
     assert events(run_dir) == before
 

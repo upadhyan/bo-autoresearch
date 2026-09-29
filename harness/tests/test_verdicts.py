@@ -232,7 +232,10 @@ def test_a_stuck_hypothesis_escalates_then_is_inconclusive_at_the_evidence_cap(t
     assert inc == {"id": "H1.v1", "verdict": last["id"], "reason": "no verdict after 80 fresh sampler trials"}
     assert last["burn_in"]["fresh"] == 80 and last["outcome"] == "inconclusive"
     assert outs[-1]["trigger"] == "search_space" and not of_type(run_dir, "hypothesis_rejected")
-    assert bo(run_dir.parents[1], "status")[1]["next"] == ["propose and register a hypothesis"]
+    assert bo(run_dir.parents[1], "status")[1]["next"] == [
+        "propose and register a hypothesis",
+        "record interplay: review H1.v1's removal against the untested list",
+        "generate (the queue holds 0, below 2x the 1 slot(s) per round)"]
 
 
 def test_a_fidelity_sensitive_lever_is_never_rejected_at_a_proxy(tmp_path, project_python):
