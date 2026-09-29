@@ -713,7 +713,7 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   `irrelevant` needs evidence across the other active levers' box, so `no-improvement` is the expected label for a flat
   lever next to a curved partner whose box is unexplored. Tests follow: the flat-next-to-a-bowl freeze asserts
   `no-improvement` + filter-to-baseline; test_reports' planted H2 is rejected `no-improvement`, deferred one round behind
-  H3's; the broken-proxy test is a rate over range(10) (its drift premise is being reworked separately); Seam 2's
+  H3's; the broken-proxy rate test (from the two-stage checks) reaches its reject in 17 of 20 now; Seam 2's
   useless case (benchmarks/dogfood/expected.yaml) accepts `irrelevant` or `no-improvement` (`condition` may be a list).
 - #35: the skill's round-run wait loop is `pgrep -f "[/]<BO minus its leading slash> round-run"`: procps pgrep
   (Linux, the dogfood CI) doesn't exclude its ancestors, so a plain `"boautoresearch round-run"` matched the Monitor's

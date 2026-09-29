@@ -226,9 +226,8 @@ def test_a_stuck_hypothesis_escalates_then_is_inconclusive_at_the_evidence_cap(t
     stuck = (spec({"x": lever()}), '    term += -0.1 * lever("H1.x")')
     runs = repeat(tmp_path, project_python, [stuck], seeds=range(10), rounds=8, sigma=0.15)
     stuck_path = sum(stuck_run(run_dir, outs) for run_dir, outs in runs)
-    # the whole path in 19 of 20 runs over seeds 0..19 (the other was retained through R1, so it
-    # escalated later); at 95%, fewer than 8 of 10 has probability ~1% (before the GP's signal floor,
-    # 4 of 10 seeds passed)
+    # the whole path in 20 of 20 runs over seeds 0..19 (19 of 20 before the #21 checks reshuffled trial
+    # seeds); at 95%, fewer than 8 of 10 has probability ~1% (before the GP's signal floor, 4 of 10)
     assert stuck_path >= 8, stuck_path
 
 
@@ -269,8 +268,8 @@ def test_at_low_signal_to_noise_a_gain_of_delta_is_rarely_rejected_and_intervals
     vs = [v for run_dir, _ in runs for v in records(run_dir)]
     covered = sum(v["delta_stat"]["lower"] <= DELTA <= v["delta_stat"]["upper"]
                   and v["m_u"]["lower"] <= DELTA <= v["m_u"]["upper"] for v in vs)
-    # over seeds 0..19: never rejected (20 of 20), and the bounds held δ in 22 of 24 checks; at 95%,
-    # fewer than 9 of 10 kept has probability ~9%, coverage below 70% ~2% (before the GP's signal
+    # over seeds 0..19: never rejected (20 of 20), and the bounds held δ in 23 of 26 checks; at 95%,
+    # fewer than 9 of 10 kept has probability ~9%, at 88% coverage below 70% ~5% (before the GP's signal
     # floor: 10 of 20 rejected, and Δ's bounds held δ in 5 of 32 checks)
     assert kept >= 9, kept
     assert covered >= 0.7 * len(vs), (covered, len(vs))
@@ -315,7 +314,8 @@ def test_a_broken_proxy_downgrades_its_rounds_rejects_to_inconclusive(tmp_path, 
                 {"id": "H1.v1", "verdict": records(run_dir)[-1]["id"], "reason": "broken proxy fidelity"}]
             downgraded += 1
     # the rest ended inconclusive at a verdict check (with no noise at all, "noise differs by region"):
-    # measured 15 of 20 reached the reject over seeds 0..19; at 75%, fewer than 6 of 10 has probability ~8%
+    # measured 17 of 20 reached the reject over seeds 0..19 (15 of 20 before the GP's signal floor); at 85%,
+    # fewer than 6 of 10 has probability ~1%
     assert downgraded >= 6, downgraded
 
 
@@ -339,8 +339,8 @@ def test_a_flat_lever_next_to_a_curved_one_is_frozen_no_improvement_and_leaves_t
                                                                                          project_python):
     # z does nothing, but next to the bowl in x BO leaves most of x's box unexplored with z moved, so
     # M_z's bound (taken over every setting of x) stays above δ: `irrelevant` lacks the evidence and z is
-    # frozen `no-improvement` (#21 amendment). Frozen so at the first check in 10 of 10 runs over seeds
-    # 0..9; at 95%, fewer than 2 of 3 has probability ~1%
+    # frozen `no-improvement` (#21 amendment). Frozen so in 20 of 20 runs over seeds 0..19;
+    # at 95%, fewer than 2 of 3 has probability ~1%
     two = (spec({"x": lever(0.2), "z": lever()}),
            '    term += 4 * (lever("H1.x") - 0.7) ** 2 + 0 * lever("H1.z")')
     runs = repeat(tmp_path, project_python, [two], rounds=2)

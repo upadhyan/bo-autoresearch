@@ -401,22 +401,34 @@ def test_a_proxy_that_ranks_backwards_is_flagged_broken_by_the_drift_check(tmp_p
     assert all(b is True for b in broken), broken
 
 
-def test_no_stall_before_every_hypothesis_is_burned_in(bo_repo, bo_run, tmp_path):
-    # 3 levers: the burn-in is max(10·3, 20) = 30 fresh sampler trials, the stall window only 20;
-    # δ out of reach, so the stall window is complete 20 sampler trials after the first confirmation
-    run_dir = bo_run(BASE + "delta: 10\nseed: 7\n")
+def no_stall_run(d, python, seed):
+    repo = make_repo(d)
+    run_dir = init(repo, python, BASE + f"delta: 10\nseed: {seed}\n")
     spec = {**SPEC, "levers": {**SPEC["levers"], "z": SPEC["levers"]["x"]}}
     code3 = BOWL.rstrip("\n") + " + 0 * lever(\"H1.z\")\n"
-    coded(bo_repo, run_dir, tmp_path, code=code3, env=toy_env(sigma=0.01), spec=spec)
-    code, out = round_run(bo_repo, "--rationale", "search", env=toy_env(sigma=0.01))
+    coded(repo, run_dir, d, code=code3, env=toy_env(sigma=0.01), spec=spec)
+    code, out = round_run(repo, "--rationale", "search", env=toy_env(sigma=0.01))
     assert code == 0, out
-    # the stall window is complete long before 30; at burn-in the first verdict check finds the bowl
-    # `irrelevant` next to δ = 10, and that pending reject holds the round open to its confirmation
-    samplers = [t for t in started_in(run_dir, 1) if t["kind"] == "sampler"]
-    [first, confirming] = of_type(run_dir, "verdict")
-    assert first["burn_in"]["fresh"] == 30 and first["outcome"] == "pending-reject"
-    assert confirming["outcome"] == "reject" and out["trigger"] == "search_space"
-    assert len(samplers) == 30 + 15
+    return run_dir, out
+
+
+def test_no_stall_before_every_hypothesis_is_burned_in(tmp_path, project_python):
+    # 3 levers: the burn-in is max(10·3, 20) = 30 fresh sampler trials, the stall window only 20;
+    # δ out of reach, so the stall window is complete 20 sampler trials after the first confirmation
+    confirmed = 0
+    for run_dir, out in repeat_runs(tmp_path, project_python, no_stall_run, range(10)):
+        # the stall window is complete long before 30, yet the first check comes at burn-in: it finds the
+        # bowl rejectable next to δ = 10, and that pending reject holds the round open to its next check
+        samplers = [t for t in started_in(run_dir, 1) if t["kind"] == "sampler"]
+        first, second = of_type(run_dir, "verdict")
+        assert first["burn_in"]["fresh"] == 30 and first["outcome"] == "pending-reject"
+        assert second["burn_in"]["fresh"] == 45 and len(samplers) == 30 + 15
+        if second["outcome"] == "reject":
+            assert out["trigger"] == "search_space"
+            confirmed += 1
+    # the second check confirms in 18 of 20 runs over seeds 0..19 (one fails the fit gate, one the
+    # homogeneity gate, under the GP's δ-scaled signal floor); at 90%, fewer than 8 of 10 ~7%
+    assert confirmed >= 8, confirmed
 
 
 def drift_run(d, python, seed):
