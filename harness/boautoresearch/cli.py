@@ -17,17 +17,21 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
 import yaml
 
 from . import calibration, hypotheses
+from . import study as bo_study
 from . import experiment_log as elog
 
 HARNESS_SRC = Path(__file__).resolve().parents[1]  # holds pyproject.toml when run from the plugin
 RUN_KEYS = {"objective", "direction", "budget_s", "runner", "reference_fidelity", "python",
-            "ladder", "deterministic", "replicates_k"}
+            "ladder", "deterministic", "replicates_k", "delta"}
+CONFIRMATIONS = 2  # replicates of every new incumbent before it counts as the best
+ROUND_CAP = 0.25  # a round may spend this share of the budget remaining at its start
 
 
 class Refused(Exception):
@@ -55,12 +59,43 @@ def _repo_root() -> Path:
     return Path(_git(Path.cwd(), "rev-parse", "--path-format=absolute", "--git-common-dir")).parent
 
 
-def _open_run() -> tuple[Path, sqlite3.Connection]:
+def _open_run(recover: bool = True) -> tuple[Path, sqlite3.Connection]:
+    """The latest run. Actions first settle what a crashed harness process left running."""
     runs = sorted((_repo_root() / ".bo-research").glob("*/log.db"))
     if not runs:
         raise Refused("no run: start one with `boautoresearch init run.yaml`")
     # ponytail: latest run wins; add --run when runs coexist
-    return runs[-1].parent, elog.connect(runs[-1])
+    run_dir, con = runs[-1].parent, elog.connect(runs[-1])
+    if recover:
+        _recover(run_dir, con)
+    return run_dir, con
+
+
+def _alive(pid: int) -> bool:
+    # ponytail: a recycled pid reads as alive; record the process start time if that bites
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass
+    return True
+
+
+def _recover(run_dir: Path, con) -> None:
+    """Trials and rounds whose harness process died: abandoned (charged up to the last heartbeat,
+    never retried) and interrupted."""
+    st = elog.state(elog.read(con))
+    dead = [t for t in st["trials"] if t["status"] == "running" and not _alive(t["pid"])]
+    for t in dead:
+        elog.append(con, "trial_abandoned", "harness", {
+            "trial": t["trial"], "wall_clock_s": t.get("heartbeat_s", 0.0),
+            "reason": f"the harness process {t['pid']} died while the trial ran"})
+    crashed = [n for n, r in st["rounds"].items() if r["ended"] is None and not _alive(r["pid"])]
+    for n in crashed:
+        elog.append(con, "round_ended", "harness", {"round": n, "trigger": "interrupted"})
+    if dead or crashed:
+        _regenerate(run_dir, con)
 
 
 def _load_run_yaml(path: Path) -> dict:
@@ -93,18 +128,27 @@ def _load_run_yaml(path: Path) -> dict:
     k = cfg.setdefault("replicates_k", 5)
     if isinstance(k, bool) or not isinstance(k, int) or k < 2:
         raise Refused("run.yaml: replicates_k must be an integer of at least 2")
+    delta = cfg.setdefault("delta", None)
+    if delta is not None and not _positive(delta):
+        raise Refused("run.yaml: delta must be a positive number in objective units")
     cfg["python"] = str(cfg.get("python") or sys.executable)
     return cfg
 
 
+def _positive(x) -> bool:
+    return not isinstance(x, bool) and isinstance(x, (int, float)) and math.isfinite(x) and x > 0
+
+
 def _freeze(python: str) -> list[str]:
     # --exclude-editable: an editable install of the project would import the user's checkout
-    # ponytail: needs pip in the project env; add a uv fallback when uv-only envs show up
-    p = subprocess.run([python, "-m", "pip", "freeze", "--exclude-editable"],
-                       capture_output=True, text=True)
+    uv = shutil.which("uv")
+    cmd = [uv, "pip", "freeze", "--python", python] if uv else [python, "-m", "pip", "freeze"]
+    p = subprocess.run([*cmd, "--exclude-editable"], capture_output=True, text=True)
     if p.returncode:
         raise Refused(f"cannot freeze the project environment with {python}: {p.stderr.strip()}")
-    return p.stdout.split()
+    # pip freeze leaves out the packaging tools; uv's doesn't
+    return [r for r in p.stdout.split()
+            if re.split(r"[=<>@ ]", r)[0].lower() not in ("pip", "setuptools", "wheel", "distribute")]
 
 
 def cmd_init(a) -> dict:
@@ -133,12 +177,18 @@ def cmd_init(a) -> dict:
     try:
         _git(root, "worktree", "add", "-q", "-b", branch, str(run_dir / "worktree"), base_commit)
         venv_python = run_dir / "venv" / "bin" / "python"
-        subprocess.run([cfg["python"], "-m", "venv", run_dir / "venv"], check=True,
-                       capture_output=True)
         (run_dir / "venv-freeze.txt").write_text("".join(f"{r}\n" for r in freeze))
-        subprocess.run([venv_python, "-m", "pip", "install", "-q", "--disable-pip-version-check",
-                        "-r", run_dir / "venv-freeze.txt", HARNESS_SRC],
-                       check=True, capture_output=True, text=True)
+        reqs: list = ["-r", run_dir / "venv-freeze.txt", HARNESS_SRC]
+        if uv := shutil.which("uv"):  # uv's cache keeps inits fast with torch in the deps
+            subprocess.run([uv, "venv", "-q", "--python", cfg["python"], run_dir / "venv"],
+                           check=True, capture_output=True, text=True)
+            subprocess.run([uv, "pip", "install", "-q", "--python", venv_python, *reqs],
+                           check=True, capture_output=True, text=True)
+        else:
+            subprocess.run([cfg["python"], "-m", "venv", run_dir / "venv"], check=True,
+                           capture_output=True, text=True)
+            subprocess.run([venv_python, "-m", "pip", "install", "-q", "--disable-pip-version-check",
+                            *reqs], check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:
         subprocess.run(["git", "worktree", "remove", "--force", run_dir / "worktree"], cwd=root)
         subprocess.run(["git", "branch", "-D", branch], cwd=root, capture_output=True)
@@ -153,6 +203,7 @@ def cmd_init(a) -> dict:
         "runner": cfg["runner"], "reference_fidelity": cfg["reference_fidelity"],
         "python": cfg["python"], "venv_freeze": freeze, "ladder": cfg["ladder"],
         "deterministic": cfg["deterministic"], "replicates_k": cfg["replicates_k"],
+        "delta": cfg["delta"],
     })
     _regenerate(run_dir, con)
     return {"run_dir": str(run_dir), "worktree": str(run_dir / "worktree"),
@@ -189,10 +240,11 @@ def _trial(run_dir: Path, con, a, kind: str, levers: dict, fidelity: dict, **ext
              "seed": random.Random(f"{run['run_id']}/{n}").getrandbits(31),
              "commit": _git(worktree, "rev-parse", "HEAD"),
              "artifact_dir": f"artifacts/trial-{n}", **extra}
+    started = {**trial, "pid": os.getpid()}  # a dead pid on a running trial means it was abandoned
     if a:
-        elog.append(con, "trial_started", a.actor, {"rationale": a.rationale, **trial})
+        elog.append(con, "trial_started", a.actor, {"rationale": a.rationale, **started})
     else:
-        elog.append(con, "trial_started", "harness", trial)
+        elog.append(con, "trial_started", "harness", started)
     outcome = _run_trial(run_dir, run["runner"], trial)
     elog.append(con, "trial_" + outcome.pop("status"), "harness", {"trial": n, **outcome})
     _regenerate(run_dir, con)
@@ -201,7 +253,8 @@ def _trial(run_dir: Path, con, a, kind: str, levers: dict, fidelity: dict, **ext
 
 def _cost(trials: list[dict], fidelity: dict) -> float:
     """Mean wall-clock of the completed trials at this fidelity; 0 while unknown."""
-    done = [t["wall_clock_s"] for t in trials if t["fidelity"] == fidelity and "wall_clock_s" in t]
+    done = [t["wall_clock_s"] for t in trials
+            if t["fidelity"] == fidelity and t["status"] in ("finished", "failed")]
     return statistics.fmean(done) if done else 0.0
 
 
@@ -339,7 +392,8 @@ def cmd_commit_lever(a) -> dict:
     coded = [x for x in st["hypotheses"].values() if x["commit"]] + [h]
     try:
         hypotheses.check_lever_code(changed, list(h["spec"]["levers"]),
-                                    {n for x in coded for n in x["spec"]["levers"]})
+                                    {n for x in coded for n in x["spec"]["levers"]}
+                                    | set(_baseline(run_dir)))  # the project's own levers too
     except ValueError as e:
         raise Refused(f"lever code: {e}")
     # the levers.json H was smoked with (the project's own levers kept), plus H's baselines
@@ -361,16 +415,33 @@ def cmd_round_run(a) -> dict:
     if _git(run_dir / "worktree", "status", "--porcelain"):
         raise Refused("the worktree has uncommitted changes: a round runs on one commit, so commit "
                       "lever code with `commit-lever <H>` first")
-    if st["r0_complete"]:
-        raise Refused("round-run for R1 is refused: the calibration round is done and rounds that "
-                      "test a hypothesis are not available yet")
-    return _run_r0(run_dir, con, a, st)
+    if st["run_ended"]:
+        raise Refused(f"the run has ended ({st['run_ended']})")
+    if not st["r0_complete"]:
+        return _run_r0(run_dir, con, a, st)
+    selected = _selected(st)
+    if not selected:
+        raise Refused("no hypothesis is registered: propose and register one first")
+    if uncoded := [h["id"] for h in selected if not h["commit"]]:
+        raise Refused(f"the round selects {uncoded}, whose lever code is not committed: "
+                      "write it, then `smoke <H>` and `commit-lever <H>`")
+    if st["run"]["ladder"] and not st["calibration"]:  # still part of R0; needs the lever boxes
+        try:
+            _calibrate_ladder(run_dir, con, st["noise"], _space(selected))
+        except BudgetRefused:
+            # R0 itself has ended: only the run ends
+            return _end_run(run_dir, con, {"round": 0, "trigger": "budget_spent"}, log_round=False)
+        st = elog.state(elog.read(con))
+        if st["delta"] is None:  # shown before δ is set
+            return {"round": 0, "fidelity_calibration": st["calibration"], **_status(st)}
+    if st["delta"] is None:
+        raise Refused(f"set δ first: `set-delta <value>` (suggested 2σ = {_suggested_delta(st):.3g})")
+    return _run_round(run_dir, con, a, st)
 
 
 def _run_r0(run_dir: Path, con, a, st: dict) -> dict:
-    """The calibration round: smoke, baseline replicates (σ), then ladder calibration."""
-    run = st["run"]
-    ref, ladder = run["reference_fidelity"], run["ladder"]
+    """The calibration round: smoke and baseline replicates (σ and each rung's cost)."""
+    ref = st["run"]["reference_fidelity"]
     baseline = _baseline(run_dir)
     elog.append(con, "round_started", a.actor, {
         "rationale": a.rationale, "round": 0, "fidelity": ref, "pid": os.getpid(),
@@ -387,9 +458,7 @@ def _run_r0(run_dir: Path, con, a, st: dict) -> dict:
         if st["noise"] is None:  # a rerun after a stop keeps the σ it already paid for
             _estimate_noise(run_dir, con, baseline)
         out = {"round": 0, "noise_estimate": elog.state(elog.read(con))["noise"]}
-        if ladder:
-            out["fidelity_calibration"] = _calibrate_ladder(run_dir, con, out["noise_estimate"])
-        trigger = "calibrated"
+        trigger = "calibrated"  # the ladder is calibrated at the first R1 round-run (needs levers)
     except BudgetRefused:
         trigger = "budget_spent"
         raise
@@ -397,6 +466,130 @@ def _run_r0(run_dir: Path, con, a, st: dict) -> dict:
         elog.append(con, "round_ended", "harness", {"round": 0, "trigger": trigger})
         _regenerate(run_dir, con)
     return {**out, **_status(elog.state(elog.read(con)))}
+
+
+def _space(selected: list[dict]) -> dict:
+    return {n: lv for h in selected for n, lv in h["spec"]["levers"].items()}
+
+
+def _end_run(run_dir: Path, con, round_ended: dict, log_round: bool = True) -> dict:
+    """The budget is spent: the round and the run end together."""
+    if log_round:
+        elog.append(con, "round_ended", "harness", round_ended)
+    elog.append(con, "run_ended", "harness", {"reason": "budget_spent"})
+    _regenerate(run_dir, con)
+    return {**round_ended, **_status(elog.state(elog.read(con)))}
+
+
+def _run_round(run_dir: Path, con, a, st: dict) -> dict:
+    """R1+: GPSampler searches the selected hypotheses' levers until a round-end trigger fires."""
+
+    run, r = st["run"], max(st["rounds"]) + 1
+    selected = _selected(st)
+    space, baseline = _space(selected), _baseline(run_dir)
+    fidelity, ref = st["fidelity"]["fidelity"], run["reference_fidelity"]
+    sign = 1 if run["direction"] == "minimize" else -1
+    confirmations = CONFIRMATIONS if st["noise"]["replication"] else 0
+    cap = ROUND_CAP * _status(st)["budget"]["remaining_s"]
+    for h in selected:
+        if h["status"] == "registered":
+            elog.append(con, "hypothesis_activated", "harness", {"id": h["id"], "round": r})
+
+    def eligible(trials):
+        return [t for t in trials if bo_study.eligible(t, space, baseline, fidelity)]
+
+    seeds = eligible(st["trials"])
+    elog.append(con, "round_started", a.actor, {
+        "rationale": a.rationale, "round": r, "commit": _git(run_dir / "worktree", "rev-parse", "HEAD"),
+        "fidelity": fidelity, "epoch": 0, "search_space": space, "hypotheses": [h["id"] for h in selected],
+        "pid": os.getpid(), "cap_s": cap, "seeded": [t["trial"] for t in seeds]})
+    rng = random.Random(f"{run['run_id']}/R{r}")
+    study = bo_study.Study(run_dir / "studies.db", run["direction"], space, seeds, rng.getrandbits(31))
+    # ponytail: one trial at a time; run.yaml `workers` needs asks with pending trials (constant liar)
+
+    def best(trials):
+        return bo_study.incumbent(eligible(trials), sign, confirmations)
+
+    inc = best(st["trials"])
+    anchor = inc["mean"] if inc and inc["confirmed"] else None  # the incumbent at its last ≥ δ gain
+    since, trigger = 0, None  # fresh sampler trials since the anchor
+    pending: list[int] = []  # the confirmation replicates owed, by original trial
+    stall_after = max(5 * len(space), 20)
+    try:
+        while trigger is None:
+            st = elog.state(elog.read(con))
+            this = [t for t in st["trials"] if t.get("round") == r]
+            spent = sum(t["wall_clock_s"] for t in this if t["status"] != "running")
+            if spent > 0 and spent + _cost(st["trials"], fidelity) > cap:
+                trigger = "cap"
+            elif since >= stall_after and not pending and _burned_in(st, selected, eligible):
+                trigger = "stall"
+            elif pending or (confirmations and 10 * sum("replicate_of" in t for t in this) < len(this)):
+                if pending:
+                    root, kind = pending.pop(0), "confirmation"
+                else:  # the replicate floor: the least-replicated of the top 3 configs
+                    top = bo_study.ranked(eligible(st["trials"]), sign)[:3]
+                    root, kind = min(top, key=lambda c: c["replicates"])["trial"], "replicate"
+                levers = next(t["levers"] for t in st["trials"] if t["trial"] == root)
+                t = _trial(run_dir, con, None, kind, levers, fidelity, round=r, replicate_of=root)
+                if t["status"] == "finished":
+                    study.add(t)
+            else:
+                before = best(st["trials"])
+                asked = study.ask()
+                t = _trial(run_dir, con, None, "sampler", {**baseline, **asked.params}, fidelity, round=r)
+                study.tell(asked, t)
+                if t["status"] == "finished":
+                    since += 1
+                    if confirmations and (before is None or not before["confirmed"]
+                                          or sign * (t["objective"] - before["mean"]) < 0):
+                        pending += [t["trial"]] * confirmations  # a new incumbent
+            inc = best(elog.state(elog.read(con))["trials"])
+            if inc and inc["confirmed"] and (anchor is None or sign * (anchor - inc["mean"]) >= st["delta"]):
+                anchor, since = inc["mean"], 0
+        drift = _drift_check(run_dir, con, r, inc, eligible, sign) if fidelity != ref and inc else None
+    except BudgetRefused:
+        return _end_run(run_dir, con, {"round": r, "trigger": "budget_spent", "incumbent": inc})
+    except BaseException:
+        elog.append(con, "round_ended", "harness", {"round": r, "trigger": "failed", "incumbent": inc})
+        _regenerate(run_dir, con)
+        raise
+    elog.append(con, "round_ended", "harness", {"round": r, "trigger": trigger, "incumbent": inc})
+    _regenerate(run_dir, con)
+    return {"round": r, "trigger": trigger, "incumbent": inc, "drift": drift,
+            **_status(elog.state(elog.read(con)))}
+
+
+def _burned_in(st: dict, selected: list[dict], eligible) -> bool:
+    """Every hypothesis in the search has max(10·d, 20) fresh sampler trials."""
+    ts = [t for t in eligible(st["trials"]) if t["kind"] == "sampler"]
+    hyps = st["hypotheses"]
+    return all(sum(t["round"] >= hyps[h["id"]]["activated_round"] for t in ts)
+               >= max(10 * len(h["spec"]["levers"]), 20) for h in selected)
+
+
+def _drift_check(run_dir: Path, con, r: int, inc: dict, eligible, sign: int) -> dict | None:
+    """The incumbent and one random config of the round, re-run at the reference fidelity."""
+    st = elog.state(elog.read(con))
+    ref = st["run"]["reference_fidelity"]
+    others = [t for t in eligible(st["trials"])
+              if t.get("round") == r and "replicate_of" not in t and t["levers"] != inc["levers"]]
+    if not others:
+        return None
+    other = random.Random(f"{st['run']['run_id']}/R{r}/drift").choice(others)
+    proxy = {c["trial"]: c["mean"] for c in bo_study.ranked(eligible(st["trials"]), sign)}
+    pair = [(inc["trial"], inc["levers"]), (other["trial"], other["levers"])]
+    runs = [_trial(run_dir, con, None, "drift", levers, ref, round=r, drift_of=root)
+            for root, levers in pair]
+    at_ref = [t.get("objective") for t in runs]
+    at_proxy = [proxy[root] for root, _ in pair]
+    broken = None  # unknown when a drift trial failed
+    if at_ref[0] is not None and at_ref[1] is not None:
+        broken = (sign * (at_proxy[0] - at_proxy[1]) < 0) != (sign * (at_ref[0] - at_ref[1]) < 0)
+    payload = {"round": r, "configs": [root for root, _ in pair], "trials": [t["trial"] for t in runs],
+               "proxy": at_proxy, "reference": at_ref, "broken": broken}
+    elog.append(con, "drift_check", "harness", payload)
+    return payload
 
 
 def _estimate_noise(run_dir: Path, con, baseline: dict) -> None:
@@ -419,9 +612,11 @@ def _estimate_noise(run_dir: Path, con, baseline: dict) -> None:
         "replication": any(r["sigma"] > 0 for r in rows), "rungs": rows})
 
 
-def _calibrate_ladder(run_dir: Path, con, noise: dict) -> dict:
+def _calibrate_ladder(run_dir: Path, con, noise: dict, space: dict) -> dict:
+    """Ladder calibration: ~5 diverse configs over the selected hypotheses' levers at every rung."""
     run = elog.state(elog.read(con))["run"]
-    cfgs = calibration.configs(_baseline(run_dir), random.Random(f"{run['run_id']}/calibration"))
+    cfgs = calibration.configs(space, _baseline(run_dir),
+                               random.Random(f"{run['run_id']}/calibration"))
     rows = [{"fidelity": r["fidelity"], "sigma": r["sigma"], "objectives": [], "trials": []}
             for r in noise["rungs"]]
     for i, cfg in enumerate(cfgs):
@@ -445,11 +640,26 @@ def _run_trial(run_dir: Path, runner: str, trial: dict) -> dict:
     (art / "trial.json").write_text(json.dumps({**trial, "artifact_dir": str(art)}, indent=2))
     # no __pycache__ in the worktree: it would dirty the tree a round and commit-lever pin
     env = {**os.environ, "BOAUTORESEARCH_TRIAL": str(art / "trial.json"), "PYTHONDONTWRITEBYTECODE": "1"}
-    t0 = time.monotonic()
+    t0, done = time.monotonic(), threading.Event()
+
+    def heartbeat():  # 1 s, 2 s, 4 s ... capped at a minute: what a crash is charged up to
+        con, wait = elog.connect(run_dir / "log.db"), 1.0
+        while not done.wait(wait):
+            elog.append(con, "trial_heartbeat", "harness",
+                        {"trial": trial["trial"], "elapsed_s": time.monotonic() - t0})
+            wait = min(2 * wait, 60.0)
+        con.close()
+
+    beat = threading.Thread(target=heartbeat, daemon=True)
     with open(art / "stdout.txt", "w") as out, open(art / "stderr.txt", "w") as err:
         p = subprocess.Popen([run_dir / "venv" / "bin" / "python", runner],
                              cwd=run_dir / "worktree", env=env, stdout=out, stderr=err)
-        _, status, usage = os.wait4(p.pid, 0)  # per-child rusage gives this trial's peak memory
+        beat.start()
+        try:
+            _, status, usage = os.wait4(p.pid, 0)  # per-child rusage gives this trial's peak memory
+        finally:
+            done.set()
+            beat.join()
     p.returncode = os.waitstatus_to_exitcode(status)
     measured = {"exit_code": p.returncode, "wall_clock_s": time.monotonic() - t0,
                 "peak_mem_mb": usage.ru_maxrss / (2**20 if sys.platform == "darwin" else 2**10),
@@ -472,7 +682,8 @@ def _run_trial(run_dir: Path, runner: str, trial: dict) -> dict:
 def _status(st: dict) -> dict:
     run, trials = st["run"], st["trials"]
     spent = sum(t["wall_clock_s"] for t in trials if t["status"] != "running")
-    count = {s: sum(t["status"] == s for t in trials) for s in ("running", "finished", "failed")}
+    count = {s: sum(t["status"] == s for t in trials)
+             for s in ("running", "finished", "failed", "abandoned")}
     return {"run_id": run["run_id"], "objective": run["objective"], "direction": run["direction"],
             "budget": {"total_s": run["budget_s"], "spent_s": spent,
                        "remaining_s": run["budget_s"] - spent},
@@ -480,8 +691,36 @@ def _status(st: dict) -> dict:
             "r0_complete": st["r0_complete"], "fidelity": st["fidelity"],
             "sigma": st["noise"]["sigma"] if st["noise"] else None,
             "replication": st["noise"]["replication"] if st["noise"] else None,
+            "delta": st["delta"], "suggested_delta": _suggested_delta(st), "run_ended": st["run_ended"],
             "hypotheses": [{"id": h["id"], "title": h["spec"]["title"], "status": h["status"],
-                            "commit": h["commit"]} for h in st["hypotheses"].values()]}
+                            "commit": h["commit"]} for h in st["hypotheses"].values()],
+            "next": _next(st)}
+
+
+def _suggested_delta(st: dict) -> float | None:
+    return 2 * st["noise"]["sigma"] if st["noise"] else None
+
+
+def _selected(st: dict) -> list[dict]:
+    """The hypotheses the next round searches: those in search plus the registered queue."""
+    # ponytail: every registered hypothesis joins; #29's scheduler adds priority, the dimension cap
+    # and exclusivity
+    return [h for h in st["hypotheses"].values() if h["status"] in ("registered", "active")]
+
+
+def _next(st: dict) -> list[str]:
+    """The duties outstanding before the next round-run can go ahead."""
+    if st["run_ended"]:
+        return []
+    if not st["r0_complete"]:
+        return ["round-run (the calibration round)"]
+    duties = [f"write {h['id']}'s lever code, then smoke {h['id']} and commit-lever {h['id']}"
+              for h in _selected(st) if not h["commit"]]
+    if not _selected(st):
+        duties.append("propose and register a hypothesis")
+    if st["delta"] is None:
+        duties.append(f"set-delta <value> (suggested 2σ = {_suggested_delta(st):.3g})")
+    return duties or ["round-run"]
 
 
 def cmd_accept_proxy(a) -> dict:
@@ -506,13 +745,29 @@ def cmd_accept_proxy(a) -> dict:
     return _status(elog.state(elog.read(con)))
 
 
+def cmd_set_delta(a) -> dict:
+    """The minimum meaningful effect δ, fixed for the whole run."""
+    run_dir, con = _open_run()
+    st = elog.state(elog.read(con))
+    if st["delta"] is not None:
+        raise Refused(f"δ is already {st['delta']}: it is fixed for the whole run")
+    if not st["r0_complete"]:
+        raise Refused("δ is set from the calibration round's σ: run `round-run` first")
+    if not _positive(a.value):
+        raise Refused(f"δ must be a positive number in objective units, not {a.value}")
+    elog.append(con, "delta_set", a.actor, {"rationale": a.rationale, "delta": a.value,
+                                            "suggested": _suggested_delta(st)})
+    _regenerate(run_dir, con)
+    return _status(elog.state(elog.read(con)))
+
+
 def cmd_status(a) -> dict:
-    _, con = _open_run()
+    _, con = _open_run(recover=False)
     return _status(elog.state(elog.read(con)))
 
 
 def cmd_trials(a) -> dict:
-    _, con = _open_run()
+    _, con = _open_run(recover=False)
     return {"trials": elog.state(elog.read(con))["trials"]}
 
 
@@ -552,6 +807,7 @@ def _parser() -> argparse.ArgumentParser:
     action("commit-lever", cmd_commit_lever).add_argument("hypothesis")
     action("round-run", cmd_round_run)
     action("accept-proxy", cmd_accept_proxy).add_argument("--fidelity", required=True)
+    action("set-delta", cmd_set_delta).add_argument("value", type=float)
     sub.add_parser("status").set_defaults(fn=cmd_status, action=False)
     sub.add_parser("trials").set_defaults(fn=cmd_trials, action=False)
     return p

@@ -13,22 +13,21 @@ def sigma(values: list[float]) -> float:
     return statistics.stdev(values)
 
 
-def configs(baseline: dict, rng) -> list[dict]:
-    """CONFIGS diverse configs: a Latin hypercube over a box around each lever's baseline."""
-    # ponytail: box = baseline ± max(|b|, 1)/2 because levers.json carries no ranges yet;
-    # use the registered hypotheses' lever boxes once they exist.
+def configs(space: dict, baseline: dict, rng) -> list[dict]:
+    """CONFIGS diverse configs: a Latin hypercube over the levers' boxes, the rest at baseline."""
     cols: dict[str, list] = {}
-    for name, b in baseline.items():
+    for name, lv in space.items():
         u = [(i + 0.5) / CONFIGS for i in range(CONFIGS)]  # stratum midpoints keep configs apart
         rng.shuffle(u)
-        if isinstance(b, bool):
-            cols[name] = [x >= 0.5 for x in u]
-        elif isinstance(b, (int, float)):
-            w = max(abs(b), 1) / 2
-            cols[name] = [(round if isinstance(b, int) else float)(b - w + 2 * w * x) for x in u]
+        if lv["kind"] in ("float", "int"):
+            lo, hi = lv["low"], lv["high"]
+            xs = [math.exp(math.log(lo) + (math.log(hi) - math.log(lo)) * x) if lv.get("log")
+                  else lo + (hi - lo) * x for x in u]
+            cols[name] = [round(x) for x in xs] if lv["kind"] == "int" else xs
         else:
-            cols[name] = [b] * CONFIGS
-    return [{n: cols[n][i] for n in baseline} for i in range(CONFIGS)]
+            opts = lv["options"] if lv["kind"] == "categorical" else [False, True]
+            cols[name] = [opts[int(x * len(opts))] for x in u]
+    return [{**baseline, **{n: cols[n][i] for n in space}} for i in range(CONFIGS)]
 
 
 def _ranks(xs: list[float]) -> list[float]:

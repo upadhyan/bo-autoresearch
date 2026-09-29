@@ -8,7 +8,8 @@ SCHEMA_VERSION = 1
 EVENT_TYPES = {"run_started", "trial_started", "trial_finished", "trial_failed", "trial_refused",
                "round_started", "round_ended", "noise_estimate", "fidelity_calibration",
                "proxy_accepted_unvalidated", "hypothesis_proposed", "hypothesis_registered",
-               "lever_smoke", "lever_committed"}
+               "lever_smoke", "lever_committed", "delta_set", "hypothesis_activated",
+               "trial_heartbeat", "trial_abandoned", "drift_check", "run_ended"}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -57,21 +58,29 @@ def state(events: list[dict]) -> dict:
     trials: dict[int, dict] = {}
     rounds: dict[int, dict] = {}
     hyps: dict[str, dict] = {}
-    noise = calib = proxy = None
+    noise = calib = proxy = delta = ended = None
     for e in events:
         p = {k: v for k, v in e["payload"].items() if k != "rationale"}
         if e["type"] == "run_started":
-            run = p
+            run, delta = p, p.get("delta")
         elif e["type"] == "trial_started":
             trials[p["trial"]] = {**p, "status": "running"}
-        elif e["type"] == "trial_finished":
-            trials[p["trial"]].update(p, status="finished")
-        elif e["type"] == "trial_failed":
-            trials[p["trial"]].update(p, status="failed")
+        elif e["type"] == "trial_heartbeat":
+            trials[p["trial"]]["heartbeat_s"] = p["elapsed_s"]
+        elif e["type"] in ("trial_finished", "trial_failed", "trial_abandoned"):
+            trials[p["trial"]].update(p, status=e["type"][len("trial_"):])
         elif e["type"] == "round_started":
             rounds[p["round"]] = {**p, "ended": None}
         elif e["type"] == "round_ended":
             rounds[p["round"]]["ended"] = p["trigger"]
+        elif e["type"] == "drift_check":
+            rounds[p["round"]]["drift"] = p
+        elif e["type"] == "delta_set":
+            delta = p["delta"]
+        elif e["type"] == "run_ended":
+            ended = p["reason"]
+        elif e["type"] == "hypothesis_activated":
+            hyps[p["id"]].update(status="active", activated_round=p["round"])
         elif e["type"] == "noise_estimate":
             noise = p
         elif e["type"] == "fidelity_calibration":
@@ -95,4 +104,5 @@ def state(events: list[dict]) -> dict:
     else:
         fidelity = {"fidelity": run.get("reference_fidelity"), "proxy": "reference"}
     return {"run": run, "trials": [trials[n] for n in sorted(trials)], "rounds": rounds,
-            "noise": noise, "calibration": calib, "hypotheses": hyps, "r0_complete": r0_complete, "fidelity": fidelity}
+            "noise": noise, "calibration": calib, "hypotheses": hyps, "r0_complete": r0_complete,
+            "fidelity": fidelity, "delta": delta, "run_ended": ended}

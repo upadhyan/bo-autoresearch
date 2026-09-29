@@ -152,7 +152,7 @@ def test_status_and_trials_probes_and_trials_csv(repo, run_dir):
 
     _, status = bo(repo, "status")
     assert status["run_id"] == run_dir.name
-    assert status["trials"] == {"total": 2, "running": 0, "finished": 1, "failed": 1}
+    assert status["trials"] == {"total": 2, "running": 0, "finished": 1, "failed": 1, "abandoned": 0}
     assert 0 < status["budget"]["spent_s"] < 3600
     assert status["budget"]["remaining_s"] == pytest.approx(3600 - status["budget"]["spent_s"])
 
