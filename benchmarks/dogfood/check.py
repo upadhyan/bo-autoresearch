@@ -154,7 +154,8 @@ def case_right(run: Run, case: dict) -> tuple[bool, str]:
     if end in ("pruned", "parked"):
         ok = last["state"] == end and not trials and (end != "parked" or last["reason"].startswith(case["reason"]))
         return ok, f"{why}, {len(trials)} trials off baseline"
-    ok = last["state"] == end and (end != "rejected" or last["reason"] == case["condition"])
+    conds = case.get("condition")
+    ok = last["state"] == end and (end != "rejected" or last["reason"] in (conds if isinstance(conds, list) else [conds]))
     if case.get("revived"):
         rev = [e for e in run.of("hypothesis_revived") if e["from"] == main[0]]
         flags = [x for x in run.of("record") if x["kind"] == "interplay"

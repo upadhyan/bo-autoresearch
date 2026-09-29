@@ -8,7 +8,9 @@ cases:
 - case: useless
   hypotheses: {main: Smooth the labels}
   end: rejected
-  condition: irrelevant
+  # irrelevant needs evidence across the co-active levers' box (#21 amendment); next to the curved
+  # warm-up lever it is usually unexplored, so no-improvement is the expected label and either is right
+  condition: [irrelevant, no-improvement]
 - case: matters but hurts
   hypotheses: {main: Add weight decay}
   end: rejected

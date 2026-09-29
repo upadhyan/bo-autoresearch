@@ -708,8 +708,12 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   levers, and BO leaves settings unexplored, so next to a curved co-active lever (a bowl) a flat lever is labelled
   `no-improvement`, not `irrelevant` (0/10, even at σ = δ/20; before, the flat fit supplied the label); a smooth partner
   (linear) still allows it at σ = δ/10 (20/20). Rejects are unaffected; the label and the warm start's key drop are.
-  OPEN (user decision, likely a #21 amendment): this breaks the Seam 2 "useless → `irrelevant`" case and leaves 5 tests
-  red (test_verdicts: broken proxy, single lever frozen `irrelevant` next to a bowl; test_reports: 3 on the planted H2).
+  DECIDED (user, option 1; #21 amendment): the signal floor and lengthscale clamp are part of the verdict model, and
+  `irrelevant` needs evidence across the other active levers' box, so `no-improvement` is the expected label for a flat
+  lever next to a curved partner whose box is unexplored. Tests follow: the flat-next-to-a-bowl freeze asserts
+  `no-improvement` + filter-to-baseline; test_reports' planted H2 is rejected `no-improvement`, deferred one round behind
+  H3's; the broken-proxy test is a rate over range(10) (its drift premise is being reworked separately); Seam 2's
+  useless case (benchmarks/dogfood/expected.yaml) accepts `irrelevant` or `no-improvement` (`condition` may be a list).
 - #35: the skill's round-run wait loop is `pgrep -f "[/]<BO minus its leading slash> round-run"`: procps pgrep
   (Linux, the dogfood CI) doesn't exclude its ancestors, so a plain `"boautoresearch round-run"` matched the Monitor's
   own shell and never exited (BSD pgrep hid it on macOS); the full `BO` path also keeps one run's wait off another

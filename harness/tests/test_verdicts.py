@@ -300,35 +300,49 @@ def test_a_broken_proxy_downgrades_its_rounds_rejects_to_inconclusive(tmp_path, 
     # H1 is useless everywhere; H2's bowl ranks backwards at the proxy, so the drift check breaks it
     useless = (spec({"x": lever()}), '    term += 0 * lever("H1.x")')
     bowl = (spec({"y": lever(0.5)}), '    term += 4 * (lever("H2.y") - 0.7) ** 2')
-    run_dir, [out] = verdict_run(tmp_path / "r", project_python, 1, [useless, bowl], proxy=True,
-                                 extra="deterministic: true\n", scramble=1)
-    assert [v["outcome"] for v in records(run_dir)][-2:] == ["pending-reject", "reject"]
-    assert out["trigger"] == "search_space" and out["drift"]["broken"] is True
-    assert not of_type(run_dir, "hypothesis_rejected")
-    assert of_type(run_dir, "hypothesis_inconclusive") == [
-        {"id": "H1.v1", "verdict": records(run_dir)[-1]["id"], "reason": "broken proxy fidelity"}]
+    runs = repeat(tmp_path, project_python, [useless, bowl], seeds=range(10), proxy=True,
+                  extra="deterministic: true\n", scramble=1)
+    exercised = 0
+    for run_dir, [out] in runs:
+        confirmed = [v["outcome"] for v in records(run_dir)][-2:] == ["pending-reject", "reject"]
+        if not (confirmed and out["drift"] and out["drift"]["broken"]):
+            continue
+        exercised += 1  # a confirmed reject in a round whose proxy broke: it must be downgraded
+        assert out["trigger"] == "search_space"
+        assert not of_type(run_dir, "hypothesis_rejected")
+        assert of_type(run_dir, "hypothesis_inconclusive") == [
+            {"id": "H1.v1", "verdict": records(run_dir)[-1]["id"], "reason": "broken proxy fidelity"}]
+    # both premises held together in 9 of 20 runs over seeds 0..19 (H1's reject confirmed within R1 in 17,
+    # the drift check broken in 10); at 45%, fewer than 2 of 10 has probability ~2%. The drift check's
+    # own rate is being reworked separately (pooled σ̂, a t-quantile, a tie-free pair): re-measure then
+    assert exercised >= 2, exercised
 
 
-def test_a_single_lever_below_delta_is_frozen_and_leaves_the_search(tmp_path, project_python):
+def test_a_flat_lever_next_to_a_curved_one_is_frozen_no_improvement_and_leaves_the_search(tmp_path,
+                                                                                         project_python):
+    # z does nothing, but next to the bowl in x BO leaves most of x's box unexplored with z moved, so
+    # M_z's bound (taken over every setting of x) stays above δ: `irrelevant` lacks the evidence and z is
+    # frozen `no-improvement` (#21 amendment). Frozen so at the first check in 10 of 10 runs over seeds
+    # 0..9; at 95%, fewer than 2 of 3 has probability ~1%
     two = (spec({"x": lever(0.2), "z": lever()}),
            '    term += 4 * (lever("H1.x") - 0.7) ** 2 + 0 * lever("H1.z")')
     runs = repeat(tmp_path, project_python, [two], rounds=2)
     frozen = [of_type(run_dir, "lever_frozen") for run_dir, _ in runs]
-    assert sum(f == [{"id": "H1.v1", "lever": "H1.z", "verdict": f[0]["verdict"], "condition": "irrelevant"}]
+    assert sum(f == [{"id": "H1.v1", "lever": "H1.z", "verdict": f[0]["verdict"], "condition": "no-improvement"}]
                if f else False for f in frozen) >= 2, frozen
     for (run_dir, outs), f in zip(runs, frozen):
         if not f:
             continue
         v = next(v for v in records(run_dir) if v["id"] == f[0]["verdict"])
         z = v["levers"]["H1.z"]
-        assert z["delta_stat"]["upper"] < DELTA and z["m_u"]["upper"] < DELTA and v["frozen"] == ["H1.z"]
+        assert z["delta_stat"]["upper"] < DELTA <= z["m_u"]["upper"] and v["frozen"] == ["H1.z"]
         assert outs[0]["trigger"] == "search_space"  # a freeze changes the search space
         [r2] = [s for s in of_type(run_dir, "round_started") if s["round"] == 2]
         assert set(r2["search_space"]) == {"H1.x"}
-        # frozen is credibly irrelevant: H1.z's key is dropped, so every R1 trial seeds R2
+        # no-improvement: z is filtered to its baseline, so only the R1 trials that ran z there seed R2
         r1 = [t for t in started_in(run_dir, 1) if t["status"] == "finished"]
         assert any(t["levers"]["H1.z"] != 0.0 for t in r1)
-        assert {t["trial"] for t in r1} <= set(r2["seeded"])
+        assert {t["trial"] for t in r1 if t["levers"]["H1.z"] == 0.0} == {t["trial"] for t in r1} & set(r2["seeded"])
         assert all(t["levers"]["H1.z"] == 0.0 for t in started_in(run_dir, 2))
         assert not of_type(run_dir, "hypothesis_rejected")
 
