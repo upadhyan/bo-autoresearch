@@ -10,6 +10,7 @@ import json
 import math
 import os
 import random
+import re
 import shutil
 import statistics
 import sqlite3
@@ -42,8 +43,8 @@ class _Parser(argparse.ArgumentParser):
         raise Refused(message)
 
 
-def _git(cwd: Path, *args: str) -> str:
-    p = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+def _git(cwd: Path, *args: str, env: dict | None = None) -> str:
+    p = subprocess.run(["git", *args], cwd=cwd, env=env, capture_output=True, text=True)
     if p.returncode:
         raise Refused(f"git {' '.join(args)} failed: {p.stderr.strip()}")
     return p.stdout.strip()
@@ -217,6 +218,7 @@ def cmd_smoke(a) -> dict:
                                 st["run"]["reference_fidelity"])}
     h = _uncommitted(st, a.hypothesis)
     tree, fidelity = _worktree_tree(run_dir / "worktree"), _cheapest(st)
+    stamp = _worktree_stamp(run_dir / "worktree")
     levers = h["spec"]["levers"]
     base = {**_baseline(run_dir), **{n: lv["baseline"] for n, lv in levers.items()}}
     rng = random.Random(f"{st['run']['run_id']}/smoke/{h['id']}/{len(st['trials'])}")
@@ -227,10 +229,14 @@ def cmd_smoke(a) -> dict:
         if trials[-1]["status"] != "finished":
             break
     passed = len(trials) == 2 and trials[-1]["status"] == "finished"
+    reason = None if passed else f"trial {trials[-1]['trial']} {trials[-1]['status']}"
+    if _worktree_stamp(run_dir / "worktree") != stamp:  # would dirty rounds, or be committed as code
+        passed, reason = False, "the trials wrote into the worktree: write outputs elsewhere"
     elog.append(con, "lever_smoke", "harness", {"id": h["id"], "tree": tree, "fidelity": fidelity,
-                                                "trials": [t["trial"] for t in trials], "passed": passed})
+                                                "trials": [t["trial"] for t in trials], "passed": passed,
+                                                "reason": reason})
     _regenerate(run_dir, con)
-    return {"hypothesis": h["id"], "passed": passed, "trials": trials}
+    return {"hypothesis": h["id"], "passed": passed, "reason": reason, "trials": trials}
 
 
 def _hypothesis(st: dict, ref: str) -> dict:
@@ -266,11 +272,14 @@ def _worktree_tree(worktree: Path) -> str:
     """Hash of the worktree's full contents (untracked files included, ignored ones not)."""
     with tempfile.TemporaryDirectory() as d:
         env = {**os.environ, "GIT_INDEX_FILE": str(Path(d) / "index")}
-        for args in (["add", "-A"], ["write-tree"]):
-            p = subprocess.run(["git", *args], cwd=worktree, env=env, capture_output=True, text=True)
-            if p.returncode:
-                raise Refused(f"git {' '.join(args)} failed: {p.stderr.strip()}")
-    return p.stdout.strip()
+        _git(worktree, "add", "-A", env=env)
+        return _git(worktree, "write-tree", env=env)
+
+
+def _worktree_stamp(worktree: Path) -> dict:
+    """mtime of every non-ignored worktree file: a trial rewriting one, even identically, shows."""
+    files = _git(worktree, "ls-files", "-z", "-co", "--exclude-standard").split("\0")
+    return {f: (worktree / f).stat().st_mtime_ns for f in files if f and (worktree / f).exists()}
 
 
 def cmd_propose(a) -> dict:
@@ -283,7 +292,10 @@ def cmd_propose(a) -> dict:
     except ValueError as e:  # JSONDecodeError included
         raise Refused(f"spec: {e}")
     st = elog.state(elog.read(con))
-    n = len({h["number"] for h in st["hypotheses"].values()}) + 1
+    # past every number in use, the project's own levers.json included (e.g. an existing H1.scale)
+    taken = [h["number"] for h in st["hypotheses"].values()]
+    taken += [int(m[1]) for k in _baseline(run_dir) if (m := re.match(r"H(\d+)\.", k))]
+    n = max(taken, default=0) + 1
     spec["levers"] = {f"H{n}.{name}": lv for name, lv in spec["levers"].items()}
     hid = f"H{n}.v1"
     elog.append(con, "hypothesis_proposed", a.actor, {
@@ -330,7 +342,8 @@ def cmd_commit_lever(a) -> dict:
                                     {n for x in coded for n in x["spec"]["levers"]})
     except ValueError as e:
         raise Refused(f"lever code: {e}")
-    baselines = {n: lv["baseline"] for x in coded for n, lv in x["spec"]["levers"].items()}
+    # the levers.json H was smoked with (the project's own levers kept), plus H's baselines
+    baselines = {**_baseline(run_dir), **{n: lv["baseline"] for n, lv in h["spec"]["levers"].items()}}
     (worktree / "levers.json").write_text(json.dumps(baselines, indent=2, sort_keys=True) + "\n")
     _git(worktree, "add", "-A")
     _git(worktree, "-c", "user.name=boautoresearch", "-c", "user.email=harness@boautoresearch",
@@ -349,7 +362,8 @@ def cmd_round_run(a) -> dict:
         raise Refused("the worktree has uncommitted changes: a round runs on one commit, so commit "
                       "lever code with `commit-lever <H>` first")
     if st["r0_complete"]:
-        raise Refused("round-run for R1 is refused: no hypothesis is registered")
+        raise Refused("round-run for R1 is refused: the calibration round is done and rounds that "
+                      "test a hypothesis are not available yet")
     return _run_r0(run_dir, con, a, st)
 
 

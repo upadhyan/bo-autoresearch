@@ -87,6 +87,10 @@ INVALID = [
     (with_lever(kind="int", low=0, high=5, baseline=0.5), "baseline"),
     (with_lever(kind="categorical", low=None, high=None, predicted=None, options=["a", "b"],
                 baseline="c"), "baseline"),
+    (with_lever(kind="categorical", low=None, high=None, predicted=None, options=[1, True],
+                baseline=1), "options"),
+    (with_lever(kind="categorical", low=None, high=None, predicted=None, options=["a", 1],
+                baseline=True), "baseline"),
     (with_lever(low=2.0), "low"),
     (with_lever(log=True), "log"),
     ({**SPEC, "title": "x" * 81}, "title"),
@@ -227,6 +231,8 @@ def test_commit_lever_needs_the_smoke_to_pass_on_the_same_contents(lever_repo, l
 SNEAKY = [  # each runs fine at both smoke points, so only the static check stands in the way
     ("    loss -= float(os.environ.get('GAIN', 0)) * lever(\"H1.gain\")\n", LEVER_CODE[1],
      "other than through lever()"),
+    ("    loss -= float(g('GAIN', 0)) * lever(\"H1.gain\")\n",
+     "from os import getenv as g\nfrom boautoresearch import fidelity, lever", "getenv"),
     ("    import argparse\n    loss -= lever(\"H1.gain\")\n", LEVER_CODE[1], "import argparse"),
     ("    loss -= json.load(open('levers.json')).get('H1.gain', 0)\n",
      "import json\nfrom boautoresearch import fidelity", "'levers.json'"),
@@ -267,3 +273,42 @@ def test_smoke_of_a_hypothesis_runs_at_the_cheapest_rung_once_r0_measured_it(lev
     assert code == 0 and out["passed"], out
     assert [t["fidelity"] for t in out["trials"]] == [{"epochs": 1}, {"epochs": 1}]
     assert out["trials"][0]["objective"] == 3.0 * (1 + 1 / 1)
+
+
+def test_commit_lever_keeps_the_project_levers_and_numbers_past_them(lever_repo, lever_run, tmp_path):
+    (lever_repo / "levers.json").write_text('{"H1.scale": 2.0}\n')  # a lever the project already has
+    git(lever_repo, "commit", "-qam", "an existing lever")
+    run_dir = lever_run()
+    hid = registered(lever_repo, tmp_path)
+    assert hid == "H2.v1"  # H1 is taken by levers.json
+    write_lever_code(run_dir, code="    loss -= lever(\"H2.gain\")\n")
+    code, out = bo(lever_repo, "smoke", hid, "--rationale", "try")
+    assert code == 0 and out["passed"], out
+    assert out["trials"][0]["levers"] == {"H1.scale": 2.0, "H2.gain": 0.0}
+    code, out = bo(lever_repo, "commit-lever", hid, "--rationale", "smoke passed")
+    assert code == 0, out
+    assert json.loads((run_dir / "worktree" / "levers.json").read_text()) == {
+        "H1.scale": 2.0, "H2.gain": 0.0}
+
+
+def test_smoke_fails_when_its_trials_write_into_the_worktree(lever_repo, lever_run, tmp_path):
+    run_dir = lever_run()
+    hid = registered(lever_repo, tmp_path)
+    write_lever_code(run_dir, code="    open('out.txt', 'w').write('x')\n    loss -= lever(\"H1.gain\")\n")
+    for _ in range(2):  # the second smoke already sees out.txt: the trials must still not touch it
+        code, out = bo(lever_repo, "smoke", hid, "--rationale", "writes a file")
+        assert code == 0 and out["passed"] is False and "worktree" in out["reason"], out
+    code, out = bo(lever_repo, "commit-lever", hid, "--rationale", "failed smoke")
+    assert code != 0 and "passing" in out["reason"]
+
+
+def test_the_random_smoke_point_of_a_bool_lever_is_off_baseline(lever_repo, lever_run, tmp_path):
+    run_dir = lever_run()
+    spec = copy.deepcopy(SPEC)
+    spec["levers"] = {"swap": {"kind": "bool", "baseline": False, "why_not_graded": "a code path"}}
+    hid = registered(lever_repo, tmp_path, spec)
+    write_lever_code(run_dir, code="    if lever(\"H1.swap\"):\n        loss -= 0.5\n")
+    for _ in range(5):
+        code, out = bo(lever_repo, "smoke", hid, "--rationale", "try")
+        assert code == 0 and out["passed"], out
+        assert out["trials"][1]["levers"] == {"H1.swap": True}

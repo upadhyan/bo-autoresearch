@@ -84,10 +84,11 @@ def _validate_lever(name: str, lv) -> None:
                              "where the improving values lie")
     elif kind == "categorical":
         opts = lv.get("options")
-        if (not isinstance(opts, list) or len(opts) < 2 or len({repr(o) for o in opts}) < len(opts)
-                or not all(isinstance(o, (str, int, float, bool)) for o in opts)):
+        if (not isinstance(opts, list) or len(opts) < 2
+                or not all(isinstance(o, (str, int, float, bool)) for o in opts)
+                or len(set(opts)) < len(opts)):  # set: 1, 1.0 and True are one value
             raise ValueError(f"{where}options must list at least 2 distinct scalar values")
-        if b not in opts:
+        if not any(type(o) is type(b) and o == b for o in opts):
             raise ValueError(f"{where}baseline {b!r} must be one of the options")
     else:
         _text(lv, "why_not_graded", where)
@@ -96,7 +97,10 @@ def _validate_lever(name: str, lv) -> None:
 
 
 def random_point(levers: dict, rng) -> dict:
-    """One uniformly random in-range value per lever (log-uniform for log ranges)."""
+    """One uniformly random in-range value per lever (log-uniform for log ranges).
+
+    A categorical or bool lever never draws its baseline, so the smoke runs its other branch.
+    """
     out = {}
     for name, lv in levers.items():
         if lv["kind"] in GRADED:
@@ -105,7 +109,8 @@ def random_point(levers: dict, rng) -> dict:
                  else rng.uniform(lo, hi))
             out[name] = min(max(round(x), lo), hi) if lv["kind"] == "int" else x
         else:
-            out[name] = rng.choice(lv["options"] if lv["kind"] == "categorical" else [False, True])
+            opts = lv["options"] if lv["kind"] == "categorical" else [False, True]
+            out[name] = rng.choice([o for o in opts if o != lv["baseline"]])
     return out
 
 
@@ -127,6 +132,8 @@ def _config_reads(tree: ast.AST) -> Counter:
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             mods = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""]
             sites.update(f"import {m}" for m in mods if m.split(".")[0] in CONFIG_MODULES)
+            if isinstance(node, ast.ImportFrom):  # `from os import getenv as g` hides the name
+                sites.update(a.name for a in node.names if a.name in CONFIG_NAMES)
         elif isinstance(node, ast.Constant) and isinstance(node.value, str):
             sites.update(f"{s!r}" for s in CONFIG_STRINGS if s in node.value)
     return sites
