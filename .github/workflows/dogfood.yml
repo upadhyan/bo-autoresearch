@@ -3,12 +3,11 @@
 # adversarial checklist fired from outside the LLM. check.py's output for every run is attached.
 #
 # Needs one repository secret: CLAUDE_CODE_OAUTH_TOKEN (Settings > Secrets and variables > Actions), from
-# `claude setup-token` on a subscription with enough usage for 7 long agent sessions. Runs on demand and weekly.
+# `claude setup-token` on a subscription with enough usage for 7 long agent sessions. Runs on demand only
+# (Actions > dogfood > Run workflow); forks run it with their own secret.
 name: dogfood
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 5 * * 1"
 jobs:
   benchmark:
     runs-on: ubuntu-latest
