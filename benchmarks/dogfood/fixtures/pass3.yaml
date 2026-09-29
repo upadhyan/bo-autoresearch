@@ -1,0 +1,10 @@
+# Scripted generation pass 3: the partner of "Clip the gradients" (H4), arriving after it was tested alone.
+- title: Raise the learning rate
+  rationale: The base learning rate may be conservative; larger steps could reach a lower loss in the same epochs.
+  mechanism: Multiply the base learning rate by 2 ** lr_log2.
+  provenance: standard
+  lens: optimisation
+  directives: []
+  fidelity_sensitive: false
+  levers:
+    lr_log2: {kind: float, low: 0.0, high: 1.0, baseline: 0.0, predicted: higher, path: config.lr_log2}

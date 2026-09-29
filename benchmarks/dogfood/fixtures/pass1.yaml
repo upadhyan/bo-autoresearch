@@ -1,0 +1,85 @@
+# Scripted generation pass 1 (run start): the planted cases, in id order H1..H9.
+- title: Warm the learning rate up
+  rationale: Large early steps on an untrained model are noisy; a short warmup should settle them.
+  mechanism: Ramp the learning rate linearly from zero over the first warmup_frac of training.
+  provenance: standard
+  lens: optimisation
+  directives: []
+  fidelity_sensitive: false
+  levers:
+    warmup_frac: {kind: float, low: 0.0, high: 0.5, baseline: 0.0, predicted: higher, path: config.warmup_frac}
+- title: Smooth the labels
+  rationale: Softer targets may regularise an over-confident classifier.
+  mechanism: Mix the one-hot targets with a smoothing distribution (uniform or the class prior), ramped in over training.
+  provenance: standard
+  lens: regularisation
+  directives: []
+  fidelity_sensitive: false
+  levers:
+    label_smoothing: {kind: float, low: 0.0, high: 0.3, baseline: 0.0, predicted: higher, path: config.label_smoothing}
+    smoothing_prior: {kind: float, low: 0.0, high: 1.0, baseline: 0.0, predicted: higher, path: config.smoothing_prior}
+    smoothing_ramp: {kind: float, low: 0.0, high: 1.0, baseline: 0.0, predicted: higher, path: config.smoothing_ramp}
+- title: Add weight decay
+  rationale: Decoupled weight decay may curb overfitting.
+  mechanism: Shrink the weights by weight_decay times the learning rate at every step.
+  provenance: standard
+  lens: regularisation
+  directives: []
+  fidelity_sensitive: false
+  levers:
+    weight_decay: {kind: float, low: 0.0, high: 0.1, baseline: 0.0, predicted: higher, path: config.weight_decay}
+- title: Clip the gradients
+  rationale: Occasional gradient spikes may be what limits the step size.
+  mechanism: Clip the global gradient norm, harder as grad_clip grows.
+  provenance: standard
+  lens: optimisation
+  directives: []
+  fidelity_sensitive: false
+  levers:
+    grad_clip: {kind: float, low: 0.0, high: 1.0, baseline: 0.0, predicted: higher, path: config.grad_clip}
+- title: Train in mixed precision
+  rationale: Lower-precision arithmetic adds a little gradient noise that may regularise, at no cost in steps.
+  mechanism: Run the forward and backward passes in bfloat16 with float32 master weights.
+  provenance: standard
+  lens: systems
+  directives: [D2]
+  fidelity_sensitive: false
+  levers:
+    mixed_precision: {kind: bool, baseline: false, why_not_graded: Precision is a mode of the arithmetic; there is no halfway setting., path: config.mixed_precision}
+- title: Start from pretrained weights
+  rationale: A pretrained initialisation usually converges to a lower loss.
+  mechanism: Initialise the model from pretrained weights instead of from scratch.
+  provenance: standard
+  lens: initialisation
+  directives: [D1]
+  fidelity_sensitive: false
+  levers:
+    pretrained_init: {kind: bool, baseline: false, why_not_graded: The weights are either pretrained or not., path: config.pretrained_init}
+- title: Add an attention block
+  rationale: Letting features attend to each other may capture interactions the current layers miss.
+  mechanism: Insert a self-attention block before the classifier head.
+  provenance: standard
+  lens: architecture
+  directives: []
+  fidelity_sensitive: false
+  levers:
+    attention_block: {kind: bool, baseline: false, why_not_graded: The block is either in the model or not., path: config.attention_block}
+- title: Keep an EMA of the weights
+  rationale: An exponential moving average of the weights is a smoother model than the last iterate.
+  mechanism: Maintain an EMA of the weights whose strength grows with ema; it can serve as a teacher.
+  provenance: standard
+  lens: regularisation
+  directives: []
+  fidelity_sensitive: false
+  levers:
+    ema: {kind: float, low: 0.0, high: 1.0, baseline: 0.0, predicted: higher, path: config.ema}
+- title: Distil from a teacher's soft targets
+  rationale: Soft targets carry more information per example than one-hot labels.
+  mechanism: Add a distillation loss toward a teacher's softened predictions, weighted by distill_weight.
+  provenance: standard
+  lens: data
+  directives: []
+  fidelity_sensitive: false
+  exclusive_with: [H2]
+  levers:
+    distill_weight: {kind: float, low: 0.0, high: 1.0, baseline: 0.0, predicted: higher, path: config.distill_weight}

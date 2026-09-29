@@ -1,0 +1,268 @@
+"""Hypothesis specs (pre-registration), random in-range points, and the static lever-code check.
+
+Pure functions; the CLI turns their ValueError into a refusal.
+"""
+import ast
+import json
+import math
+import re
+from collections import Counter
+
+SPEC_KEYS = {"title", "rationale", "mechanism", "provenance", "source", "lens", "directives",
+             "fidelity_sensitive", "fidelity_reason", "levers", "merges", "exclusive_with", "masked_by"}
+LEVER_KEYS = {"float": {"low", "high", "log", "predicted"}, "int": {"low", "high", "log", "predicted"},
+              "categorical": {"options"}, "bool": {"why_not_graded"}}
+GRADED = ("float", "int")
+
+
+def _text(d: dict, key: str, where: str = "", limit: int = 0) -> None:
+    v = d.get(key)
+    if not isinstance(v, str) or not v.strip():
+        raise ValueError(f"{where}{key} is required and must be non-empty text")
+    if limit and len(v) > limit:
+        raise ValueError(f"{where}{key} must be {limit} characters or fewer, not {len(v)}")
+
+
+def _number(v, integer: bool) -> bool:
+    if isinstance(v, bool):
+        return False
+    return isinstance(v, int) if integer else isinstance(v, (int, float)) and math.isfinite(v)
+
+
+def validate(spec) -> None:
+    """Raise ValueError naming the first failing field of a hypothesis spec."""
+    if not isinstance(spec, dict):
+        raise ValueError("the spec must be a mapping")
+    if unknown := set(spec) - SPEC_KEYS:
+        raise ValueError(f"unknown spec fields: {sorted(unknown)}")
+    _text(spec, "title", limit=80)
+    for key in ("rationale", "mechanism", "lens"):
+        _text(spec, key)
+    if spec.get("provenance") not in ("novel", "adapted", "standard"):
+        raise ValueError("provenance must be novel, adapted or standard")
+    if spec["provenance"] == "adapted":
+        _text(spec, "source")
+    d = spec.get("directives")
+    if not isinstance(d, list) or not all(isinstance(i, str) and i for i in d):
+        raise ValueError("directives must list the directive ids the hypothesis touches ([] for none)")
+    if not isinstance(spec.get("fidelity_sensitive"), bool):
+        raise ValueError("fidelity_sensitive must be true or false")
+    if spec["fidelity_sensitive"]:
+        _text(spec, "fidelity_reason")
+    levers = spec.get("levers")
+    if not isinstance(levers, dict) or not levers:
+        raise ValueError("levers must map at least one lever name to its declaration")
+    for name, lv in levers.items():
+        _validate_lever(name, lv)
+    if "merges" in spec:
+        _validate_merges(spec["merges"], levers)
+    ex = spec.get("exclusive_with", [])
+    if not isinstance(ex, list) or not all(isinstance(i, str) and re.fullmatch(r"H\d+(\.v\d+)?", i)
+                                           for i in ex):
+        raise ValueError("exclusive_with must list the hypotheses never to share a round with, "
+                         "e.g. [\"H2\"]")
+    m = spec.get("masked_by", {})
+    if not isinstance(m, dict) or not all(re.fullmatch(r"H\d+", k) and isinstance(v, str) and v.strip()
+                                          for k, v in m.items()):
+        raise ValueError("masked_by must map each masking hypothesis to the reason it takes precedence, "
+                         "e.g. {\"H2\": \"with dropout on, the weight decay is moot\"}")
+
+
+def rules(rule) -> list[dict]:
+    """A merge mapping's rules for one of the merged hypothesis's levers: one merged lever, or a list
+    of them (exclusive mechanisms merged into one categorical lever)."""
+    return rule if isinstance(rule, list) else [rule]
+
+
+def _validate_merges(m, levers: dict) -> None:
+    """{from: [H<n>.v<k>], mapping: {own lever: rule | [rule, ...]}}, rule = {lever: H<n>.<name>,
+    values?: [[old, new], ...]}."""
+    if not isinstance(m, dict) or set(m) != {"from", "mapping"}:
+        raise ValueError("merges must be {from: [hypothesis ids], mapping: {lever: {lever, values}}}")
+    if (not isinstance(m["from"], list) or not m["from"]
+            or not all(isinstance(i, str) and re.fullmatch(r"H\d+\.v\d+", i) for i in m["from"])):
+        raise ValueError("merges.from must list the merged hypotheses' ids, e.g. [\"H2.v1\"]")
+    if not isinstance(m["mapping"], dict) or not m["mapping"]:
+        raise ValueError("merges.mapping must map at least one of this hypothesis's levers")
+    for name, rule in [(n, r) for n, rs in m["mapping"].items() for r in (rules(rs) or [{}])]:
+        where = f"merges.mapping.{name}"
+        if name not in levers:
+            raise ValueError(f"{where}: not one of this hypothesis's levers")
+        if (not isinstance(rule, dict) or not set(rule) <= {"lever", "values"}
+                or not isinstance(rule.get("lever"), str) or not re.fullmatch(r"H\d+\.\w+", rule["lever"])):
+            raise ValueError(f"{where}.lever must name the merged lever, e.g. H2.bn")
+        values = rule.get("values", [])
+        if not isinstance(values, list) or not all(
+                isinstance(p, list) and len(p) == 2 and in_range(p[1], levers[name]) for p in values):
+            raise ValueError(f"{where}.values must list [old, new] pairs, each new value in the "
+                             "lever's range (leave it out to keep the values as they are)")
+
+
+def uncovered(old: dict, new: dict, rule: dict) -> str | None:
+    """Why a merge rule doesn't carry the merged lever's whole range into the new lever (None: it does)."""
+    if old["kind"] in GRADED:
+        if "values" in rule or new["kind"] not in GRADED or (old["kind"], new["kind"]) == ("float", "int"):
+            return "a graded lever maps as itself onto a graded lever"
+        if not new["low"] <= old["low"] < old["high"] <= new["high"]:
+            return f"[{new['low']}, {new['high']}] must cover [{old['low']}, {old['high']}]"
+        return None
+    pairs = [(o, b) for o in options(old) for a, b in rule.get("values", [[o, o]]) if type(a) is type(o) and a == o]
+    if len({json.dumps(o) for o, _ in pairs}) < len(options(old)) or not all(in_range(b, new) for _, b in pairs):
+        return f"every option of {options(old)} must map to one of the new lever's values"
+    return None
+
+
+def in_range(value, lv: dict) -> bool:
+    """The harness's own bounds check of a lever value against its declaration."""
+    if lv["kind"] == "bool":
+        return isinstance(value, bool)
+    if lv["kind"] == "categorical":
+        return any(type(o) is type(value) and o == value for o in lv["options"])
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return (lv["kind"] == "float" or isinstance(value, int)) and lv["low"] <= value <= lv["high"]
+
+
+def _validate_lever(name: str, lv) -> None:
+    where = f"levers.{name}."
+    if not name.isidentifier():
+        raise ValueError(f"levers.{name}: a lever name must be an identifier (the harness prefixes H<n>.)")
+    if not isinstance(lv, dict) or lv.get("kind") not in LEVER_KEYS:
+        raise ValueError(f"{where}kind must be float, int, categorical or bool")
+    kind = lv["kind"]
+    if unknown := set(lv) - LEVER_KEYS[kind] - {"kind", "baseline", "path"}:
+        raise ValueError(f"{where}: fields {sorted(unknown)} don't apply to a {kind} lever")
+    if "path" in lv and not isinstance(lv["path"], str):
+        raise ValueError(f"{where}path must be a config path")
+    if "baseline" not in lv:
+        raise ValueError(f"{where}baseline is required: the value at which the code runs unchanged")
+    b = lv["baseline"]
+    if kind in GRADED:
+        integer = kind == "int"
+        for key in ("low", "high"):
+            if not _number(lv.get(key), integer):
+                raise ValueError(f"{where}{key} must be {'an integer' if integer else 'a number'}")
+        if lv["low"] >= lv["high"]:
+            raise ValueError(f"{where}low must be below high")
+        if not isinstance(lv.get("log", False), bool) or (lv.get("log") and lv["low"] <= 0):
+            raise ValueError(f"{where}log must be true or false, and a log range needs low > 0")
+        if not _number(b, integer) or not lv["low"] <= b <= lv["high"]:
+            raise ValueError(f"{where}baseline {b!r} must be {kind} inside [{lv['low']}, {lv['high']}]")
+        if lv.get("predicted") not in ("higher", "lower"):
+            raise ValueError(f"{where}predicted must be higher or lower: the side of the baseline "
+                             "where the improving values lie")
+    elif kind == "categorical":
+        opts = lv.get("options")
+        if (not isinstance(opts, list) or len(opts) < 2
+                or not all(isinstance(o, (str, int, float, bool)) for o in opts)
+                or len(set(opts)) < len(opts)):  # set: 1, 1.0 and True are one value
+            raise ValueError(f"{where}options must list at least 2 distinct scalar values")
+        if not any(type(o) is type(b) and o == b for o in opts):
+            raise ValueError(f"{where}baseline {b!r} must be one of the options")
+    else:
+        _text(lv, "why_not_graded", where)
+        if not isinstance(b, bool):
+            raise ValueError(f"{where}baseline must be true or false")
+
+
+def options(lv: dict) -> list:
+    """The values of a categorical or bool lever."""
+    return lv["options"] if lv["kind"] == "categorical" else [False, True]
+
+
+def random_point(levers: dict, rng) -> dict:
+    """One uniformly random in-range value per lever (log-uniform for log ranges).
+
+    A categorical or bool lever never draws its baseline, so the smoke runs its other branch.
+    """
+    out = {}
+    for name, lv in levers.items():
+        if lv["kind"] in GRADED:
+            lo, hi = lv["low"], lv["high"]
+            x = (math.exp(rng.uniform(math.log(lo), math.log(hi))) if lv.get("log")
+                 else rng.uniform(lo, hi))
+            out[name] = min(max(round(x), lo), hi) if lv["kind"] == "int" else x
+        else:
+            out[name] = rng.choice([o for o in options(lv) if o != lv["baseline"]])
+    return out
+
+
+# ponytail: a denylist of the usual config routes (env, argv, parsers, the trial/levers files);
+# a determined author can still slip past it. Tighten with an allowlist if it gets gamed.
+CONFIG_NAMES = {"environ", "getenv", "environb", "getenvb", "argv", "BOAUTORESEARCH_TRIAL"}
+CONFIG_MODULES = {"argparse", "optparse", "getopt", "configparser", "click", "typer", "fire",
+                  "hydra", "omegaconf", "dotenv", "tomllib", "toml", "tomli"}
+CONFIG_STRINGS = ("levers.json", "BOAUTORESEARCH_TRIAL", "trial.json")
+
+
+def _config_reads(tree: ast.AST) -> Counter:
+    sites: Counter = Counter()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in CONFIG_NAMES:
+            sites[node.id] += 1
+        elif isinstance(node, ast.Attribute) and node.attr in CONFIG_NAMES:
+            sites[node.attr] += 1
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            mods = [a.name for a in node.names] if isinstance(node, ast.Import) else [node.module or ""]
+            sites.update(f"import {m}" for m in mods if m.split(".")[0] in CONFIG_MODULES)
+            if isinstance(node, ast.ImportFrom):  # `from os import getenv as g` hides the name
+                sites.update(a.name for a in node.names if a.name in CONFIG_NAMES)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            sites.update(f"{s!r}" for s in CONFIG_STRINGS if s in node.value)
+    return sites
+
+
+def harness_imports(source: str, path: str) -> set:
+    """What a module imports from boautoresearch (`boautoresearch`, `boautoresearch.lever`, ...)."""
+    # ponytail: static imports only; importlib/__import__ slip past (the verification still runs it)
+    try:
+        tree = ast.parse(source, path)
+    except SyntaxError as e:
+        raise ValueError(f"{path} does not parse: {e}")
+    out: set = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            out |= {a.name for a in node.names if a.name.split(".")[0] == "boautoresearch"}
+        elif isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "boautoresearch":
+            out |= {f"{node.module}.{a.name}" for a in node.names}
+    return out
+
+
+def _lever_reads(tree: ast.AST) -> list:
+    """The argument of every lever(...) call: a str literal, or None for anything else."""
+    reads = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            f = node.func
+            if (f.id if isinstance(f, ast.Name) else getattr(f, "attr", None)) == "lever":
+                a = node.args[0] if len(node.args) == 1 and not node.keywords else None
+                reads.append(a.value if isinstance(a, ast.Constant) and isinstance(a.value, str)
+                             else None)
+    return reads
+
+
+def check_lever_code(changed: dict, levers: list, declared: set) -> None:
+    """Refuse lever code that reads config other than through lever().
+
+    changed maps each changed .py path to (source before, source after; None if deleted).
+    levers are the hypothesis's lever names, each of which must be read with lever("<name>");
+    declared are all lever names the code may read.
+    """
+    read: set = set()
+    for path, (before, after) in sorted(changed.items()):
+        if after is None:
+            continue
+        try:
+            new, old = ast.parse(after, path), ast.parse(before or "", path)
+        except SyntaxError as e:
+            raise ValueError(f"{path} does not parse: {e}")
+        if added := _config_reads(new) - _config_reads(old):
+            raise ValueError(f"{path} reads config other than through lever(): {sorted(added)}")
+        for name in _lever_reads(new):
+            if name is None:
+                raise ValueError(f"{path}: lever() must be called with a literal lever name")
+            if name not in declared:
+                raise ValueError(f"{path} reads lever {name!r}, which no hypothesis declares")
+            read.add(name)
+    if missing := [n for n in levers if n not in read]:
+        raise ValueError(f"the changed code never reads {missing} through lever(\"<name>\")")

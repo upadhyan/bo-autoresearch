@@ -1,0 +1,12 @@
+# Scripted generation pass 2: the fidelity-sensitive case (H10). It arrives after the ladder was calibrated
+# on pass 1's levers, so the cheap rung is validated and the tail is first tested at a proxy fidelity.
+- title: End training on a long cosine tail
+  rationale: A long, slow decay at the end of training lets the model settle into a flatter minimum.
+  mechanism: Spend the last cosine_tail share of training in a cosine decay of the learning rate to zero.
+  provenance: standard
+  lens: schedule
+  directives: []
+  fidelity_sensitive: true
+  fidelity_reason: A tail only pays off once training is long enough to have one; short runs cannot show it.
+  levers:
+    cosine_tail: {kind: float, low: 0.0, high: 1.0, baseline: 0.0, predicted: higher, path: config.cosine_tail}

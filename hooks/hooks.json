@@ -1,0 +1,22 @@
+{
+  "description": "BO Autoresearch enforcement: thin, fail-closed adapters over `boautoresearch check`; inert without an active run.",
+  "hooks": {
+    "SessionStart": [
+      {"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.py\"", "timeout": 30}]}
+    ],
+    "PreToolUse": [
+      {"matcher": "Edit|Write|NotebookEdit|Bash|Read|Grep|Glob|SubagentHandback",
+       "hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.py\"", "timeout": 30}]}
+    ],
+    "PostToolUse": [
+      {"matcher": "Bash",
+       "hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.py\"", "timeout": 30}]}
+    ],
+    "SubagentStop": [
+      {"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.py\"", "timeout": 30}]}
+    ],
+    "Stop": [
+      {"hooks": [{"type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/hook.py\"", "timeout": 30}]}
+    ]
+  }
+}

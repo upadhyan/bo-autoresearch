@@ -14,6 +14,14 @@ _Avoid_: Idea, experiment, feature
 One angle from which hypotheses are generated, such as data or optimisation for a model, or memory for a speed-up. Several lenses run side by side, plus a wildcard, so the hypothesis list doesn't collapse onto one idea.
 _Avoid_: Category, theme, perspective
 
+**Generation pass**:
+One round of proposing new hypotheses, one generator per lens (or, in scripted mode, one fixture file). It is requested at run start, when the queue runs low, or when the round analyst flags new ground.
+_Avoid_: Brainstorm, generation (alone, which reads as a round)
+
+**Exhaustion**:
+The run end reached when nothing is left to try: the queue is empty, no active hypothesis is undecided, every removal has its interplay review, every revival has run, and the final generation pass produced nothing that survived review.
+_Avoid_: Convergence, done
+
 **Lever**:
 A searchable parameter exposed by a hypothesis. It is a continuous or integer range or a categorical. A boolean is allowed only for a mechanism that cannot be graded.
 _Avoid_: Knob, flag, toggle, switch
@@ -69,6 +77,10 @@ _Avoid_: Pruning, refinement
 **Fidelity-sensitive**:
 Declared at registration for a hypothesis whose mechanism may only pay off at higher fidelity. It can never be rejected at a proxy fidelity.
 _Avoid_: Slow-burn, long-horizon
+
+**Merge**:
+One hypothesis registered in place of others whose levers clash (a shared config path, or exclusive mechanisms of one slot), with a declared mapping from their lever values to its own that covers their ranges. The hypotheses it merges leave the loop as **merged**, without a verdict.
+_Avoid_: Combine, fold
 
 **Rival**:
 A hypothesis offering a competing explanation to another, through separate levers. Rivals are tested together, and a verdict on one says nothing about whether it explains the other.
