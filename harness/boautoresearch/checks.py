@@ -155,7 +155,7 @@ def raw_glob(word: str) -> bool:
         return False
     pat = re.sub(r"\{[^{}]*\}|\$\{[^}]*\}|\$\w+|\$\(.*?\)|`.*?`", "*", word)
     last = pat.rstrip("/").rsplit("/", 1)[-1]
-    return bool(re.search(r"[*?[]", last)) and any(fnmatch.fnmatchcase(n, last) for n in RAW_NAMES)
+    return bool(re.search(r"[*?[]", pat)) and any(fnmatch.fnmatchcase(n, last) for n in RAW_NAMES)
 
 
 def names_raw(text: str) -> bool:

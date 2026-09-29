@@ -351,6 +351,19 @@ def test_the_adapter_maps_allow_to_exit_0_and_block_to_exit_2_with_the_reason(in
                                                      "recorded", "read", "read"]
 
 
+def test_the_adapter_blocks_the_orchestrators_globs_that_could_match_the_raw_log_from_anywhere(guarded):
+    repo = guarded.parents[1]
+    for tool, ti in [("Glob", {"pattern": "**/log.db"}), ("Glob", {"pattern": "**/*.db", "path": str(repo)}),
+                     ("Grep", {"pattern": "loss", "glob": "**/log*"}), ("Glob", {"pattern": "**/artifacts/**"})]:
+        code, _, err = hook(repo, "PreToolUse", tool_name=tool, tool_input=ti)
+        assert code == 2 and "probes" in err, (tool, ti)
+    assert [b["check"] for b in blocks(guarded)] == ["read"] * 4
+    for tool, ti in [("Glob", {"pattern": "**/*.py"}), ("Grep", {"pattern": "log.db", "glob": "*.py"})]:
+        assert hook(repo, "PreToolUse", tool_name=tool, tool_input=ti)[0] == 0, (tool, ti)
+    assert hook(repo, "PreToolUse", tool_name="Glob", agent_type="boautoresearch:lever-coder", agent_id="c1",
+                tool_input={"pattern": "**/log.db"})[0] == 0  # only the orchestrator is kept off the raw log
+
+
 def test_the_adapter_rewrites_a_subagents_record_and_injects_status_and_next(guarded):
     repo = guarded.parents[1]
     cmd = "boautoresearch record review --file r.json"

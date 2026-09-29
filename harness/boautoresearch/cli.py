@@ -598,7 +598,8 @@ def cmd_check_read(a) -> dict:
         return {"allow": True}
     run_dir, con, st = run
     p = checks.resolve(Path.cwd(), a.path)
-    raw = checks.role(a.agent) == "orchestrator" and checks.raw_read(p, run_dir.parent)
+    # a Glob pattern (or Grep glob) that could match the raw log, from wherever it starts
+    raw = checks.role(a.agent) == "orchestrator" and (checks.raw_read(p, run_dir.parent) or checks.raw_glob(a.path))
     return _decide(con, "read", a.agent, str(p), checks.RAW_READ if raw else None)
 
 

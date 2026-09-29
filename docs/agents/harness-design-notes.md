@@ -701,3 +701,8 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   one thing every route must carry. False positives accepted for the orchestrator only (whose lane is `BO`):
   `ls *`, `cat *.db`, a user file named log.db. Residual: names built at run time inside code (`'lo'+'g.db'`), a
   script file outside the repo, recursive reads from above the run dir that name nothing (`grep -r x .`).
+- #34 follow-up (orchestrator globs): `check read` also refuses the orchestrator a path that is a glob (a wildcard
+  anywhere, same expansion rules as above) whose last part could match `log.db`/`log.db-wal`/`artifacts` — so Glob
+  `**/log.db` or Grep glob `**/log*` from the repo root, which never resolve under the run dir. `**/*.py` stays allowed;
+  `**/*` and a Grep glob of `*` are refused. Residual: a recursive glob naming a file INSIDE artifacts by its own name
+  (`**/trial-*/note.txt`) lists it; the Read of that path is still refused by resolved path.
