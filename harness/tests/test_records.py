@@ -159,6 +159,7 @@ def test_review_interplay_and_distill_spec_records_are_accepted(run):
 
 BAD = [
     ("proposal", {"hypotheses": [idea("A", "m")]}, "2 mechanisms"),
+    ("proposal", {"hypotheses": {}}, "hypotheses"),
     ("proposal", {"hypotheses": [idea("A", "m"), {**idea("B", "n"), "provenance": "stolen"}]},
      "hypotheses[1]: provenance"),
     ("review", review(directive_verdict="maybe"), "directive_verdict"),

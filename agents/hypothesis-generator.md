@@ -23,7 +23,7 @@ Done when you can name, for each proposal, the code it would change, why the bri
 
 ## 2. Write the specs
 
-Make the requested number of proposals, every one in your lane, spanning **at least 2 distinct mechanisms**. When your lane holds fewer genuine mechanisms than requested, propose fewer (2 at least): a short in-lane list beats a full one padded from other lanes. One proposal per mechanism: a variant of a mechanism (a different range, schedule or target of the same causal story) is another lever of that proposal. Each spec:
+Make the requested number of proposals, every one in your lane, spanning **at least 2 distinct mechanisms**. When your lane holds fewer genuine mechanisms than requested, propose fewer (2 at least): a short in-lane list beats a full one padded from other lanes. When it holds nothing new at all — every in-lane mechanism is already a hypothesis — record `{"hypotheses": []}` with a rationale saying what you checked: an empty pass is how the run shows it is exhausted. One proposal per mechanism: a variant of a mechanism (a different range, schedule or target of the same causal story) is another lever of that proposal. Each spec:
 
 - `title` — plain language, ≤ 80 characters (it is the line in SUMMARY.md).
 - `rationale` — why this might limit the objective; `mechanism` — the causal story, specific enough that a reviewer can tell it apart from every other hypothesis.

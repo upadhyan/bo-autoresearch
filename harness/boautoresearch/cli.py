@@ -2734,10 +2734,11 @@ def _exhaustion(st: dict) -> dict:
         "revivals_run": not _pending_links(st) and not any(
             "revived_from" in h and h["status"] == "registered" for h in hyps),
         # the latest pass, with no trigger since, left nothing registered (nor undecided); an llm
-        # pass counts once its generators recorded proposals (each proposes at least 2)
+        # pass counts once a generator recorded its proposal (an empty one: nothing new in its lane)
         "final_pass_empty": final is not None and not _generation_due(st) and not any(
             h["status"] == "proposed" or (h["pass"] == final and "registered" in h) for h in hyps)
-        and (st["run"]["generation"] == "scripted" or any(h["pass"] == final for h in hyps)),
+        and (st["run"]["generation"] == "scripted" or any(
+            x["kind"] == "proposal" and x["seq"] > st["passes"][-1]["seq"] for x in st["records"])),
     }
 
 
