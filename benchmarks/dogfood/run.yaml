@@ -1,0 +1,35 @@
+# The dogfood benchmark's headless run. run_benchmark.py copies it to the toy repository's root and
+# fills in `python` (the project's interpreter), `seed` and the absolute `fixtures` path; free mode
+# swaps `generation: scripted` + `fixtures` for `lenses`.
+objective: val_loss
+direction: minimize
+python: null
+budget_s: 3600  # trial seconds; the scripted runs need ~5-10% of it
+reference_fidelity: {epochs: 8}
+ladder: [{epochs: 2}]
+replicates_k: 5
+delta: 0.1  # the minimum meaningful effect; σ is DOGFOOD_SIGMA (δ/4 or δ/2)
+seed: 0
+generation: scripted
+fixtures: fixtures
+go: true
+brief:
+  purpose: Find which training-recipe changes lower the toy trainer's validation loss.
+  contribution: A lower validation loss at the reference fidelity (8 epochs) from changes to the training recipe.
+  complexity: Training-recipe changes only; no new architecture components.
+  provenance: Any standard or published technique.
+directives:
+- id: D1
+  severity: prohibited
+  statement: Never initialise the model from pretrained weights.
+  reason: The result must hold for a model trained from scratch.
+  scope: mechanism
+  predicate: not config.pretrained_init
+  forbidden_patterns: ['pretrained_init"\]\s*=\s*(True|lever)', 'from_pretrained']
+- id: D2
+  severity: discouraged
+  statement: Avoid mixed-precision arithmetic; prefer full float32.
+  reason: The deployment target runs float32 only, so its numerics should match.
+  scope: mechanism
+  predicate: not config.mixed_precision
+protected_paths: [objective.py]

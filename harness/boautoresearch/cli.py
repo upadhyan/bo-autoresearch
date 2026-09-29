@@ -1580,12 +1580,14 @@ def _run_r0(run_dir: Path, con, a, st: dict) -> dict:
             _estimate_noise(run_dir, con, baseline)
         out = {"round": 0, "noise_estimate": elog.load(con)["noise"]}
         trigger = "calibrated"  # the ladder is calibrated at the first R1 round-run (needs levers)
-    except TrialRefused as e:
-        trigger = e.reason
-        raise
-    finally:
+    except TrialRefused as e:  # no trial fits: R0 and the run end together
+        return _end_run(run_dir, con, {"round": 0, "trigger": e.reason})
+    except BaseException:
         elog.append(con, "round_ended", "harness", {"round": 0, "trigger": trigger})
         _regenerate(run_dir, con)
+        raise
+    elog.append(con, "round_ended", "harness", {"round": 0, "trigger": trigger})
+    _regenerate(run_dir, con)
     return {**out, **_status(elog.load(con))}
 
 
@@ -1856,7 +1858,8 @@ def _verdict_checks(con, st: dict, r: int, space: dict, baseline: dict, eligible
             outcome = "retained"
         else:
             outcome = "active"
-        if outcome == "active" and len(fresh) >= sched["cap"]:
+        # a proxy can't show a fidelity-sensitive effect: there the evidence cap waits for escalation
+        if outcome == "active" and len(fresh) >= sched["cap"] and not (h["spec"]["fidelity_sensitive"] and at_proxy):
             outcome, reason = "inconclusive", f"no verdict after {len(fresh)} fresh sampler trials"
         frozen = []
         if gated and outcome in ("active", "retained") and len(group) > 1:
@@ -2027,7 +2030,11 @@ def _drift_check(run_dir: Path, con, r: int, inc: dict, eligible, sign: int) -> 
         return None
     other = _rng(st["run"], f"R{r}", "drift").choice(others)
     proxy = {c["trial"]: c["mean"] for c in bo_study.ranked(eligible(st["trials"]), sign)}
-    pair = [(inc["trial"], inc["levers"]), (other["trial"], other["levers"])]
+    # the proxy was never trusted with fidelity-sensitive levers (they may pay off only at the reference):
+    # both configs run the incumbent's, so only the levers the proxy ranks are compared
+    late = {n for h in _in_search(st) if h["spec"]["fidelity_sensitive"] for n in _group(h)}
+    pair = [(inc["trial"], inc["levers"]),
+            (other["trial"], {**other["levers"], **{n: v for n, v in inc["levers"].items() if n in late}})]
     baseline = _baseline(run_dir)
     runs = [_trial(run_dir, con, None, "drift", {**baseline, **levers}, ref, round=r, drift_of=root)
             for root, levers in pair]

@@ -257,6 +257,11 @@ def test_a_fidelity_sensitive_lever_is_never_rejected_at_a_proxy(tmp_path, proje
         assert of_type(run_dir, "hypothesis_escalated")[1]["fidelity"] == {"epochs": 4}
         at_ref = [v for v in records(run_dir) if v["fidelity"] == {"epochs": 4}]
         assert at_ref and all(v["outcome"] in ("active", "retained") for v in at_ref)
+        # the drift check never blames the proxy for the tail it was never trusted with: both of its configs
+        # run the incumbent's fidelity-sensitive levers
+        drift = {t["trial"]: t["levers"] for t in of_type(run_dir, "trial_started") if t["kind"] == "drift"}
+        checks = of_type(run_dir, "drift_check")
+        assert checks and all(drift[a]["H1.x"] == drift[b]["H1.x"] for a, b in (c["trials"] for c in checks))
 
 
 def test_a_broken_proxy_downgrades_its_rounds_rejects_to_inconclusive(tmp_path, project_python):
@@ -293,3 +298,18 @@ def test_a_single_lever_below_delta_is_frozen_and_leaves_the_search(tmp_path, pr
         assert {t["trial"] for t in r1} <= set(r2["seeded"])
         assert all(t["levers"]["H1.z"] == 0.0 for t in started_in(run_dir, 2))
         assert not of_type(run_dir, "hypothesis_rejected")
+
+
+def test_a_held_fidelity_sensitive_lever_waits_for_escalation_past_the_evidence_cap(tmp_path, project_python):
+    # an 8-lever flat hypothesis burns in over 80 fresh trials, so no stall (and no escalation) comes first:
+    # the tail's proxy trials say nothing about it, so the evidence cap can't make it inconclusive there
+    late = (spec({"x": lever()}, fidelity_sensitive=True, fidelity_reason="pays off late"),
+            '    term += 0 * lever("H1.x") if cheap else -lever("H1.x")')
+    names = "abcdefgh"
+    wide = (spec({n: lever() for n in names}),
+            "    term += 0 * (" + " + ".join(f'lever("H2.{n}")' for n in names) + ")")
+    run_dir, outs = verdict_run(tmp_path / "r", project_python, 1, [late, wide], proxy=True, rounds=2)
+    at_cap = [v for v in records(run_dir) if v["burn_in"]["fresh"] >= 80 and v["fidelity"] == {"epochs": 1}]
+    assert at_cap, [v["burn_in"]["fresh"] for v in records(run_dir)]
+    assert all(v["outcome"] == "active" for v in at_cap)
+    assert not [e for e in of_type(run_dir, "hypothesis_inconclusive") if e["id"] == "H1.v1"]

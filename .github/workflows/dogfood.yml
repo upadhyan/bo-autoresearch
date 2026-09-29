@@ -1,0 +1,50 @@
+# The dogfood benchmark (#38): 3 seeds x 2 noise levels in scripted mode plus 1 free-generation run, each a
+# headless `claude -p "/boautoresearch:start"` on a fresh copy of benchmarks/dogfood/toy, with the
+# adversarial checklist fired from outside the LLM. check.py's output for every run is attached.
+#
+# Needs one repository secret: ANTHROPIC_API_KEY (Settings > Secrets and variables > Actions), an API key
+# with enough credit for 7 long agent sessions. Runs on demand and weekly.
+name: dogfood
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 5 * * 1"
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install Claude Code and the driver's one dependency
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          python -m pip install pyyaml
+      - name: Run the matrix
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python benchmarks/dogfood/run_benchmark.py --caller claude --work dogfood-runs
+      - name: Attach check.py output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dogfood-results
+          path: |
+            dogfood-runs/matrix.json
+            dogfood-runs/*/check.txt
+            dogfood-runs/*/check.json
+            dogfood-runs/*/adversarial.json
+            dogfood-runs/*/caller.log
+            dogfood-runs/*/project/.bo-research/*/log.db
+            dogfood-runs/*/project/.bo-research/*/SUMMARY.md
+            dogfood-runs/*/project/.bo-research/*/REPORT.md
+            dogfood-runs/*/project/.bo-research/*/exports/
+      - name: Summary
+        if: always()
+        run: cat dogfood-runs/*/check.txt >> "$GITHUB_STEP_SUMMARY" || true

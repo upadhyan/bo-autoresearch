@@ -216,15 +216,21 @@ def test_a_trial_costing_more_than_the_remaining_budget_is_refused_and_logged(re
     assert status["trials"]["total"] == 1
 
 
-def test_r0_stops_when_the_budget_runs_out(repo, init_run):
+def test_r0_running_out_of_budget_ends_the_run(repo, init_run):
     run_dir = init_run("budget_s: 2.0\nreference_fidelity: {epochs: 4}\n")
     code, out = round_run(repo, "--rationale", "calibrate", env=toy_env(sleep_per_epoch=0.3))
-    assert code != 0 and out["refused"] and "budget" in out["reason"]
+    assert code == 0, out
+    assert out["trigger"] == "budget_spent" and out["run_ended"] == "budget_spent"
     assert only(run_dir, "trial_refused")["payload"]["kind"] == "baseline"
     assert only(run_dir, "round_ended")["payload"] == {"round": 0, "trigger": "budget_spent"}
+    assert only(run_dir, "run_ended")["payload"] == {"reason": "budget_spent"}
     assert not [e for e in events(run_dir) if e["type"] == "noise_estimate"]
     _, status = bo(repo, "status")
-    assert status["r0_complete"] is False
+    assert status["r0_complete"] is False and status["next"][0].startswith("wrapup")
+    code, out = bo(repo, "round-run", "--rationale", "again")
+    assert code != 0 and "ended" in out["reason"]
+    code, out = bo(repo, "wrapup", "--rationale", "hand back")  # the same hand-back as any run end
+    assert code == 0 and out["next"][0].startswith("record takeaways"), out
 
 
 @pytest.mark.parametrize("extra, field", [

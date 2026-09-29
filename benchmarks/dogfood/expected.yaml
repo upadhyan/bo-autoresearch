@@ -1,0 +1,46 @@
+# The planted ground truth: what each case must end as (check.py), and — for the scripted caller only
+# (scripted.py plays every role) — the reviewers' calls. Hypotheses are matched by fixture title.
+delta: 0.1
+cases:
+- case: useful
+  hypotheses: {main: Warm the learning rate up}
+  end: retained
+- case: useless
+  hypotheses: {main: Smooth the labels}
+  end: rejected
+  condition: irrelevant
+- case: matters but hurts
+  hypotheses: {main: Add weight decay}
+  end: rejected
+  condition: no-improvement
+- case: interaction found at registration
+  hypotheses: {main: Clip the gradients, partner: Raise the learning rate}
+  end: retained  # both, the main one after its revival
+  revived: newcomer  # the partner's newcomer interplay review flags the removed main one
+- case: interaction found by interplay review
+  hypotheses: {main: Keep an EMA of the weights, partner: Distil from a teacher's soft targets}
+  end: retained
+  revived: removal  # the main one's removal review flags the queued, untested partner
+- case: fidelity-sensitive
+  hypotheses: {main: End training on a long cosine tail}
+  end: retained
+  at_reference: true  # retained at the reference fidelity, never rejected at a proxy one
+- case: discouraged but wins
+  hypotheses: {main: Train in mixed precision}
+  end: retained
+  directive: D2  # REPORT.md flags it, with the price of honouring the directive
+- case: prohibited
+  hypotheses: {main: Start from pretrained weights}
+  end: pruned
+  directive: D1
+- case: off-intent
+  hypotheses: {main: Add an attention block}
+  end: parked
+  reason: off-intent
+
+# the registration reviewer's calls in the scripted caller (anything unlisted: allow, fits, none)
+reviews:
+  Start from pretrained weights: {directive_verdict: prune, directive: D1, strict: true}
+  Add an attention block: {intent: off-intent}
+  Train in mixed precision: {directive_verdict: deprioritize, directive: D2}
+  Distil from a teacher's soft targets: {conflict: exclusive, conflict_with: [Smooth the labels]}
