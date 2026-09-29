@@ -275,8 +275,7 @@ def takeaways(repo, cites=()):
 def test_wrapup_trials_run_after_the_budget_is_spent_and_are_not_charged(tmp_path, project_python):
     repo, run_dir, env = toy_run(tmp_path / "b", project_python, "budget_s: 0.1\n", sleep=0.2)
     code, out = bo(repo, "round-run", "--rationale", "calibrate", env=env)
-    assert code == 1 and "budget" in out["reason"], out  # the smoke trial spends it all
-    assert bo(repo, "stop", "--rationale", "nothing more fits the budget")[0] == 0
+    assert code == 0 and out["run_ended"] == "budget_spent", out  # the smoke trial spends it all
     status = bo(repo, "status")[1]
     assert status["budget"]["remaining_s"] < 0
     assert bo(repo, "wrapup", "--rationale", "hand back", env=env)[1]["next"][0].startswith("record takeaways")
