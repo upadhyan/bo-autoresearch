@@ -692,3 +692,8 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   reject as undecided. `sensitivity` adds m_u. `_kernel` accumulates per lever (no (n, m, D) array). Measured: 1 flat lever,
   σ = δ/2: reject at 30 fresh 6/6 before and after; 3 flat levers, σ = δ: before 6/6 at 45, after 4/6 at 45, 1 at 75, 1 still
   active at 70 (the sup statistics' power cost).
+- #35: the skill's round-run wait loop is `pgrep -f "[/]<BO minus its leading slash> round-run"`: procps pgrep
+  (Linux, the dogfood CI) doesn't exclude its ancestors, so a plain `"boautoresearch round-run"` matched the Monitor's
+  own shell and never exited (BSD pgrep hid it on macOS); the full `BO` path also keeps one run's wait off another
+  run's round (the 7-run matrix). Headless start verified live: `claude -p "/boautoresearch:start"` on the dogfood toy
+  reaches R1 unprompted (scripted ≈5.5 min, free ≈17 min).

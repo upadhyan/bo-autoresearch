@@ -107,7 +107,7 @@ Each ends by recording through the harness, and a hook keeps it running until it
 
 ### Running a round
 
-`BO round-run --rationale "<why this round>"` with the Bash tool's `run_in_background: true`. While it runs, the round belongs to the harness: wait. Keep the turn alive until it exits — a headless session ends background commands soon after your last message: take its completion notification, or wait with the Monitor tool (`timeout_ms` at its maximum) on `while pgrep -f "boautoresearch round-run" >/dev/null; do sleep 20; done; echo "round-run exited"`, arming it again whenever it expires before that line.
+`BO round-run --rationale "<why this round>"` with the Bash tool's `run_in_background: true`. While it runs, the round belongs to the harness: wait. Keep the turn alive until it exits — a headless session ends background commands soon after your last message: take its completion notification, or wait with the Monitor tool (`timeout_ms` at its maximum) on `while pgrep -f "[/]<BO without its leading slash> round-run" >/dev/null; do sleep 20; done; echo "round-run exited"` — this run's `BO` path, its leading `/` written `[/]` so the loop never matches its own shell — arming it again whenever it expires before that line.
 
 Then read its JSON output. A round returns its `trigger`, `verdicts`, incumbent and `next`; a `round-run` that calibrated the ladder (`fidelity_calibration`) or logged revivals (`revived`) ran no round, and its `next` holds the follow-up. `run_ended` in the output means the run is over.
 
