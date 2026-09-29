@@ -706,3 +706,10 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   `**/log.db` or Grep glob `**/log*` from the repo root, which never resolve under the run dir. `**/*.py` stays allowed;
   `**/*` and a Grep glob of `*` are refused. Residual: a recursive glob naming a file INSIDE artifacts by its own name
   (`**/trial-*/note.txt`) lists it; the Read of that path is still refused by resolved path.
+- #37 follow-up (distilled branch, dynamic imports): `hypotheses.harness_imports` now returns a Counter of sites —
+  static imports of boautoresearch or an importer module (importlib, runpy, pkgutil, imp), `__import__`/`import_module`
+  (name or attribute), bare `exec`/`eval` names (not `.eval()`), and any str constant matching `\bboautoresearch\b`
+  (so a docstring naming it counts too). `_distill_allowed` refuses sites added against the base (Counter difference:
+  one more importlib call than the base had counts). Chosen over verifying with the harness unimportable: the
+  harness-supplied runner imports boautoresearch in the same process, so it is always importable there.
+  Residual: getattr on builtins, a .pth file, a name smuggled through data files.

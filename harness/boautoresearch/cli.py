@@ -1092,8 +1092,9 @@ def _distill_allowed(st: dict, wt: Path, base: str, tree: str) -> None:
         except ValueError as e:
             raise Refused(f"the distilled branch: {e}")
         if added:
-            raise Refused(f"{p} imports {sorted(added)}: the distilled branch has no boautoresearch dependency "
-                          "(tuned values go in as the project's own constants or config)")
+            raise Refused(f"{p} imports or could load the harness through {sorted(added)}: the distilled branch "
+                          "has no boautoresearch dependency (tuned values go in as the project's own constants "
+                          "or config; no dynamic imports or exec)")
     _forbidden_additions(st, wt, base, tree)
 
 

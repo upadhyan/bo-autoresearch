@@ -172,6 +172,13 @@ def test_the_distilled_branch_holds_only_the_retained_mechanism_without_the_harn
     (wt / "train.py").write_text("from boautoresearch import lever\n" + src)
     code, out = bo(repo, "wrapup", "--rationale", "commit it", env=env)
     assert code == 1 and "boautoresearch" in out["reason"], out
+    for dynamic in ("import importlib\nlever = importlib.import_module('boautoresearch').lever\n",
+                    "lever = __import__('boautoresearch').lever\n",
+                    "import importlib as il\nlever = il.import_module('bo' + 'autoresearch').lever\n",
+                    "exec('from bo' + 'autoresearch import lever')\n"):
+        (wt / "train.py").write_text(dynamic + src)
+        code, out = bo(repo, "wrapup", "--rationale", "commit it", env=env)
+        assert code == 1 and "no boautoresearch dependency" in out["reason"], (dynamic, out)
     (wt / "train.py").write_text(src)
     assert not of_type(run_dir, "distill_committed")
 
