@@ -97,8 +97,8 @@ def test_a_faithful_cheap_rung_is_chosen_when_it_is_cheaper_to_a_verdict(repo, i
     assert [e["payload"]["round"] for e in events(run_dir) if e["type"] == "round_started"] == [0]
     assert len(trials_of(run_dir, "calibration")) == 10  # 5 configs at the rung and the reference
     with open(run_dir / "exports" / "trials.csv") as f:  # a row of their own each, with round 0
-        rows = [r for r in csv.DictReader(f) if r["kind"] == "calibration"]
-    assert [int(r["trial"]) for r in rows] == [t["trial"] for t in trials_of(run_dir, "calibration")]
+        rows = [r for r in csv.DictReader(f) if r["chosen_by"] == "calibration"]
+    assert [int(r["seq"]) for r in rows] == [t["trial"] for t in trials_of(run_dir, "calibration")]
     assert {r["round"] for r in rows} == {"0"} and {r["fidelity"] for r in rows} == {'{"epochs": 1}', '{"epochs": 8}'}
     [rung] = cal["rungs"]
     assert rung["fidelity"] == {"epochs": 1}

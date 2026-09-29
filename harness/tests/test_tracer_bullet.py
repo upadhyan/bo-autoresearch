@@ -167,7 +167,7 @@ def test_status_and_trials_probes_and_trials_csv(repo, run_dir):
 
     rows = list(csv.DictReader((run_dir / "exports" / "trials.csv").open()))
     assert [r["status"] for r in rows] == ["finished", "failed"]
-    assert [r["kind"] for r in rows] == ["smoke", "smoke"]
+    assert [r["chosen_by"] for r in rows] == ["smoke", "smoke"]
     assert float(rows[0]["objective"]) == pytest.approx(2.5)
     assert rows[1]["objective"] == ""
     assert rows[0]["L:H1.scale"] == "2.0"

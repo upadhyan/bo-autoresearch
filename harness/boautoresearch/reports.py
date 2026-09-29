@@ -9,6 +9,7 @@ from . import directives
 
 META = ["trial", "round", "epoch", "commit", "fidelity", "seed", "replicate_of", "kind", "status",
         "objective", "wall_clock_s", "peak_mem_mb"]
+CSV_NAMES = {"trial": "seq", "kind": "chosen_by", "peak_mem_mb": "peak_mem"}  # the spec's column names
 GROUPS = {"c:": "constraints", "t:": "telemetry", "compat:": "compat", "L:": "levers", "sampled:": "sampled"}
 
 
@@ -160,7 +161,7 @@ def trials_csv(trials: list[dict]) -> str:
     for t in trials:
         meta = [_cell(t["fidelity"]) if k == "fidelity" else t.get(k, "") for k in META]
         out.append(meta + [_cell(t[g][k]) if k in (t.get(g) or {}) else "" for _, g, k in cols])
-    return _csv(META + [c for c, _, _ in cols], out)
+    return _csv([CSV_NAMES.get(k, k) for k in META] + [c for c, _, _ in cols], out)
 
 
 HYP_COLS = ["id", "title", "lens", "provenance", "mechanism", "state", "reason", "sqrt_vt_lower",

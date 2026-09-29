@@ -142,7 +142,7 @@ def test_a_masked_lever_runs_at_its_baseline_while_the_masker_is_on_and_its_gate
             trial_json = json.loads((run_dir / t["artifact_dir"] / "trial.json").read_text())
             assert trial_json["levers"] == t["levers"]  # what lever() reads
         assert any(t["sampled"]["H2.wd"] != 0.0 for t in on)
-        rows = {int(r["trial"]): r for r in csv.DictReader((run_dir / "exports" / "trials.csv").open())}
+        rows = {int(r["seq"]): r for r in csv.DictReader((run_dir / "exports" / "trials.csv").open())}
         assert all(float(rows[t["trial"]]["sampled:H2.wd"]) == t["sampled"]["H2.wd"] for t in r1)
         # the GP, Sobol and the warm start take the sampled values
         code, seen = bo(repo, "trials", "--eligible")

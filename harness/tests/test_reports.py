@@ -82,25 +82,25 @@ def rows(run_dir, name):
         return list(csv.DictReader(f))
 
 
-META = ["trial", "round", "epoch", "commit", "fidelity", "seed", "replicate_of", "kind", "status",
-        "objective", "wall_clock_s", "peak_mem_mb"]
+META = ["seq", "round", "epoch", "commit", "fidelity", "seed", "replicate_of", "chosen_by", "status",
+        "objective", "wall_clock_s", "peak_mem"]  # the spec's trials.csv metadata columns
 
 
 def test_trials_csv_has_a_row_per_trial_of_every_kind_and_the_lever_cell_rule(planted):
     repo, run_dir, *_ = planted
     started = {p["trial"]: p for p in of_type(run_dir, "trial_started")}
     table = rows(run_dir, "trials.csv")
-    assert [int(r["trial"]) for r in table] == sorted(started)
+    assert [int(r["seq"]) for r in table] == sorted(started)
     header = list(table[0])
     assert header[:len(META)] == META
     groups = [c.split(":")[0] + ":" for c in header[len(META):]]
     order = ["c:", "t:", "compat:", "L:", "sampled:"]
     assert groups == sorted(groups, key=order.index)
-    assert {"smoke", "baseline", "equivalence", "sampler", "confirmation"} <= {r["kind"] for r in table}
+    assert {"smoke", "baseline", "equivalence", "sampler", "confirmation"} <= {r["chosen_by"] for r in table}
     assert "failed" in {r["status"] for r in table}
     assert any(r["replicate_of"] for r in table)
     for r in table:
-        t = started[int(r["trial"])]
+        t = started[int(r["seq"])]
         assert r["round"] == str(t.get("round", "")) and r["replicate_of"] == str(t.get("replicate_of", ""))
         assert json.loads(r["fidelity"]) == t["fidelity"] and r["commit"] == t["commit"]
     # empty: the lever didn't exist in the trial's code; its baseline: it existed and ran at baseline
@@ -248,7 +248,7 @@ def test_round_summaries_hold_the_mechanical_sections_and_the_analyst_narrative(
     # the incumbent (x ≈ 0.8) breaks keep-x-low: the best logged trial that honours it, and the gap
     [line] = r1["Discouraged directives"]
     trial = int(line.split("trial ")[1].split(" ")[0])
-    table = {int(r["trial"]): r for r in rows(run_dir, "trials.csv")}
+    table = {int(r["seq"]): r for r in rows(run_dir, "trials.csv")}
     honours = [r for r in table.values() if r["round"] == "1" and r["status"] == "finished"
                and r["compat:keep-x-low"] == "True"]
     assert table[trial] in honours and table[trial]["replicate_of"] == ""
