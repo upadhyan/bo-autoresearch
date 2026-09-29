@@ -10,7 +10,7 @@ EVENT_TYPES = {"run_started", "trial_started", "trial_finished", "trial_failed",
                "proxy_accepted_unvalidated", "hypothesis_proposed", "hypothesis_registered",
                "lever_smoke", "lever_committed", "delta_set", "hypothesis_activated",
                "trial_heartbeat", "trial_abandoned", "drift_check", "run_ended", "verdict",
-               "hypothesis_rejected", "hypothesis_inconclusive", "hypothesis_escalated", "lever_frozen"}
+               "hypothesis_rejected", "hypothesis_inconclusive", "hypothesis_escalated", "lever_frozen", "record"}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -64,6 +64,7 @@ def state(events: list[dict]) -> dict:
     trials: dict[int, dict] = {}
     rounds: dict[int, dict] = {}
     hyps: dict[str, dict] = {}
+    records: list[dict] = []
     noise = calib = proxy = delta = ended = escalated = None
     for e in events:
         p = {k: v for k, v in e["payload"].items() if k != "rationale"}
@@ -115,6 +116,8 @@ def state(events: list[dict]) -> dict:
             hyps[p["id"]].update(status="inconclusive", reason=p["reason"])
         elif e["type"] == "lever_frozen":
             hyps[p["id"]]["frozen"].append(p["lever"])
+        elif e["type"] == "record":
+            records.append({**p, "actor": e["actor"], "seq": e["seq"]})
         elif e["type"] == "hypothesis_escalated":
             hyps[p["id"]]["escalations"].append(p)
             if p["step"] == "rung":
@@ -130,4 +133,5 @@ def state(events: list[dict]) -> dict:
     fidelity = escalated or fidelity  # a stuck hypothesis moved the run up a rung
     return {"run": run, "trials": [trials[n] for n in sorted(trials)], "rounds": rounds,
             "noise": noise, "calibration": calib, "hypotheses": hyps, "r0_complete": r0_complete,
-            "fidelity": fidelity, "delta": delta, "run_ended": ended}
+            "fidelity": fidelity, "delta": delta, "run_ended": ended,
+            "records": records}

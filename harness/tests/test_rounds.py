@@ -346,7 +346,7 @@ def test_a_spent_budget_ends_the_round_and_the_run(bo_repo, bo_run, tmp_path):
 
 def test_a_proxy_that_ranks_backwards_is_flagged_broken_by_the_drift_check(bo_repo, bo_run, tmp_path):
     run_dir = bo_run("budget_s: 3600\nreference_fidelity: {epochs: 4}\nladder: [{epochs: 1}]\n"
-                     "deterministic: true\n")
+                     "deterministic: true\nseed: 2\n")  # unseeded, ~1 in 6 runs flaked
     env = toy_env(cheap_below=2, scramble=1)
     coded(bo_repo, run_dir, tmp_path, env=env)
     code, out = bo(bo_repo, "round-run", "--rationale", "calibrate the ladder", env=env)

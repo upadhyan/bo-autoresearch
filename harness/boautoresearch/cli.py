@@ -24,7 +24,7 @@ from pathlib import Path
 
 import yaml
 
-from . import calibration, hypotheses, verdict
+from . import calibration, hypotheses, records, verdict
 from . import study as bo_study
 from . import experiment_log as elog
 
@@ -353,26 +353,55 @@ def _worktree_stamp(worktree: Path) -> dict:
     return {f: (worktree / f).stat().st_mtime_ns for f in files if f and (worktree / f).exists()}
 
 
-def cmd_propose(a) -> dict:
-    run_dir, con = _open_run()
+def _read_json(path: str, what: str, validate) -> dict:
     try:
-        spec = json.loads(Path(a.file).read_text())
-        hypotheses.validate(spec)
+        body = json.loads(Path(path).read_text())
+        validate(body)
     except OSError as e:
-        raise Refused(f"cannot read {a.file}: {e}")
+        raise Refused(f"cannot read {path}: {e}")
     except ValueError as e:  # JSONDecodeError included
-        raise Refused(f"spec: {e}")
+        raise Refused(f"{what}: {e}")
+    return body
+
+
+def _propose(run_dir: Path, con, spec: dict, a) -> str:
+    """Log a validated spec as the next hypothesis number's v1."""
     st = elog.load(con)
     # past every number in use, the project's own levers.json included (e.g. an existing H1.scale)
     taken = [h["number"] for h in st["hypotheses"].values()]
     taken += [int(m[1]) for k in _baseline(run_dir) if (m := re.match(r"H(\d+)\.", k))]
     n = max(taken, default=0) + 1
-    spec["levers"] = {f"H{n}.{name}": lv for name, lv in spec["levers"].items()}
+    spec = {**spec, "levers": {f"H{n}.{name}": lv for name, lv in spec["levers"].items()}}
     hid = f"H{n}.v1"
     elog.append(con, "hypothesis_proposed", a.actor, {
         "rationale": a.rationale, "id": hid, "number": n, "version": 1, "spec": spec})
+    return hid
+
+
+def cmd_propose(a) -> dict:
+    run_dir, con = _open_run()
+    hid = _propose(run_dir, con, _read_json(a.file, "spec", hypotheses.validate), a)
     _regenerate(run_dir, con)
     return {"hypothesis": elog.load(con)["hypotheses"][hid]}
+
+
+def cmd_record(a) -> dict:
+    """The inlet for subagent output: schema- and quote-checked, logged with its actor."""
+    run_dir, con = _open_run()
+    st = elog.load(con)
+    body = _read_json(a.file, a.kind, lambda r: records.validate(a.kind, r, st))
+    ids = [_propose(run_dir, con, s, a) for s in body["hypotheses"]] if a.kind == "proposal" else []
+    elog.append(con, "record", a.actor, {"rationale": a.rationale, "kind": a.kind,
+                                         "agent_id": a.agent_id, "record": body,
+                                         **({"hypotheses": ids} if ids else {})})
+    _regenerate(run_dir, con)
+    return {"recorded": a.kind, "agent_id": a.agent_id, **({"hypotheses": ids} if ids else {})}
+
+
+def cmd_check_recorded(a) -> dict:
+    """For the SubagentStop hook: has this agent left a valid record?"""
+    _, con = _open_run(recover=False)
+    return {"recorded": any(r["agent_id"] == a.agent_id for r in elog.load(con)["records"])}
 
 
 def cmd_register(a) -> dict:
@@ -381,8 +410,8 @@ def cmd_register(a) -> dict:
     h = _hypothesis(elog.load(con), a.hypothesis)
     if h["status"] != "proposed":
         raise Refused(f"{h['id']} is already {h['status']}")
-    # #27/#31 add here: refuse without a registration-reviewer record, or with ranges outside
-    # the allowed region of the prohibited directives.
+    # #31 adds here: refuse without a `review` record for H (st["records"], #27), or with ranges
+    # outside the allowed region of the prohibited directives.
     elog.append(con, "hypothesis_registered", a.actor, {"rationale": a.rationale, "id": h["id"]})
     _regenerate(run_dir, con)
     return {"hypothesis": elog.load(con)["hypotheses"][h["id"]]}
@@ -1094,6 +1123,14 @@ def _parser() -> argparse.ArgumentParser:
     action("round-run", cmd_round_run)
     action("accept-proxy", cmd_accept_proxy).add_argument("--fidelity", required=True)
     action("set-delta", cmd_set_delta).add_argument("value", type=float)
+    r = action("record", cmd_record)
+    r.add_argument("kind", choices=sorted(records.KINDS))
+    r.add_argument("--file", required=True)
+    r.add_argument("--agent-id")  # None for the orchestrator's own records (expected verdicts)
+    check = sub.add_parser("check").add_subparsers(dest="check", required=True, parser_class=_Parser)
+    c = check.add_parser("recorded")
+    c.add_argument("agent_id")
+    c.set_defaults(fn=cmd_check_recorded, action=False)
     sub.add_parser("status").set_defaults(fn=cmd_status, action=False)
     sub.add_parser("trials").set_defaults(fn=cmd_trials, action=False)
     v = sub.add_parser("verdict")
