@@ -96,6 +96,11 @@ def _validate_lever(name: str, lv) -> None:
             raise ValueError(f"{where}baseline must be true or false")
 
 
+def options(lv: dict) -> list:
+    """The values of a categorical or bool lever."""
+    return lv["options"] if lv["kind"] == "categorical" else [False, True]
+
+
 def random_point(levers: dict, rng) -> dict:
     """One uniformly random in-range value per lever (log-uniform for log ranges).
 
@@ -109,8 +114,7 @@ def random_point(levers: dict, rng) -> dict:
                  else rng.uniform(lo, hi))
             out[name] = min(max(round(x), lo), hi) if lv["kind"] == "int" else x
         else:
-            opts = lv["options"] if lv["kind"] == "categorical" else [False, True]
-            out[name] = rng.choice([o for o in opts if o != lv["baseline"]])
+            out[name] = rng.choice([o for o in options(lv) if o != lv["baseline"]])
     return out
 
 

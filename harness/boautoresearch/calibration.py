@@ -2,6 +2,8 @@
 import math
 import statistics
 
+from .hypotheses import options
+
 RHO_MIN, SPREAD_SIGMAS, CONFIGS = 0.8, 3, 5
 N_FACTOR = 2 * (1.96 + 0.84) ** 2  # two-sample n per arm at α=0.05, power 0.8: N·σ²/effect²
 
@@ -25,7 +27,7 @@ def configs(space: dict, baseline: dict, rng) -> list[dict]:
                   else lo + (hi - lo) * x for x in u]
             cols[name] = [round(x) for x in xs] if lv["kind"] == "int" else xs
         else:
-            opts = lv["options"] if lv["kind"] == "categorical" else [False, True]
+            opts = options(lv)
             cols[name] = [opts[int(x * len(opts))] for x in u]
     return [{**baseline, **{n: cols[n][i] for n in space}} for i in range(CONFIGS)]
 

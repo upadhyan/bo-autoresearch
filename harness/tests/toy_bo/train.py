@@ -1,8 +1,10 @@
 """Toy for BO rounds, with no levers yet: loss = 1 + noise. Tests add lever code (a planted optimum).
 
-TOY_SIGMA: gaussian noise drawn from the harness seed. TOY_SLEEP: seconds per trial.
-TOY_SLEEP_FROM: sleep only from this trial number on. Below TOY_CHEAP_BELOW epochs
-(a cheap rung) with TOY_SCRAMBLE, the lever code's term is negated (the proxy ranks backwards).
+TOY_SIGMA: gaussian noise drawn from the harness seed. TOY_REF_SIGMA: more noise, at fidelities of at
+least TOY_CHEAP_BELOW epochs only. TOY_SLEEP: seconds per trial, from trial number TOY_SLEEP_FROM on,
+and only for trials of kind TOY_SLEEP_KIND when that is set. TOY_SLEEP_PER_EPOCH: seconds per epoch.
+Below TOY_CHEAP_BELOW epochs (a cheap rung) with TOY_SCRAMBLE, the lever code's term is negated
+(the proxy ranks backwards).
 """
 import json
 import os
@@ -18,10 +20,16 @@ def _env(name):
 
 
 def train_and_eval():
-    n = json.loads(Path(os.environ["BOAUTORESEARCH_TRIAL"]).read_text())["trial"]
-    if n >= _env("SLEEP_FROM"):
+    trial = json.loads(Path(os.environ["BOAUTORESEARCH_TRIAL"]).read_text())
+    if trial["trial"] >= _env("SLEEP_FROM") and os.environ.get("TOY_SLEEP_KIND", trial["kind"]) == trial["kind"]:
         time.sleep(_env("SLEEP"))
-    flip = -1 if fidelity().get("epochs", 10) < _env("CHEAP_BELOW") and _env("SCRAMBLE") else 1
+    epochs = fidelity().get("epochs", 10)
+    time.sleep(_env("SLEEP_PER_EPOCH") * epochs)
+    cheap = epochs < _env("CHEAP_BELOW")
+    flip = -1 if cheap and _env("SCRAMBLE") else 1
     term = 0.0
-    loss = 1.0 + flip * term + _env("SIGMA") * random.Random(seed()).gauss(0, 1)
+    rng = random.Random(seed())
+    loss = 1.0 + flip * term + _env("SIGMA") * rng.gauss(0, 1)
+    if not cheap:
+        loss += _env("REF_SIGMA") * rng.gauss(0, 1)
     return loss

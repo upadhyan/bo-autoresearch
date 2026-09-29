@@ -81,10 +81,11 @@ def test_baseline_trial_runs_as_a_subprocess_in_the_run_venv(repo, run_dir):
     assert code == 0, out
 
     evs = events(run_dir)
-    assert [e["type"] for e in evs] == ["run_started", "trial_started", "trial_finished"]
-    started, finished = evs[1]["payload"], evs[2]["payload"]
+    # the heartbeat at spawn records the runner's pid, for recovery to kill if the harness dies
+    assert [e["type"] for e in evs] == ["run_started", "trial_started", "trial_heartbeat", "trial_finished"]
+    started, finished = evs[1]["payload"], evs[3]["payload"]
     assert evs[1]["actor"] == "orchestrator" and started["rationale"] == "check the runner"
-    assert evs[2]["actor"] == "harness"
+    assert evs[3]["actor"] == "harness"
     assert started["levers"] == {"H1.scale": 2.0}  # the committed baselines
     assert started["fidelity"] == {"epochs": 4}
     assert started["commit"] == git(run_dir / "worktree", "rev-parse", "HEAD")

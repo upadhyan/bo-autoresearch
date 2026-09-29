@@ -2,6 +2,7 @@
 import json
 import os
 import random
+import re
 import statistics
 
 import pytest
@@ -85,7 +86,13 @@ def test_a_faithful_cheap_rung_is_chosen_when_it_is_cheaper_to_a_verdict(repo, i
     assert len(configs) == 5 and len({c["H2.shift"] for c in configs}) == 5
     assert all(c["H1.scale"] == 2.0 and -1 <= c["H2.shift"] <= 1 for c in configs)
     assert all(t["round"] == 0 for t in trials_of(run_dir, "calibration"))
-    assert out["next"] == ["set-delta <value> (suggested 2σ = %.3g)" % (2 * out["sigma"])]
+    # the suggestion is 2σ of the toy's planted noise draws at the reference's baseline replicates
+    planted = [0.01 * random.Random(t["seed"]).gauss(0, 1) for t in trials_of(run_dir, "baseline")
+               if t["fidelity"] == {"epochs": 8}]
+    [duty] = out["next"]
+    assert duty.startswith("set-delta <value> (suggested 2σ = ")
+    assert float(re.search(r"= ([0-9.e-]+)\)", duty)[1]) == pytest.approx(2 * statistics.stdev(planted),
+                                                                          rel=1e-2)
     assert [e["payload"]["round"] for e in events(run_dir) if e["type"] == "round_started"] == [0]
     assert len(trials_of(run_dir, "calibration")) == 10  # 5 configs at the rung and the reference
     [rung] = cal["rungs"]

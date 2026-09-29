@@ -6,7 +6,7 @@ only by the rounds that search, so every other command stays fast.
 import warnings
 from pathlib import Path
 
-from .hypotheses import GRADED
+from .hypotheses import GRADED, options
 
 
 def in_range(value, lv: dict) -> bool:
@@ -45,8 +45,7 @@ def _distributions(space: dict) -> dict:
             cls = d.FloatDistribution if lv["kind"] == "float" else d.IntDistribution
             out[name] = cls(lv["low"], lv["high"], log=bool(lv.get("log")))
         else:
-            out[name] = d.CategoricalDistribution(
-                lv["options"] if lv["kind"] == "categorical" else [False, True])
+            out[name] = d.CategoricalDistribution(options(lv))
     return out
 
 

@@ -51,6 +51,11 @@ def read(con: sqlite3.Connection) -> list[dict]:
             for s, t, v, ts, a, p in rows]
 
 
+def load(con: sqlite3.Connection) -> dict:
+    """The run's state now."""
+    return state(read(con))
+
+
 def state(events: list[dict]) -> dict:
     """Fold the events into the run's state. Everything the CLI reports comes from here."""
     # ponytail: refolds the whole log per command; materialise state tables if logs get large
@@ -66,7 +71,7 @@ def state(events: list[dict]) -> dict:
         elif e["type"] == "trial_started":
             trials[p["trial"]] = {**p, "status": "running"}
         elif e["type"] == "trial_heartbeat":
-            trials[p["trial"]]["heartbeat_s"] = p["elapsed_s"]
+            trials[p["trial"]].update(heartbeat_s=p["elapsed_s"], runner_pid=p.get("runner_pid"))
         elif e["type"] in ("trial_finished", "trial_failed", "trial_abandoned"):
             trials[p["trial"]].update(p, status=e["type"][len("trial_"):])
         elif e["type"] == "round_started":
@@ -81,8 +86,10 @@ def state(events: list[dict]) -> dict:
             ended = p["reason"]
         elif e["type"] == "hypothesis_activated":
             hyps[p["id"]].update(status="active", activated_round=p["round"])
-        elif e["type"] == "noise_estimate":
+        elif e["type"] == "noise_estimate" and p["round"] == 0:
             noise = p
+        elif e["type"] == "noise_estimate":  # σ re-estimated from a round's replicates
+            rounds[p["round"]]["noise"] = p
         elif e["type"] == "fidelity_calibration":
             calib = p
         elif e["type"] == "proxy_accepted_unvalidated":
