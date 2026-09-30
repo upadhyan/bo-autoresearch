@@ -102,7 +102,7 @@ The agent types are `boautoresearch:hypothesis-generator`, `boautoresearch:lever
 
 - always: `BO` = the full path of the run venv's `boautoresearch`;
 - generator: its lens, every lens of the pass (`status.generation.lenses` plus `wildcard`: its lane is what its own lens owns among them), `status.generation.proposals_per_lens`, and the latest round analyst's suggestions for generators;
-- lever coder: `<H>` and the run worktree's full path (init's `worktree`: `.bo-research/<run_id>/worktree` under the repository root);
+- lever coder: `<H>` and the run worktree's full path (init's `worktree`: `.bo-research/<run_id>/worktree` under the repository root). Its task is the lever as the spec states it; whether the objective responds to a lever, or how two levers compose inside it, is what the smoke, the equivalence check and the verdicts answer, so leave those questions out of its prompt;
 - registration reviewer: `<H>`; interplay reviewer: `<H>` and whether it is a removal or a newcomer;
 - round analyst: the round number.
 
