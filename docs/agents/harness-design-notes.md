@@ -947,3 +947,25 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   shift (pass 1 is H1–H8); expected.yaml, check.py and scripted.py match by title, so nothing else changes. Scripted
   runs: seed 1 σ 0.025 and seed 2 σ 0.05 both pass every criterion (EMA rejected R1, clipping R3, label smoothing R4,
   both revived after R4).
+- Dogfood isolation (supersedes #36/#38's "an agent reaches the truth only by dumping the env or browsing the
+  plugin's benchmark dir"): in the first real-caller matrix, lever-coders read truth.py in 4 of 7 runs, by ordinary
+  routes: objective.py named `$DOGFOOD_SCORER` and called it an external scorer (`cat "$DOGFOOD_SCORER"`); run.yaml's
+  `fixtures:` pointed into benchmarks/dogfood; hook errors and `--plugin-dir` named the repo, and a home-wide
+  `grep "def evaluate"` found it. The motive was the orchestrator's own prompts ("confirm the scorer responds", "pin
+  how two levers compose") against an opaque objective. Now no path a run sees leads to benchmarks/: claude loads a
+  per-invocation copy of the plugin (.claude-plugin, agents, hooks, skills, harness without tests; init installs the
+  harness from the copy), run_benchmark serves `truth.evaluate` from its own process over a unix socket in a neutral
+  temp dir (`$EVAL_SOCKET`; σ stays server-side, no DOGFOOD_* variable reaches the run, PWD is the toy's), the
+  fixtures are copied to a neutral temp dir (expected.yaml never), and `--work` must lie outside the repository
+  (default: the system temp dir; the workflow uses runner.temp). The socket, over a file copy: the truth is on no
+  readable path at all; the cost is that an agent can query it, so the server logs every query with the trial that
+  made it (the client's BOAUTORESEARCH_TRIAL, read from /proc/<peer pid>/environ) and check.py fails a query no trial
+  made (once, with that trial's seed and epochs). check.py's transcript check splits: FAIL "saw" when a tool result
+  holds the marker or a distinctive truth.py line (20+ chars the toy doesn't share, derived from the source at check
+  time); FAIL "probed" when a Read/Bash/Grep/Glob names a truth location or variable, or dumps the env, and gets a
+  non-empty, non-error result (heredoc bodies and harness calls are not probes); a WARN (reported, not gated) for a
+  name in an Agent prompt, a record body, prose or an empty probe. Re-scored, the matrix's seed 3 σ δ/2 run (the old
+  check's false positive: the name only in prompts and a narrative) passes; seed 1 ×2, seed 3 σ δ/4 and free still
+  fail. Residual: the repository itself is still on disk, and `ps` shows run_benchmark's path; the lever coder's
+  prompt now makes the evaluation code a black box and the start skill keeps "does it respond / how do they compose"
+  out of coders' prompts, and check.py catches a read. Self-check: `benchmarks/dogfood/test_check.py`.
