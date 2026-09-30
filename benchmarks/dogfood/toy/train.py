@@ -1,15 +1,14 @@
-"""A small training loop over a synthetic task: the dogfood benchmark's toy trainer.
+"""A small training loop over a synthetic task: a toy trainer.
 
 Its settings live in CONFIG. A research change sets them in `train_and_eval` (where the comment says),
 before training starts; CONFIG itself holds the values the code runs with today. The validation loss
 comes from objective.py (protected). runner.py passes in the epochs and the seed.
 """
-import os
 import time
 
 from objective import evaluate
 
-SLEEP_PER_EPOCH = float(os.environ.get("DOGFOOD_SLEEP_PER_EPOCH", "0.03"))
+SLEEP_PER_EPOCH = 0.03
 
 CONFIG = {
     "lr_log2": 0.0,  # log2 multiplier on the base learning rate

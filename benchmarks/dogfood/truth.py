@@ -1,13 +1,13 @@
 """The planted truth of the dogfood benchmark. DOGFOOD-PLANTED-TRUTH (check.py flags a run whose
-agents saw this marker or named this file: the research roles must never learn the truth).
+agents saw this marker or these lines: the research roles must never learn the truth).
 
-It lives outside the toy repository: the toy's objective.py loads it from $DOGFOOD_SCORER, which
-run_benchmark.py sets for the trials and no prompt mentions. The validation loss is an analytic
-function of the trainer's config and its epochs, plus Gaussian noise of σ = DOGFOOD_SIGMA drawn from
-the trial's seed. `truth` is what check.py scores the confirmed incumbent against; `OPTIMUM` is its
-minimum at the reference fidelity over the levers research may use.
+No path a run sees leads here: run_benchmark.py serves `evaluate` from its own process over a unix
+socket in a neutral temp dir, and the toy's objective.py sends it (cfg, epochs, seed) and gets the loss
+back. The server logs every query; check.py fails a run with a query no trial made. The validation
+loss is an analytic function of the trainer's config and its epochs, plus Gaussian noise of σ (the
+run's noise level) drawn from the trial's seed. `truth` is what check.py scores the confirmed
+incumbent against; `OPTIMUM` is its minimum at the reference fidelity over the levers research may use.
 """
-import os
 import random
 
 REFERENCE_EPOCHS = 8
@@ -36,6 +36,5 @@ def truth(cfg, epochs):
 OPTIMUM = 1.0 + 0.5 / REFERENCE_EPOCHS - 0.3 - 1.2 - 1.2 - 0.8 - 0.4
 
 
-def evaluate(cfg, epochs, seed):
-    sigma = float(os.environ.get("DOGFOOD_SIGMA", "0.025"))
+def evaluate(cfg, epochs, seed, sigma):
     return truth(cfg, epochs) + sigma * random.Random(seed).gauss(0, 1)

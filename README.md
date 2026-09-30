@@ -26,7 +26,8 @@ python benchmarks/dogfood/run_benchmark.py --caller claude --jobs 2
   quick run.
 
 It passes when every hard invariant holds in every run and each planted verdict is right in at least 5
-of the 6 scripted runs. Each run's `check.py` report lands under `dogfood-runs/`.
+of the 6 scripted runs. Each run's `check.py` report lands under `--work` (default: `dogfood-runs/` in the
+system temp dir; it must be outside the repository, so no run can browse to the planted truth).
 
 On GitHub, the `dogfood` workflow does the same on demand (Actions > dogfood > Run workflow). It needs a
 `CLAUDE_CODE_OAUTH_TOKEN` repository secret from `claude setup-token`.

@@ -6,17 +6,25 @@ with check.py.
     python run_benchmark.py --caller scripted   # the same, every role played by scripted.py (no Claude)
     python run_benchmark.py --seeds 1 --sigmas 0.05 --no-free --work /tmp/df
 
-The claude caller runs `claude -p "/boautoresearch:start" --plugin-dir <this repo>` in each toy
-repository (it needs a logged-in `claude` or CLAUDE_CODE_OAUTH_TOKEN). The matrix passes when every hard
-invariant holds in every run and each planted verdict is right in at least 5 of the 6 scripted runs.
+The claude caller runs `claude -p "/boautoresearch:start" --plugin-dir <a copy of the plugin>` in each
+toy repository (it needs a logged-in `claude` or CLAUDE_CODE_OAUTH_TOKEN). The matrix passes when every
+hard invariant holds in every run and each planted verdict is right in at least 5 of the 6 scripted runs.
+
+Isolation: no path a run sees leads to this directory. The plugin copy holds only what a run needs (no
+benchmarks/), the planted truth is served from this process over a unix socket (EvalServer), the
+fixtures are copied to a neutral temp dir, and --work must lie outside this repository.
 """
 import argparse
 import json
 import os
 import shutil
+import socket
+import socketserver
 import sqlite3
+import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -24,27 +32,89 @@ from pathlib import Path
 
 import yaml
 
+import truth
+
 HERE = Path(__file__).resolve().parent
 PLUGIN = HERE.parents[1]  # the plugin root: .claude-plugin/, skills/, agents/, hooks/, harness/
+PLUGIN_PARTS = [".claude-plugin", "agents", "hooks", "skills", "harness"]  # what a run loads from the plugin
 DELTA = yaml.safe_load((HERE / "run.yaml").read_text())["delta"]
-SLEEP_PER_EPOCH = 0.03
+EVAL_VAR = "EVAL_SOCKET"  # the toy's objective.py connects to the socket it names
 LENSES = ["optimisation", "regularisation", "schedule", "data", "systems"]
 DOOMED = {"Start from pretrained weights", "Add an attention block"}  # its review prunes or parks it
 TOOLS = "Bash,Read,Edit,Write,Glob,Grep,Agent,Task,Monitor,TaskOutput,BashOutput"
 CLAUDE_TIMEOUT_S = 4 * 3600
 
 
-def trial_env(sigma):
-    """The environment trials inherit: the planted noise σ, the seconds per epoch, and the scorer the
-    toy's objective.py loads (the planted truth, kept outside the toy repository so research can't read it)."""
-    return {**os.environ, "DOGFOOD_SIGMA": str(sigma), "DOGFOOD_SLEEP_PER_EPOCH": str(SLEEP_PER_EPOCH),
-            "DOGFOOD_SCORER": str(HERE / "truth.py")}
+def plugin_copy(dest: Path) -> Path:
+    """The plugin as a run loads it, without benchmarks/, docs or tests: --plugin-dir, the hooks' error
+    messages and init's harness install source then all name the copy, not this repository."""
+    for part in PLUGIN_PARTS:
+        shutil.copytree(PLUGIN / part, dest / part, ignore=shutil.ignore_patterns(
+            "tests", ".venv", "__pycache__", "*.egg-info", "build"))
+    return dest
 
 
-def claude_cmd() -> list[str]:
+class EvalServer:
+    """The planted truth, served from this process over a unix socket in a neutral temp dir, so it is
+    on no path a run can read. Every query is logged with the trial that made it (the client's
+    BOAUTORESEARCH_TRIAL, read from /proc): check.py fails a run with a query no trial made."""
+
+    def __init__(self, sigma: float):
+        self.dir = Path(tempfile.mkdtemp())
+        self.path, self.sigma, self.queries, self.lock = self.dir / "s", sigma, [], threading.Lock()
+        server = self
+
+        class Handler(socketserver.StreamRequestHandler):
+            def handle(self):
+                q = {"time": time.time(), **peer(self.request)}
+                try:
+                    msg = json.loads(self.rfile.readline())
+                    q.update(cfg=msg["cfg"], epochs=msg["epochs"], seed=msg["seed"])
+                    q["loss"] = truth.evaluate(msg["cfg"], msg["epochs"], msg["seed"], server.sigma)
+                    reply = {"loss": q["loss"]}
+                except Exception as e:  # noqa: BLE001  (a bad query is logged and answered, never fatal)
+                    q["error"] = f"{type(e).__name__}: {e}"
+                    reply = {"error": q["error"]}
+                with server.lock:
+                    server.queries.append(q)
+                self.wfile.write(json.dumps(reply).encode() + b"\n")
+
+        self.server = socketserver.ThreadingUnixStreamServer(str(self.path), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+
+def peer(conn: socket.socket) -> dict:
+    """The querying process: its pid, and the trial file the harness gave it (none outside a trial)."""
+    out: dict = {"pid": None, "trial": None, "trial_file": None}
+    try:
+        out["pid"] = struct.unpack("3i", conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
+                                                         struct.calcsize("3i")))[0]
+        env = dict(kv.split("=", 1) for kv in Path(f"/proc/{out['pid']}/environ").read_bytes()
+                   .decode(errors="replace").split("\0") if "=" in kv)
+        out["trial_file"] = env.get("BOAUTORESEARCH_TRIAL")
+        if out["trial_file"]:
+            out["trial"] = json.loads(Path(out["trial_file"]).read_text())["trial"]
+    except (OSError, ValueError, KeyError, AttributeError):
+        pass  # not Linux, or the process is gone: the query stays unattributed
+    return out
+
+
+def trial_env(socket_path: Path, repo: Path) -> dict:
+    """The environment the caller and its trials inherit: the eval socket, and nothing naming this
+    repository (PWD is the toy's own)."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("DOGFOOD_") and k != "OLDPWD"}
+    return {**env, EVAL_VAR: str(socket_path), "PWD": str(repo)}
+
+
+def claude_cmd(plugin: Path) -> list[str]:
     """The headless start. Only project and local settings load: the user's own hooks, plugins and MCP
     servers stay out of the run (auth is stored apart from settings, so it still works)."""
-    return ["claude", "-p", "/boautoresearch:start", "--plugin-dir", str(PLUGIN), "--allowedTools", TOOLS,
+    return ["claude", "-p", "/boautoresearch:start", "--plugin-dir", str(plugin), "--allowedTools", TOOLS,
             "--setting-sources", "project,local", "--strict-mcp-config", "--output-format", "stream-json", "--verbose"]
 
 
@@ -61,15 +131,19 @@ def project_python(work: Path) -> Path:
     return py
 
 
-def prepare(d: Path, python: Path, seed: int, free: bool) -> tuple[Path, Path]:
-    """The toy as a fresh repository with a complete headless run.yaml at its root -> (repo, run.yaml)."""
+def prepare(d: Path, python: Path, seed: int, free: bool, fixtures: Path) -> tuple[Path, Path]:
+    """The toy as a fresh repository with a complete headless run.yaml at its root -> (repo, run.yaml).
+    The generation passes are copied to `fixtures` (a neutral temp dir): run.yaml names it, and a path
+    into this directory would lead research to the truth beside it."""
     repo = d / "project"
     shutil.copytree(HERE / "toy", repo, ignore=shutil.ignore_patterns("__pycache__"))
     git(repo, "init", "-q", "-b", "main")
     git(repo, "add", ".")
     git(repo, "commit", "-q", "-m", "the toy trainer")
+    for f in (HERE / "fixtures").glob("pass*.yaml"):
+        shutil.copy(f, fixtures / f.name)
     cfg = yaml.safe_load((HERE / "run.yaml").read_text())
-    cfg.update(python=str(python), seed=seed, fixtures=str(HERE / "fixtures"))
+    cfg.update(python=str(python), seed=seed, fixtures=str(fixtures))
     if free:
         del cfg["generation"], cfg["fixtures"]
         cfg["lenses"] = LENSES
@@ -215,33 +289,42 @@ def adversary_thread(repo: Path, env: dict, path: Path, stop: threading.Event):
 
 # one run --------------------------------------------------------------------------------------------
 
-def one_run(work: Path, name: str, seed: int, sigma: float, free: bool, caller: str) -> dict:
+def one_run(work: Path, name: str, seed: int, sigma: float, free: bool, caller: str, plugin: Path) -> dict:
     d = work / name
     if d.exists():
         shutil.rmtree(d)
     d.mkdir(parents=True)
-    repo, run_yaml = prepare(d, project_python(work), seed, free)
-    env, adv_log, t0 = trial_env(sigma), d / "adversarial.json", time.time()
-    if caller == "scripted":
-        p = subprocess.run([sys.executable, str(HERE / "scripted.py"), str(repo), str(run_yaml), str(adv_log)],
-                           cwd=HERE, capture_output=True, text=True, env=env)
-        (d / "caller.log").write_text(p.stdout + p.stderr)
-    else:
-        stop = threading.Event()
-        t = threading.Thread(target=adversary_thread, args=(repo, env, adv_log, stop), daemon=True)
-        t.start()
-        try:
-            with open(d / "caller.log", "w") as f:
-                p = subprocess.run(claude_cmd(), cwd=repo, stdin=subprocess.DEVNULL, stdout=f,
-                                   stderr=subprocess.STDOUT, env=env, timeout=CLAUDE_TIMEOUT_S)
-        except subprocess.TimeoutExpired as e:  # scored as it stands: the matrix goes on
-            p = subprocess.CompletedProcess(e.cmd, "timeout")
-        finally:
-            stop.set()
-            t.join()
+    fixtures, server = Path(tempfile.mkdtemp()), EvalServer(sigma)
+    try:
+        repo, run_yaml = prepare(d, project_python(work), seed, free, fixtures)
+        env, adv_log, t0 = trial_env(server.path, repo), d / "adversarial.json", time.time()
+        if caller == "scripted":
+            p = subprocess.run([sys.executable, str(HERE / "scripted.py"), str(repo), str(run_yaml), str(adv_log)],
+                               cwd=HERE, capture_output=True, text=True, env=env)
+            (d / "caller.log").write_text(p.stdout + p.stderr)
+        else:
+            stop = threading.Event()
+            t = threading.Thread(target=adversary_thread, args=(repo, env, adv_log, stop), daemon=True)
+            t.start()
+            try:
+                with open(d / "caller.log", "w") as f:
+                    p = subprocess.run(claude_cmd(plugin), cwd=repo, stdin=subprocess.DEVNULL, stdout=f,
+                                       stderr=subprocess.STDOUT, env=env, timeout=CLAUDE_TIMEOUT_S)
+            except subprocess.TimeoutExpired as e:  # scored as it stands: the matrix goes on
+                p = subprocess.CompletedProcess(e.cmd, "timeout")
+            finally:
+                stop.set()
+                t.join()
+    finally:
+        server.close()
+        shutil.rmtree(fixtures, ignore_errors=True)
+        # written only now, outside the toy repository: during the run the queries live in this process
+        (d / "eval.json").write_text(json.dumps({"socket": str(server.path), "fixtures": str(fixtures),
+                                                 "queries": server.queries}, indent=1))
     run_dir = run_dir_of(repo)
     report = d / "check.json"
-    args = [sys.executable, str(HERE / "check.py"), str(run_dir), "--adversarial", str(adv_log), "--json", str(report)]
+    args = [sys.executable, str(HERE / "check.py"), str(run_dir), "--adversarial", str(adv_log), "--json", str(report),
+            "--eval-log", str(d / "eval.json")]
     args += ["--transcript", str(d / "caller.log")] if caller == "claude" else []
     c = subprocess.run(args + (["--free"] if free else []), capture_output=True, text=True) if run_dir else None
     (d / "check.txt").write_text(c.stdout + c.stderr if c else f"no run was started (caller exit {p.returncode})\n")
@@ -255,17 +338,22 @@ def main():
     ap.add_argument("--seeds", type=int, nargs="+", default=[1, 2, 3])
     ap.add_argument("--sigmas", type=float, nargs="+", default=[DELTA / 4, DELTA / 2])
     ap.add_argument("--no-free", action="store_true", help="skip the free-generation run")
-    ap.add_argument("--work", type=Path, default=Path("dogfood-runs"))
+    ap.add_argument("--work", type=Path, default=Path(tempfile.gettempdir()) / "dogfood-runs",
+                    help="where the runs go; outside this repository (a run inside it could browse to the truth)")
     ap.add_argument("--jobs", type=int, default=7)
     a = ap.parse_args()
     a.work = a.work.resolve()
+    if a.work.is_relative_to(PLUGIN):
+        ap.error(f"--work {a.work} is inside {PLUGIN}: put the runs outside the repository")
     a.work.mkdir(parents=True, exist_ok=True)
     project_python(a.work)
     runs = [(f"seed{s}-sigma{sg:g}", s, sg, False) for s in a.seeds for sg in a.sigmas]
     if not a.no_free and a.caller == "claude":  # free mode needs live generators
         runs.append(("free", a.seeds[0], a.sigmas[0], True))
-    with ThreadPoolExecutor(a.jobs) as pool:
-        results = list(pool.map(lambda r: one_run(a.work, *r, a.caller), runs))
+    with tempfile.TemporaryDirectory() as tmp:  # the scripted caller runs from this repository itself
+        plugin = plugin_copy(Path(tmp) / "boautoresearch") if a.caller == "claude" else PLUGIN
+        with ThreadPoolExecutor(a.jobs) as pool:
+            results = list(pool.map(lambda r: one_run(a.work, *r, a.caller, plugin), runs))
     print(summarise(results))
     (a.work / "matrix.json").write_text(json.dumps(results, indent=2))
     sys.exit(0 if gate(results) else 1)

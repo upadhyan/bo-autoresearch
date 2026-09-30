@@ -1,12 +1,15 @@
-"""The validation loss (protected: research never edits it). An external scorer computes it from the
-whole cfg dict: a setting added to cfg in train_and_eval reaches the scorer as it is."""
-import importlib.util
+"""The validation loss (protected: research never edits it). The evaluation service at $EVAL_SOCKET
+computes it from the whole cfg dict, the epochs and the seed."""
+import json
 import os
-
-_spec = importlib.util.spec_from_file_location("scorer", os.environ["DOGFOOD_SCORER"])
-_scorer = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_scorer)
+import socket
 
 
 def evaluate(cfg, epochs, seed):
-    return _scorer.evaluate(cfg, epochs, seed)
+    with socket.socket(socket.AF_UNIX) as s:
+        s.connect(os.environ["EVAL_SOCKET"])
+        s.sendall(json.dumps({"cfg": cfg, "epochs": epochs, "seed": seed}).encode() + b"\n")
+        reply = json.loads(s.makefile().readline())
+    if "error" in reply:
+        raise RuntimeError(reply["error"])
+    return reply["loss"]

@@ -28,22 +28,22 @@ jobs:
       - name: Run the matrix
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-        run: python benchmarks/dogfood/run_benchmark.py --caller claude --work dogfood-runs
+        run: python benchmarks/dogfood/run_benchmark.py --caller claude --work "${{ runner.temp }}/dogfood-runs"
       - name: Attach check.py output
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: dogfood-results
           path: |
-            dogfood-runs/matrix.json
-            dogfood-runs/*/check.txt
-            dogfood-runs/*/check.json
-            dogfood-runs/*/adversarial.json
-            dogfood-runs/*/caller.log
-            dogfood-runs/*/project/.bo-research/*/log.db
-            dogfood-runs/*/project/.bo-research/*/SUMMARY.md
-            dogfood-runs/*/project/.bo-research/*/REPORT.md
-            dogfood-runs/*/project/.bo-research/*/exports/
+            ${{ runner.temp }}/dogfood-runs/matrix.json
+            ${{ runner.temp }}/dogfood-runs/*/check.txt
+            ${{ runner.temp }}/dogfood-runs/*/check.json
+            ${{ runner.temp }}/dogfood-runs/*/adversarial.json
+            ${{ runner.temp }}/dogfood-runs/*/caller.log
+            ${{ runner.temp }}/dogfood-runs/*/project/.bo-research/*/log.db
+            ${{ runner.temp }}/dogfood-runs/*/project/.bo-research/*/SUMMARY.md
+            ${{ runner.temp }}/dogfood-runs/*/project/.bo-research/*/REPORT.md
+            ${{ runner.temp }}/dogfood-runs/*/project/.bo-research/*/exports/
       - name: Summary
         if: always()
-        run: cat dogfood-runs/*/check.txt >> "$GITHUB_STEP_SUMMARY" || true
+        run: cat "${{ runner.temp }}"/dogfood-runs/*/check.txt >> "$GITHUB_STEP_SUMMARY" || true
