@@ -241,6 +241,25 @@ def test_a_stuck_hypothesis_escalates_then_is_inconclusive_at_the_evidence_cap(t
     assert stuck_path >= 8, stuck_path
 
 
+def test_a_retain_restarts_the_evidence_cap(tmp_path, project_python):
+    # a gain of 1.5δ at σ = 1.5δ: retained at some checks, active at others. A retain is a verdict, so the
+    # cap ("no verdict after N sampler trials") counts only the trials after the latest one: never
+    # inconclusive at the check right after a retain. Seed 2 is retained at 50..80 fresh and was capped
+    # at 90 before (measured: retained then capped in 2 of 16 runs over seeds 0..7, gains 1.2δ and 1.5δ)
+    h = (spec({"x": lever()}), '    term += -0.15 * lever("H1.x")')
+    run_dir, _ = verdict_run(tmp_path / "r", project_python, 2, [h], rounds=8, sigma=0.15)
+    vs = records(run_dir)
+    retained = [i for i, v in enumerate(vs) if v["outcome"] == "retained"]
+    assert retained and len(vs) > retained[-1] + 1  # checked again after its retains
+    sampler = {t["trial"] for r in range(1, 9) for t in started_in(run_dir, r)
+               if t["kind"] == "sampler" and t["status"] == "finished"}
+    for i, v in enumerate(vs):
+        last = max((max(vs[j]["trials"]) for j in retained if j < i), default=-1)
+        assert v["burn_in"]["evidence"] <= sum(t > last for t in sampler), v["id"]  # none from before the retain
+        if v["outcome"] == "inconclusive":
+            assert vs[i - 1]["outcome"] != "retained", v["id"]
+
+
 def stuck_run(run_dir, outs) -> bool:
     """False unless R1 stalled with the hypothesis still active and escalated; then the rest of the
     stuck path must follow: a larger replicate share in R2, one escalation, inconclusive at the cap."""
@@ -388,6 +407,23 @@ def test_a_flat_lever_next_to_a_curved_one_is_frozen_no_improvement_and_leaves_t
         assert not of_type(run_dir, "hypothesis_rejected")
 
 
+def test_a_check_is_due_after_spacing_new_fresh_trials_even_when_a_freeze_elsewhere_shrinks_them(
+        tmp_path, project_python):
+    # H1.z is frozen `no-improvement` at R1's end (see the test above), so R2 filters out every trial that
+    # moved it: H2's fresh set shrinks. Its next check still comes after max(5·1, 10) = 10 fresh sampler
+    # trials its last check didn't see, not at the last check's count + 10 (which the shrunk set may never reach)
+    two = (spec({"x": lever(0.2), "z": lever()}), '    term += 4 * (lever("H1.x") - 0.7) ** 2 + 0 * lever("H1.z")')
+    useful = (spec({"w": lever()}), '    term += -0.3 * lever("H2.w")')
+    run_dir, _ = verdict_run(tmp_path / "r", project_python, 1, [two, useful], rounds=2)
+    assert [f["lever"] for f in of_type(run_dir, "lever_frozen")] == ["H1.z"]
+    vs = records(run_dir, "H2.v1")
+    [last] = [v for v in vs if v["round"] == 1][-1:]
+    [nxt, *_] = [v for v in vs if v["round"] == 2]
+    assert nxt["burn_in"]["fresh"] < last["burn_in"]["fresh"] + 10  # the fresh set shrank
+    sampler = {t["trial"] for r in (1, 2) for t in started_in(run_dir, r) if t["kind"] == "sampler"}
+    assert len(sampler & set(nxt["trials"]) - set(last["trials"])) == 10
+
+
 def test_a_held_fidelity_sensitive_hypothesis_at_its_cap_moves_the_run_up_a_rung_and_never_breaks_the_drift_check(
         tmp_path, project_python):
     # an 8-lever flat hypothesis burns in over 80 fresh trials, so no stall (and no stall escalation) comes
@@ -413,7 +449,9 @@ def test_a_held_fidelity_sensitive_hypothesis_at_its_cap_moves_the_run_up_a_rung
     # at the reference its count restarts (the proxy fidelity's trials were no evidence about it)
     at_ref = [v for v in records(run_dir) if v["fidelity"] == {"epochs": 4}]
     assert at_ref and all(v["outcome"] in ("active", "retained") for v in at_ref), at_ref
-    assert all(v["burn_in"]["evidence"] == v["burn_in"]["fresh"] for v in at_ref)
+    # (and restarts again after a retain there)
+    upto = next((i for i, v in enumerate(at_ref) if v["outcome"] == "retained"), len(at_ref)) + 1
+    assert all(v["burn_in"]["evidence"] == v["burn_in"]["fresh"] for v in at_ref[:upto])
     assert not [e for e in of_type(run_dir, "hypothesis_inconclusive") if e["id"] == "H1.v1"]
     # the drift check never blames the proxy fidelity for the tail it can't show: when it runs a pair, the
     # two configs differ in the other levers only and both run the incumbent's fidelity-sensitive one; here
@@ -460,8 +498,8 @@ def test_a_stuck_hypothesis_carries_its_evidence_up_a_rung_to_the_cap(tmp_path, 
     for run_dir, outs in runs:
         steps = [e["step"] for e in of_type(run_dir, "hypothesis_escalated")]
         inc = of_type(run_dir, "hypothesis_inconclusive")
-        if steps != ["replicates", "rung"] or not inc:
-            continue
+        if steps != ["replicates", "rung"] or not inc or any(v["outcome"] == "retained" for v in records(run_dir)):
+            continue  # (a retain on the way restarts the count)
         last = records(run_dir)[-1]
         assert last["fidelity"] == {"epochs": 4} and last["outcome"] == "inconclusive"
         assert last["burn_in"]["evidence"] >= 80 > last["burn_in"]["fresh"]
@@ -535,3 +573,24 @@ def test_two_substitute_levers_are_never_both_rejected_at_one_round_end(tmp_path
             [applied] = [v for v in same if v["id"] in rejected]
             deferred_v = next(v for v in same if v["id"] == d["verdict"])
             assert applied["delta_stat"]["upper"] <= deferred_v["delta_stat"]["upper"]
+
+
+def test_a_reject_deferred_behind_another_flat_lever_carries_its_confirmation_to_the_next_check(tmp_path,
+                                                                                                project_python):
+    # two flat levers that are not substitutes, next to a bowl: each is `no-improvement` (the bowl leaves most
+    # of the box unexplored with them moved), both confirmed in R1, so the substitutes rule defers one. Its next
+    # check, 10 fresh trials into R2, still says reject and rejects it outright, confirming the deferred verdict,
+    # with no new pending check. Measured (before the spacing counted only unseen trials, when the check slipped
+    # to R3): a deferral in R1 in 7 of seeds 0..7, each rejected by the carried confirmation at its next check;
+    # seed 2 is one of the 7
+    bowl = (spec({"x": lever(0.2)}), '    term += 4 * (lever("H1.x") - 0.7) ** 2')
+    flat = [(spec({c: lever()}), f'    term += 0 * lever("H{n}.{c}")') for n, c in ((2, "y"), (3, "z"))]
+    run_dir, _ = verdict_run(tmp_path / "r", project_python, 2, [bowl, *flat], rounds=3)
+    [d] = of_type(run_dir, "reject_deferred")
+    assert "reason" not in d and d["round"] == 1
+    vs = records(run_dir, d["id"])
+    nxt = vs[[v["id"] for v in vs].index(d["verdict"]) + 1]
+    assert nxt["round"] == 2 and nxt["outcome"] == "reject" and nxt["confirmation"]["confirms"] == d["verdict"]
+    rejected = {p["id"]: p["verdict"] for p in of_type(run_dir, "hypothesis_rejected")}
+    other = ({"H2.v1", "H3.v1"} - {d["id"]}).pop()
+    assert rejected == {d["id"]: nxt["id"], other: rejected[other]} and rejected[other].startswith("V-R1-")

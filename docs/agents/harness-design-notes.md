@@ -910,3 +910,40 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   loosened. Found while fixing it: keyed JSON (`{"a": …}`) never trips the brace glob (the scan splits on `:`), so a
   `$B` record trips only on a body word that globs a raw path (`*`, `{}`, `$h.v1` against artifact names); `> $F` and
   `cat > f <<EOF` refusals still read RAW_READ.
+- Scripted-benchmark crash (HANDOFF "BLOCKING BUG"; supersedes the M_u entry's "a deferred reject confirms nothing"): root cause is cdaab6d (the verdict GP's δ-based signal floor) ×
+  the substitutes rule in `_finalise_rejects` (one `no-improvement` reject per round end; `irrelevant` exempt). Evidence
+  (dogfood seed 1, σ 0.025, run at 10cf86b, cdaab6d^, cdaab6d, main): from cdaab6d on, R1's flat H4/H8 next to a curved
+  partner come out `no-improvement` instead of `irrelevant`, so `reject_deferred` appears for them at R1's end, and a
+  deferred reject then needed a fresh pending-reject + confirmation, which R2 didn't reach. User's choice (a), carry the
+  confirmation over: a reject the substitutes rule deferred (`reject_deferred` with no `reason`; the fold adds
+  `h["substituted"]` beside `h["deferred"]`, which still lists both kinds for reports) is re-judged at its next check
+  (the `_latest` record is that deferred reject), and if the check still says reject (same gates and condition), its
+  outcome is `reject` with `confirmation.confirms` = the deferred verdict's id, applied at that round end (still one
+  per round end, and the proxy/drift rules as before); if not, it's back on the normal path and a later reject needs
+  pending + confirm again. The "undecidable proxy fidelity" deferral keeps its fresh pending + confirm. Also c576848:
+  `benchmarks/dogfood/scripted.py` flags only interplay partners the harness accepts (status rejected / inconclusive /
+  parked), so a timing change fails a verdict criterion instead of crashing the run.
+- Verdict-check spacing counts unseen fresh trials: a later check is due once the fresh sampler trials the last check
+  didn't see (not in its `trials`) reach max(5·d, 10); the first stays at burn-in. Before, it was due at the last check's
+  fresh count + spacing, but a freeze or no-improvement reject elsewhere filters trials out of the eligible set, so the
+  fresh count can shrink (dogfood seed 1: H2.smoothing_ramp's freeze took H8 from 40 fresh to 16, and its check waited
+  34 new trials, R2 → R6). Without shrinkage nothing changes. `confirmation.due_at` stays count + spacing (only a
+  display in reports; it overstates the count after a shrink). The planted reports fixture now reaches H1's R3 check.
+- Evidence cap restarts after a retain: `_evidence` counts only sampler trials after the latest `retained` record's
+  trials (at any fidelity), since a retain is a verdict and the cap means "no verdict after N sampler trials". Before, a
+  hypothesis retained at every proxy check reached the reference with its cap spent, and its first reference check
+  (burn-in only, `active`) made it inconclusive: dogfood seed 1, H4.v2 (revived clipping), "no verdict after 95
+  sampler trials", which failed "interaction found at registration". Measured before: retained then capped at the next
+  check in 2 of 16 borderline runs (gain 1.2δ/1.5δ, σ 1.5δ, seeds 0..7). Bounded still: a hypothesis that stays
+  undecided is capped N trials after its last retain. The held fidelity-sensitive test's evidence == fresh now holds
+  up to its first retain, and the stuck-up-a-rung rate test skips runs with a retain on the way (still ≥ 8 of 10).
+- Dogfood fixtures (supersedes #38's "pass1 (H1–H9) … pass3 (lr)"): flat levers leave one per round end (the substitutes
+  rule, kept), and the planted stories assumed R1's three flat levers (weight decay, clipping, EMA) all left at once.
+  Passes are served by number and `generate` is due by queue size, so a fixture can't wait for a removal; instead fewer
+  flat levers compete early. "Clip the gradients" moves from pass 1 to pass 2 (now H9, before the tail H10), so the EMA
+  (H7) usually leaves at R1's end while the distillation (H8, still `exclusive_with: [H2]`) waits for label smoothing,
+  which the one-per-round-end order puts after the 1-lever flats. "Raise the learning rate" moves from pass 3 to pass 5
+  (no pass3/pass4 fixture: those passes are empty), after clipping's earliest rejection (R3: tested from R2) with a round to spare. Ids
+  shift (pass 1 is H1–H8); expected.yaml, check.py and scripted.py match by title, so nothing else changes. Scripted
+  runs: seed 1 σ 0.025 and seed 2 σ 0.05 both pass every criterion (EMA rejected R1, clipping R3, label smoothing R4,
+  both revived after R4).

@@ -2044,10 +2044,12 @@ def _evidence(st: dict, h: dict) -> int:
     """The evidence cap's count: finished sampler trials of this epoch since the hypothesis entered the
     search, where it was effective (not masked), at every fidelity and whatever its group was then (a
     rung change or a freeze doesn't restart it). A fidelity-sensitive hypothesis counts only the current
-    fidelity's: a proxy fidelity's trials are no evidence about it at a dearer rung."""
+    fidelity's: a proxy fidelity's trials are no evidence about it at a dearer rung. A retain is a verdict:
+    the count restarts after the latest one (at any fidelity)."""
     fid = st["fidelity"]["fidelity"]
+    since = max((max(v["trials"], default=-1) for v in h["verdicts"] if v["outcome"] == "retained"), default=-1)
     return sum(t["kind"] == "sampler" and t["status"] == "finished" and t.get("epoch", 0) == st["epoch"]["epoch"]
-               and t["round"] >= h["activated_round"] and h["id"] not in t.get("masked", [])
+               and t["round"] >= h["activated_round"] and h["id"] not in t.get("masked", []) and t["trial"] > since
                and (t["fidelity"] == fid or not h["spec"]["fidelity_sensitive"]) for t in st["trials"])
 
 
@@ -2076,8 +2078,10 @@ def _verdict_checks(con, st: dict, r: int, space: dict, baseline: dict, eligible
     for h in _in_search(st):
         sched, group, last = _schedule(h), _group(h), _latest(h, st)
         fresh = _fresh(st, h, eligible)
-        due = last["burn_in"]["fresh"] + sched["spacing"] if last else sched["needed"]
-        if len(fresh) < due:
+        # the spacing counts the fresh trials the last check didn't see: a freeze or reject elsewhere filters
+        # trials out, so `fresh` can shrink between checks
+        seen = set(last["trials"]) if last else set()
+        if sum(t not in seen for t in fresh) < (sched["spacing"] if last else sched["needed"]):
             continue
         check = sum(v["round"] == r for v in h["verdicts"]) + 1
         vid = f"V-R{r}-{h['id']}-{check}"
@@ -2089,7 +2093,8 @@ def _verdict_checks(con, st: dict, r: int, space: dict, baseline: dict, eligible
                             "passed": len(fresh) >= sched["needed"]}, **stats.pop("gates")}
         gated = all(g["passed"] for g in gates.values())
         condition = _condition(stats, delta)
-        pending = last is not None and last["outcome"] == "pending-reject"
+        # a reject the substitutes rule deferred is still confirmed: re-judged, it needs no new pending check
+        pending = last is not None and (last["outcome"] == "pending-reject" or last["id"] in h["substituted"])
         held, reason = None, None
         late = h["spec"]["fidelity_sensitive"] and at_proxy  # this fidelity can't show its effect
         if not gates["homogeneity"]["passed"]:  # v1 models constant noise only: never a reject
@@ -2193,10 +2198,10 @@ def _finalise_rejects(con, r: int, drift: dict | None) -> None:
     confirmed = [(h, v) for h, v in last if v["round"] == r and v["outcome"] == "reject"]
     # substitutes (two levers doing the same thing) each show Δ ≈ 0, the other optimised in both terms:
     # one `no-improvement` reject per round end, the smallest upper bound of Δ first; the rest are
-    # re-judged next round (an `irrelevant` one can't be a substitute: its M_u, which sees the partner
-    # at baseline, is below δ)
-    # ponytail: k substitutes take k rounds, and a deferred reject needs a fresh pending check and its
-    # confirmation; carry the confirmation over if that proves too slow
+    # re-judged at their next check, which rejects outright if it still says reject (the confirmation
+    # carries over: `_verdict_checks`) and otherwise returns them to the normal path (an `irrelevant`
+    # one can't be a substitute: its M_u, which sees the partner at baseline, is below δ)
+    # ponytail: k substitutes still take k round ends; release more than one per round end if that proves too slow
     first = min(((v["delta_stat"]["upper"], v["id"]) for _, v in confirmed if v["condition"] == "no-improvement"),
                 default=None)
     for h, v in confirmed:

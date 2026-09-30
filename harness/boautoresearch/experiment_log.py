@@ -68,7 +68,8 @@ def load(con: sqlite3.Connection) -> dict:
 
 def _fresh() -> dict:
     """What a new hypothesis version starts with: no smoke, verdicts, freezes or escalations."""
-    return {"smoke": None, "verdicts": [], "frozen": {}, "deferred": [], "escalations": [], "priority": 0, "unselected": 0}
+    return {"smoke": None, "verdicts": [], "frozen": {}, "deferred": [], "substituted": [],
+            "escalations": [], "priority": 0, "unselected": 0}
 
 
 def state(events: list[dict]) -> dict:
@@ -221,6 +222,8 @@ def state(events: list[dict]) -> dict:
             hyps[p["id"]]["frozen"].pop(p["lever"], None)
         elif e["type"] == "reject_deferred":
             hyps[p["id"]]["deferred"].append(p["verdict"])
+            if "reason" not in p:  # the substitutes rule's: its confirmation carries over to the next check
+                hyps[p["id"]]["substituted"].append(p["verdict"])
         elif e["type"] == "record":
             # `round`: the next round to start, the one an expected verdict is for
             records.append({**p, "actor": e["actor"], "seq": e["seq"], "round": max(rounds, default=-1) + 1})

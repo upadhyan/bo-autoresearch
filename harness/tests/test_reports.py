@@ -72,7 +72,7 @@ def planted(tmp_path_factory, project_python):
              "suggestions": ["a wider range for the bowl"], "generation": False}
     assert record(repo, "narrative", story, agent_id="ra", actor="round-analyst")[0] == 0
     # R2's suggested narrowing, as the orchestrator would take it up (R2 re-judges the deferred H2 next
-    # to the bowl; R3 stalls before H1's next check, so it suggests nothing)
+    # to the bowl)
     suggested = [ln for ln in (run_dir / "rounds" / "002.md").read_text().splitlines() if "`narrow " in ln]
     narrowed = [bo(repo, *shlex.split(ln.split("`")[1]), "--rationale", "suggested") for ln in suggested]
     return repo, run_dir, outs, narrowed
@@ -215,10 +215,11 @@ def test_hypotheses_csv_has_a_row_per_version_with_its_reject_condition(planted)
     assert float(by["H3.v1"]["delta_upper"]) < 0.1 < float(by["H1.v1"]["delta_lower"])
     assert by["H4.v1"]["m_u_lower"] == by["H4.v1"]["trials_used"] == ""  # never tested
     # expected retain / reject before R1, then `undecided` for the rest. H1: retained in R1 (right) and
-    # R2 (wrong), no check in R3 (right). H2's R1 reject is deferred behind H3's (two confirmed
+    # R2 and R3 (wrong: H2's reject filters out the trials that moved it, so R3 reaches H1's next check
+    # 10 fresh trials on). H2's R1 reject is deferred behind H3's (two confirmed
     # no-improvement rejects: the smaller UB(Δ) goes first), so R1 reads undecided (wrong), and its R2
     # reject is against `undecided` (wrong). H3: rejected in R1 against `undecided` (wrong)
-    assert [r["expected_right"] for r in table] == ["2/3", "0/2", "0/1", ""]
+    assert [r["expected_right"] for r in table] == ["1/3", "0/2", "0/1", ""]
     assert [r["revived_from"] for r in table] == ["", "", "", ""]
     assert by["H1.v1"]["prediction_flag"] == ""  # predicted higher, and its best is higher
 
