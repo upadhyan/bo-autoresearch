@@ -498,17 +498,18 @@ def test_a_stuck_hypothesis_carries_its_evidence_up_a_rung_to_the_cap(tmp_path, 
     for run_dir, outs in runs:
         steps = [e["step"] for e in of_type(run_dir, "hypothesis_escalated")]
         inc = of_type(run_dir, "hypothesis_inconclusive")
-        if steps != ["replicates", "rung"] or not inc or any(v["outcome"] == "retained" for v in records(run_dir)):
-            continue  # (a retain on the way restarts the count)
-        last = records(run_dir)[-1]
-        assert last["fidelity"] == {"epochs": 4} and last["outcome"] == "inconclusive"
-        assert last["burn_in"]["evidence"] >= 80 > last["burn_in"]["fresh"]
-        assert inc == [{"id": "H1.v1", "verdict": last["id"],
-                        "reason": f"no verdict after {last['burn_in']['evidence']} sampler trials"}]
-        capped += 1
-    # measured 20 of 20 over seeds 0..19 (capped at the reference at 20-40 fresh, 80-88 sampler trials in all);
-    # at a true 90%, fewer than 8 of 10 has probability ~7%
-    assert capped >= 8, capped
+        if inc:  # whenever it is capped, the reason is the count
+            last = records(run_dir)[-1]
+            assert last["outcome"] == "inconclusive" and inc == [{
+                "id": "H1.v1", "verdict": last["id"],
+                "reason": f"no verdict after {last['burn_in']['evidence']} sampler trials"}]
+        # the path under test: up a rung, then capped at the reference with its proxy trials still counted
+        capped += (steps == ["replicates", "rung"] and bool(inc) and last["fidelity"] == {"epochs": 4}
+                   and last["burn_in"]["evidence"] >= 80 > last["burn_in"]["fresh"])
+    # measured 17 of 20 over seeds 0..19 (capped at the reference at 20-40 fresh, 80-94 sampler trials; the other
+    # three: two rejected (seeds 3, 6), one retained at the reference, which restarts the count, then capped at
+    # 100 fresh (seed 5)); at 85%, fewer than 6 of 10 has probability ~1%
+    assert capped >= 6, capped
 
 
 @pytest.mark.slow

@@ -113,10 +113,12 @@ def test_trials_in_flight_are_charged_up_front_so_parallel_trials_never_overdraw
 def test_a_search_space_change_ends_a_parallel_round_once_the_trials_in_flight_are_recorded(tmp_path,
                                                                                           project_python):
     # δ out of reach: the bowl is rejectable next to it (Δ's bound is far below δ); its confirmed reject ends the round (a mechanics
-    # test: with δ = 10 against a range of ~2 the reject is certain on any seed)
+    # test: with δ = 10 against a range of ~2 the reject is certain on any seed). σ = 0.05, not 0.01: at 0.01 the bowl's
+    # LOO residuals can differ by region past the homogeneity gate on some landing orders (inconclusive, "noise differs
+    # by region": seed 3 in 3 of 12 loaded runs, seed 6 on its own); at 0.05 the ratio stayed ≤ 2.2 over seeds 0..11
     repo = make_repo(tmp_path)
     run_dir = init(repo, project_python, BASE + "delta: 10\nseed: 3\nworkers: 3\n")
-    env = toy_env(sigma=0.01, sleep=0.2)
+    env = toy_env(sigma=0.05, sleep=0.2)
     coded(repo, run_dir, tmp_path, env=env)
     code, out = round_run(repo, "--rationale", "search", env=env)
     assert code == 0, out
