@@ -1,6 +1,16 @@
 # DOGFOOD-PLANTED-TRUTH (check.py flags a run whose agents read this file)
-# Scripted generation pass 2: the fidelity-sensitive case (H10). It arrives after the ladder was calibrated
-# on pass 1's levers, so the cheap rung is validated and the tail is first tested at a proxy fidelity.
+# Scripted generation pass 2: "Clip the gradients" (H9), tested alone before its partner arrives in pass 5,
+# and the fidelity-sensitive case (H10). They arrive after the ladder was calibrated on pass 1's levers, so the
+# cheap rung is validated and the tail is first tested at a proxy fidelity.
+- title: Clip the gradients
+  rationale: Occasional gradient spikes may be what limits the step size.
+  mechanism: Clip the global gradient norm, harder as grad_clip grows.
+  provenance: standard
+  lens: optimisation
+  directives: []
+  fidelity_sensitive: false
+  levers:
+    grad_clip: {kind: float, low: 0.0, high: 1.0, baseline: 0.0, predicted: higher, path: config.grad_clip}
 - title: End training on a long cosine tail
   rationale: A long, slow decay at the end of training lets the model settle into a flatter minimum.
   mechanism: Spend the last cosine_tail share of training in a cosine decay of the learning rate to zero.

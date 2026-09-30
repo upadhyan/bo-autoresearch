@@ -1,5 +1,7 @@
 # DOGFOOD-PLANTED-TRUTH (check.py flags a run whose agents read this file)
-# Scripted generation pass 1 (run start): the planted cases, in id order H1..H9.
+# Scripted generation pass 1 (run start): the planted cases, in id order H1..H8. "Clip the gradients" comes
+# in pass 2: flat levers leave one per round end (the substitutes rule), so fewer of them in R1 lets the EMA
+# (H7) leave while the distillation (H8, exclusive with H2) is still untested.
 - title: Warm the learning rate up
   rationale: Large early steps on an untrained model are noisy; a short warmup should settle them.
   mechanism: Ramp the learning rate linearly from zero over the first warmup_frac of training.
@@ -29,15 +31,6 @@
   fidelity_sensitive: false
   levers:
     weight_decay: {kind: float, low: 0.0, high: 0.1, baseline: 0.0, predicted: higher, path: config.weight_decay}
-- title: Clip the gradients
-  rationale: Occasional gradient spikes may be what limits the step size.
-  mechanism: Clip the global gradient norm, harder as grad_clip grows.
-  provenance: standard
-  lens: optimisation
-  directives: []
-  fidelity_sensitive: false
-  levers:
-    grad_clip: {kind: float, low: 0.0, high: 1.0, baseline: 0.0, predicted: higher, path: config.grad_clip}
 - title: Train in mixed precision
   rationale: Lower-precision arithmetic adds a little gradient noise that may regularise, at no cost in steps.
   mechanism: Run the forward and backward passes in bfloat16 with float32 master weights.

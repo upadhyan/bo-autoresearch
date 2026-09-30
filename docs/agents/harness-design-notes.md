@@ -923,3 +923,13 @@ to append `--agent-id` to a subagent's `record` call) so no logic lives in hooks
   check in 2 of 16 borderline runs (gain 1.2δ/1.5δ, σ 1.5δ, seeds 0..7). Bounded still: a hypothesis that stays
   undecided is capped N trials after its last retain. The held fidelity-sensitive test's evidence == fresh now holds
   up to its first retain, and the stuck-up-a-rung rate test skips runs with a retain on the way (still ≥ 8 of 10).
+- Dogfood fixtures (supersedes #38's "pass1 (H1–H9) … pass3 (lr)"): flat levers leave one per round end (the substitutes
+  rule, kept), and the planted stories assumed R1's three flat levers (weight decay, clipping, EMA) all left at once.
+  Passes are served by number and `generate` is due by queue size, so a fixture can't wait for a removal; instead fewer
+  flat levers compete early. "Clip the gradients" moves from pass 1 to pass 2 (now H9, before the tail H10), so the EMA
+  (H7) usually leaves at R1's end while the distillation (H8, still `exclusive_with: [H2]`) waits for label smoothing,
+  which the one-per-round-end order puts after the 1-lever flats. "Raise the learning rate" moves from pass 3 to pass 5
+  (no pass3/pass4 fixture: those passes are empty), after clipping's earliest rejection (R3: tested from R2) with a round to spare. Ids
+  shift (pass 1 is H1–H8); expected.yaml, check.py and scripted.py match by title, so nothing else changes. Scripted
+  runs: seed 1 σ 0.025 and seed 2 σ 0.05 both pass every criterion (EMA rejected R1, clipping R3, label smoothing R4,
+  both revived after R4).
