@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v boar >/dev/null 2>&1; then boar next --hook; fi"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "bo-autoresearch",
+  "owner": {
+    "name": "Nakul Upadhya"
+  },
+  "plugins": [
+    {
+      "name": "boar",
+      "source": "./plugin",
+      "description": "BOAR (Bayesian Optimization AutoResearch): /boar runs an unattended research loop that tunes hypothesis levers with Bayesian optimization against a frozen eval and reports what worked. Needs the `boar` harness CLI on PATH."
+    }
+  ]
+}

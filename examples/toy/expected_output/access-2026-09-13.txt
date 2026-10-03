@@ -1,0 +1,105 @@
+access log summary
+==================
+lines read               9839
+malformed lines            11
+duplicate lines           337
+requests                 9491
+unmatched requests         36
+first request       2026-09-13T00:00:00.681Z
+last request        2026-09-13T23:59:56.205Z
+
+routes
+------
+route                                          requests     2xx    3xx    4xx   5xx  p50_ms  p95_ms  p99_ms  avg_bytes
+GET /api/v1/products/{sku}                         1389    1274     72     35     8      22      63     103     4171.3
+GET /api/v1/products                                867     791     31     35    10      83     227     483    18475.8
+GET /api/v1/users/{id}                              780     705     41     31     3      18      53     100     1406.9
+GET /api/v1/search                                  669     587     49     28     5     144     389     686    11813.1
+GET /api/v1/products/{sku}/stock                    543     488     27     22     6      12      32      51      154.4
+GET /api/v1/users/{id}/orders                       538     488     32     16     2      63     189     470     5247.8
+GET /api/v1/health                                  507     454     28     21     4       2       6      22       60.0
+GET /api/v1/cart                                    420     375     29     13     3      26      71     115     2054.7
+GET /api/v1/categories/{slug}/products              409     381     17      8     3      90     272     421    16647.4
+GET /api/v1/products/{sku}/reviews                  379     341     20     15     3      54     146     350    10125.5
+GET /api/v1/users/{id}/orders/{id}                  358     333     15     10     0      30      90     390     2621.5
+POST /api/v1/auth/refresh                           337     321      0     14     2      16      51     248      684.2
+GET /api/v1/categories/{slug}                       283     262     15      4     2      21      52      74     1839.1
+GET /api/v1/categories                              242     222     12      7     1      15      43     176     2350.2
+POST /api/v1/cart/items                             210     197      0     10     3      37      94     240     2218.4
+GET /api/v1/orders/{id}                             187     173     10      3     1      24      66     546     2600.8
+GET /api/v1/users/{id}/wishlist                     179     162      9      7     1      23      84     882     3210.0
+POST /api/v1/auth/login                             159     155      0      3     1     108     279     606      780.0
+GET /api/v1/users/{id}/addresses                    151     142      4      5     0      20      60     100      929.8
+GET /api/v1/promotions/{slug}                       146     129     11      4     2      27      84     352     3431.3
+GET /api/v1/orders/{id}/tracking                    110     102      5      3     0     224     673     889     1740.0
+POST /api/v1/payments/{token}/confirm                84      77      0      5     2     557    1755    2933      539.7
+PATCH /api/v1/cart/items/{sku}                       81      80      0      1     0      42      95     153     2032.1
+PATCH /api/v1/users/{id}                             80      76      0      4     0      35      90     600     1428.1
+DELETE /api/v1/cart/items/{sku}                      72      69      0      3     0      37     109     145       87.0
+PUT /api/v1/users/{id}/wishlist/{sku}                65      63      0      1     1      36      80     144      208.5
+POST /api/v1/checkout                                64      61      0      2     1     465    1545    2103     1327.1
+POST /api/v1/auth/logout                             58      55      0      3     0      10      34     190       57.7
+POST /api/v1/users/{id}/addresses                    37      35      0      2     0      43     170     203      406.9
+(unmatched)                                          36       0      0     36     0       2       4       4      162.0
+DELETE /api/v1/users/{id}/wishlist/{sku}             21      19      0      2     0      28      67     125       18.0
+POST /api/v1/products/{sku}/reviews                  19      18      0      0     1      57     166     166      308.1
+POST /api/v1/orders/{id}/cancel                      11      10      0      1     0     205     709     709      262.5
+
+status codes
+------------
+200      8136
+201       421
+204        88
+304       427
+400        48
+401        48
+403        37
+404       140
+409        41
+429        40
+500        14
+502        18
+503        20
+504        13
+
+hourly
+------
+hour requests    4xx   5xx  p50_ms  p95_ms
+00        173      4     2      29     180
+01         95      1     1      42     296
+02         90      1     0      24     243
+03         74      3     2      26     184
+04         94      2     0      29     259
+05        160      8     3      32     261
+06        254     13     1      30     170
+07        410     13     1      31     300
+08        578     23     4      31     209
+09        658     23     7      32     254
+10        649     22     5      33     226
+11        596     22     1      29     235
+12        579     21     4      29     212
+13        647     26     3      29     260
+14        656     16     6      33     218
+15        589     23     4      29     208
+16        581     33     1      33     258
+17        496     22     5      29     227
+18        504     14     5      32     215
+19        440     14     3      33     243
+20        437     22     2      32     275
+21        317     12     3      27     205
+22        252      9     1      37     198
+23        162      7     1      34     166
+
+top clients
+-----------
+client           requests   5xx
+10.6.97.233          1094     7
+10.14.190.97          544     4
+10.26.170.14          436     2
+10.23.202.219         294     4
+10.13.68.177          251     1
+10.10.29.127          215     2
+10.31.72.236          192     1
+10.25.251.110         183     1
+10.7.131.185          167     1
+10.13.20.185          133     0
