@@ -1,5 +1,6 @@
 {
   "name": "bo-autoresearch",
+  "description": "BOAR: an unattended Claude Code research loop that tunes code changes with Bayesian optimization against a frozen eval, under independent review, and reports what worked.",
   "owner": {
     "name": "Nakul Upadhya"
   },
@@ -7,7 +8,7 @@
     {
       "name": "boar",
       "source": "./plugin",
-      "description": "BOAR (Bayesian Optimization AutoResearch): /boar runs an unattended research loop that tunes hypothesis levers with Bayesian optimization against a frozen eval and reports what worked. Needs the `boar` harness CLI on PATH."
+      "description": "BOAR (Bayesian Optimization AutoResearch): /boar runs an unattended research loop that tunes hypothesis levers with Bayesian optimization against a frozen eval and reports what worked. Needs uv."
     }
   ]
 }

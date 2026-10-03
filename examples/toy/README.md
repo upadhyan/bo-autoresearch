@@ -45,16 +45,20 @@ Every variant's output matched `expected_output/` byte for byte.
 
 Prerequisites, done once:
 
-1. Put `boar` on PATH: `uv tool install --editable <bo-autoresearch>/harness`. The Stop hook runs `boar next --hook`
-   and does nothing when `boar` isn't on PATH.
-2. Load the plugin: either start Claude Code with `claude --plugin-dir <bo-autoresearch>/plugin`, or inside Claude
-   Code run `/plugin marketplace add <bo-autoresearch>` and then `/plugin install boar@bo-autoresearch`.
+1. Install the plugin as the [root README](../../README.md#install) says. To test a working tree instead, start
+   Claude Code with `claude --plugin-dir <bo-autoresearch>/plugin`.
+2. For the checklist's commands in your own terminal, set the `boar` alias from the
+   [README](../../README.md#watching-from-your-terminal). With `--plugin-dir`, alias `boar` to
+   `<bo-autoresearch>/plugin/bin/boar` instead.
 
-Make the target repo. Run this from the root of bo-autoresearch:
+Make the target repo:
 
 ```sh
-cp -r examples/toy /tmp/boar-toy && rm /tmp/boar-toy/README.md && cd /tmp/boar-toy && git init -b main && git add -A && git commit -m init
+git clone --depth 1 https://github.com/upadhyan/bo-autoresearch /tmp/bo-autoresearch
+cp -r /tmp/bo-autoresearch/examples/toy /tmp/boar-toy && rm /tmp/boar-toy/README.md && cd /tmp/boar-toy && git init -b main && git add -A && git commit -m init
 ```
+
+From a clone you already have, copy its `examples/toy` instead.
 
 Start Claude Code in `/tmp/boar-toy` and type:
 
@@ -134,7 +138,7 @@ These are the items from design.md "Acceptance". Run the commands from `/tmp/boa
      `refused: …` and exit 1, and `$R/trials.jsonl` must not grow. Running it at `[R3]` or `[R4]` is refused too,
      because that round has already run and is not closed yet.
 
-design.md also requires a harness test for each of the three warm-start rules. Those live in `harness/tests/`, not
+design.md also requires a harness test for each of the three warm-start rules. Those live in `plugin/harness/tests/`, not
 here.
 
 ## Regenerating the workloads

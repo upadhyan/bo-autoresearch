@@ -5,5 +5,8 @@
   "author": {
     "name": "Nakul Upadhya"
   },
-  "license": "MIT"
+  "homepage": "https://github.com/upadhyan/bo-autoresearch",
+  "repository": "https://github.com/upadhyan/bo-autoresearch",
+  "license": "MIT",
+  "keywords": ["optimization", "bayesian-optimization", "optuna", "performance", "autoresearch"]
 }

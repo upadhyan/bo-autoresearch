@@ -6,10 +6,11 @@ overnight and tell you in the morning what actually helped. This guide walks thr
 ## Once: install
 
 ```sh
-uv tool install /path/to/bo-autoresearch/harness      # puts `boar` on PATH
-claude plugin marketplace add /path/to/bo-autoresearch
+claude plugin marketplace add upadhyan/bo-autoresearch
 claude plugin install boar@bo-autoresearch
 ```
+
+You also need [uv](https://docs.astral.sh/uv/) on the machine; see the [README](../README.md#requirements).
 
 ## 1. Get the repo ready
 
@@ -104,7 +105,8 @@ You don't need to do anything. Roughly what happens:
 4. **Finalize.** The best config is checked once against the holdout workloads it never saw, alternating with the
    baseline, and a report is written.
 
-To look in from another terminal (in the repo):
+To look in from another terminal (in the repo, with the `boar` alias from the
+[README](../README.md#watching-from-your-terminal)):
 
 ```sh
 boar status   # phase, round, hypotheses, the incumbent so far

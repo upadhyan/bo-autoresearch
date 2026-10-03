@@ -1,6 +1,6 @@
 # Design notes
 
-Where the implementation deliberately differs from [design.md](../design.md), and why. The command reference and run directory layout are in [harness/README.md](../harness/README.md).
+Where the implementation deliberately differs from [design.md](../design.md), and why. The command reference and run directory layout are in [plugin/harness/README.md](../plugin/harness/README.md).
 
 1. **Optuna 5 constraints.** Optuna 5 deprecates `TPESampler(constraints_func=…)`. Instead, each live
    trial calls `trial.set_constraint("guards", 0.0|1.0)` before `tell`, and copied warm-start trials pass

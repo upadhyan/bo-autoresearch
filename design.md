@@ -301,12 +301,13 @@ With these defaults a round takes about an hour, and a run about 12 hours plus f
 ## Package layout
 
 ```
-plugin/
+plugin/                     # the Claude Code plugin; installing it installs everything
   .claude-plugin/plugin.json
+  bin/boar                  # launcher on the agent's PATH: runs harness/, building its venv with uv on first use
   skills/boar/SKILL.md      # /boar: run `boar next`, do the phase it names; carries the phase guidance above
   agents/boar-reviewer.md   # reviewer prompt and criteria from the Reviewer section
   hooks/hooks.json          # Stop → `boar next --hook`
-harness/                    # Python package exposing the `boar` CLI
+  harness/                  # Python package exposing the `boar` CLI
 ```
 
 ## Acceptance

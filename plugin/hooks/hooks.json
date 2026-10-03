@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if command -v boar >/dev/null 2>&1; then boar next --hook; fi"
+            "command": "b=\"${CLAUDE_PLUGIN_ROOT}/harness/.venv/bin/boar\"; if [ -x \"$b\" ]; then \"$b\" next --hook; fi"
           }
         ]
       }

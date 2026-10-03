@@ -1,0 +1,17 @@
+#!/bin/sh
+# boar: runs the BOAR harness bundled with this plugin. On first use, uv builds its virtualenv in
+# harness/.venv (fetching Python 3.10+ if the machine has none). The working directory is kept: the
+# harness finds the run from it.
+plugin=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P) || exit 1
+venv=$plugin/harness/.venv
+if [ ! -x "$venv/bin/python" ] || [ ! -x "$venv/bin/boar" ]; then
+  if ! command -v uv >/dev/null 2>&1; then
+    echo "boar: needs uv. Install it with: curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
+    exit 127
+  fi
+  echo "boar: setting up the harness (first use)..." >&2
+  UV_PROJECT_ENVIRONMENT=$venv uv sync --quiet --frozen --no-dev --project "$plugin/harness" >&2 || exit 1
+fi
+# Run the venv's entry point directly rather than `uv run`: no VIRTUAL_ENV is injected, so evals inherit
+# the caller's environment, and the detached worker re-execs this venv's interpreter.
+exec "$venv/bin/boar" "$@"

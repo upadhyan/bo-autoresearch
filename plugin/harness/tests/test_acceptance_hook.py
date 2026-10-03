@@ -17,7 +17,7 @@ import pytest
 
 from boar.store import process_identity
 
-REPO = Path(__file__).resolve().parents[2]
+PLUGIN = Path(__file__).resolve().parents[2]
 
 
 def test_no_run_lets_the_agent_stop(boar, tmp_path, monkeypatch):
@@ -158,24 +158,31 @@ def test_hook_exit_codes_through_a_real_process(driver):
 
 
 def _stop_hook_commands() -> list[str]:
-    data = json.loads((REPO / "plugin" / "hooks" / "hooks.json").read_text())
+    data = json.loads((PLUGIN / "hooks" / "hooks.json").read_text())
     return [h["command"] for entry in data["hooks"]["Stop"] for h in entry["hooks"] if h.get("type") == "command"]
 
 
 def test_plugin_stop_hook_runs_boar_next_hook():
-    assert any("boar next --hook" in c for c in _stop_hook_commands())
+    assert any("next --hook" in c and "${CLAUDE_PLUGIN_ROOT}" in c for c in _stop_hook_commands())
 
 
-def test_plugin_stop_hook_command_blocks_mid_run_and_tolerates_missing_boar(driver):
-    bindir = Path(sys.executable).parent
-    if not (bindir / "boar").exists():
+def test_plugin_stop_hook_command_blocks_mid_run_and_tolerates_missing_harness(driver, tmp_path):
+    entry = Path(sys.executable).parent / "boar"
+    if not entry.exists():
         pytest.skip("no boar entry point next to the interpreter")
     d = driver.start("init")
-    (command,) = [c for c in _stop_hook_commands() if "boar next --hook" in c]
+    (command,) = [c for c in _stop_hook_commands() if "next --hook" in c]
     shell = shutil.which("sh") or "/bin/sh"
-    env = {**os.environ, "PATH": f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}"}
-    p = subprocess.run([shell, "-c", command], input="{}", cwd=d.repo, env=env, capture_output=True, text=True, timeout=60)
+    # The hook runs the harness venv's own entry point, which the launcher builds on first use.
+    root = tmp_path / "plugin-root"
+    (root / "harness" / ".venv" / "bin").mkdir(parents=True)
+    (root / "harness" / ".venv" / "bin" / "boar").symlink_to(entry)
+
+    def hook(plugin_root: Path) -> subprocess.CompletedProcess:
+        env = {**os.environ, "CLAUDE_PLUGIN_ROOT": str(plugin_root)}
+        return subprocess.run([shell, "-c", command], input="{}", cwd=d.repo, env=env, capture_output=True, text=True, timeout=60)
+
+    p = hook(root)
     assert p.returncode == 2 and "not finished" in p.stderr
-    bare = {**os.environ, "PATH": "/nonexistent"}
-    p = subprocess.run([shell, "-c", command], input="{}", cwd=d.repo, env=bare, capture_output=True, text=True, timeout=60)
-    assert p.returncode == 0
+    p = hook(tmp_path / "never-set-up")
+    assert p.returncode == 0 and p.stderr == ""

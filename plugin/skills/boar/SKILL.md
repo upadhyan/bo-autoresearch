@@ -15,8 +15,8 @@ BOAR turns a measurable improvement task into **hypotheses**, each with **levers
 
 ## Start
 
-1. Run `command -v boar`. If it prints nothing, tell the user to install the harness with `uv tool install <path to the bo-autoresearch repo>/harness`, and stop.
-2. Run `boar next`. Any tag other than `[NONE]`, `[DONE]` or `[ABORTED]` means a run is in progress:
+1. Run `boar next`. The first call on a machine sets up the harness with uv, which can take a minute. If the command fails, show the user what it printed and stop: the plugin's launcher names what is missing (usually uv), and `command not found` means this plugin's `bin/` isn't on PATH (the plugin is disabled, or Claude Code is too old to run plugin executables).
+2. Any tag other than `[NONE]`, `[DONE]` or `[ABORTED]` means a run is in progress:
    - a request that is empty or matches the Goal in that run's `spec.md` (`boar status` prints the run dir): resume the run;
    - any other request: ask the user whether to resume the run or abort it, with your question tool (AskUserQuestion), and wait for the answer. Ending your turn to ask can fail: the run's Stop hook holds the session the run is bound to, and every session while it is unbound.
 

@@ -3,50 +3,30 @@
 `boar` is the command-line harness for BOAR (Bayesian Optimization AutoResearch). It owns a run's
 state, runs the trials, warm-starts each round's Optuna study, writes the round summaries and the
 report tables, and refuses any step taken out of order. The agent finds out what to do next from
-`boar next`. The design is in [`../design.md`](../design.md). This README covers installing it, the
-commands, and the run directory. Deliberate differences from the design are in [`../docs/design-notes.md`](../docs/design-notes.md).
+`boar next`. The design is in [`design.md`](../../design.md). This README covers how the plugin runs
+it, the commands, the run directory, and development. Installing and using BOAR is in the
+[root README](../../README.md). Deliberate differences from the design are in
+[`docs/design-notes.md`](../../docs/design-notes.md).
 
 The harness does not depend on any particular host. The Claude Code side (the `/boar` skill, the
-`boar-reviewer` agent and the Stop hook) lives in [`../plugin`](../plugin).
+`boar-reviewer` agent and the Stop hook) is the rest of [the plugin](..). Python 3.10 or newer; the only
+dependency is `optuna>=5.0`.
 
-## Install
+## How the plugin runs it
 
-Python 3.10 or newer. The only dependency is `optuna>=5.0`.
+The plugin ships this package and runs it through [`bin/boar`](../bin/boar), which Claude Code puts on the
+Bash tool's PATH while the plugin is enabled. The launcher runs `harness/.venv/bin/boar`, first building
+that virtualenv with `uv sync --frozen --no-dev` (from `uv.lock`) if it is missing or its interpreter is
+gone; without uv it prints how to install it and exits 127. The venv lives in the installed plugin's
+directory, so each plugin version gets its own.
 
-```sh
-uv tool install ./harness          # from the repo root; puts `boar` on PATH
-# or
-pip install ./harness
-```
+The Stop hook calls `harness/.venv/bin/boar next --hook` directly, and only when it exists: it never
+installs anything, and a session where BOAR was never used ends its turns as usual.
 
-For development:
-
-```sh
-cd harness
-uv sync --group dev
-uv run pytest -q
-uv run boar --help
-```
-
-Under `uv run boar` the harness's virtualenv is active; the worker drops it (`VIRTUAL_ENV` and its `bin/` on
+The launcher doesn't activate the venv, so evals inherit the caller's environment as it is. Under
+`uv run boar` (development) the venv is active; the worker drops it (`VIRTUAL_ENV` and its `bin/` on
 `PATH`) from the environment evals inherit, so a `#!/usr/bin/env python3` eval runs the same interpreter as
 the agent's manual runs. A virtualenv the user activated is passed through.
-
-## Install the Claude Code plugin
-
-The repo root is a plugin marketplace (`.claude-plugin/marketplace.json`) that lists one plugin, `boar`:
-
-```sh
-claude plugin marketplace add /path/to/bo-autoresearch
-claude plugin install boar@bo-autoresearch
-```
-
-You can also load it for a single session with `claude --plugin-dir /path/to/bo-autoresearch/plugin`.
-
-The plugin's Stop hook runs `boar next --hook` only when `boar` is on PATH, so install the harness first.
-To start a run, type `/boar <request>` in the target repo. A run continues unattended for hours, so it
-needs permissions that won't prompt: auto mode, or allow rules for `boar`, for whatever the eval and
-research need, and for edits in the target repo.
 
 ## Commands
 
@@ -139,11 +119,29 @@ same config through `BOAR_CONFIG`.
 
 ## Deviations from design.md
 
-See [docs/design-notes.md](../docs/design-notes.md).
+See [docs/design-notes.md](../../docs/design-notes.md).
 
-## Tests
+## Development
 
-`uv run pytest -q` runs the unit tests (control, engine) and the acceptance tests. The acceptance
-tests drive the real CLI in-process through whole runs on a toy target (no LLM), detached workers
-included. They cover each of the three warm-start rules. For a manual run against an agent, see
-[`../examples/toy`](../examples/toy).
+From a clone of the repo:
+
+```sh
+cd plugin/harness
+uv sync --group dev
+uv run pytest -q
+uv run --python 3.10 --isolated --group dev pytest -q   # the oldest supported Python
+uv run boar --help
+```
+
+`uv run pytest -q` runs the unit tests (control, engine), the acceptance tests and the launcher and
+hook tests. The acceptance tests drive the real CLI in-process through whole runs on a toy target (no
+LLM), detached workers included. They cover each of the three warm-start rules. For a manual run
+against an agent, see [`examples/toy`](../../examples/toy).
+
+To try the plugin from the working tree, start Claude Code from the repo root with
+`claude --plugin-dir plugin`. It loads in place, so the launcher uses the `plugin/harness/.venv` above,
+and `/reload-plugins` picks up edits to the skill, agent or hook. `claude plugin validate .` checks the
+marketplace and plugin manifests.
+
+To release, bump `version` in both [`plugin.json`](../.claude-plugin/plugin.json) and `pyproject.toml`
+and push. Installed copies only update when that version changes.
