@@ -10,7 +10,8 @@ the end, BOAR writes a report of what worked, what didn't, and every experiment.
 - [`design.md`](design.md): the design (source of truth).
 - [`harness/`](harness): the `boar` CLI (Python, Optuna). It owns the run state, runs the trials and
   refuses out-of-order steps. Its [README](harness/README.md) has installation, the command reference,
-  the run directory layout and the deviations from the design.
+  and the run directory layout. [`docs/`](docs) has a [usage guide](docs/guide.md) and the
+  [design notes](docs/design-notes.md) (where the code deliberately differs from the design).
 - [`plugin/`](plugin): the Claude Code plugin, with the `/boar` skill, the `boar-reviewer` agent and the
   Stop hook.
 - [`examples/toy/`](examples/toy): a toy target with two real slow paths, an idea with no effect and a
