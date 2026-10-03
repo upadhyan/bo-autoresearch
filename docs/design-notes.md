@@ -166,4 +166,12 @@ Where the implementation deliberately differs from [design.md](../design.md), an
     `next` and `status` say it runs inline in another shell rather than pointing at a worker log. Once it
     has exited, `next` (R1 "Round r was interrupted") and `wait` say its output went to the shell that
     started it whenever no worker log exists.
+27. **A second eval alongside a trial.** In the first toy acceptance run, the agent ran the eval by hand
+    during round 1's baseline trial. The hand run's temp files tripped that trial's guards, so it was
+    recorded as infeasible and the round had no noise floor. The design only asks for an idle machine. So
+    while a trial (or eval check, or holdout run) waits on its eval, the harness checks every 2 s for another
+    process of this user with `BOAR_CONFIG` in its environment and its cwd in the repo that does not descend
+    from the trial's eval. Finding one kills the trial's eval and raises a refusal: the trial is not recorded,
+    the worker stops, and `boar wait` names the process and says how to resume. It needs `/proc`, so on
+    other systems it finds nothing.
 

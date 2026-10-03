@@ -166,6 +166,54 @@ def test_request_stop_kills_the_running_eval_and_interrupts(run):
         trial(run)
 
 
+needs_proc = pytest.mark.skipif(not Path("/proc/self/environ").exists(), reason="the concurrent-eval check reads /proc")
+
+
+@pytest.fixture
+def fast_poll(monkeypatch):
+    monkeypatch.setattr(evalrun, "CONCURRENT_POLL_S", 0.1)
+
+
+def bystander(cwd: Path, **env: str) -> subprocess.Popen:
+    """A long-running process: a hand-run eval when it has BOAR_CONFIG and runs in the repo."""
+    base = {k: v for k, v in os.environ.items() if k != "BOAR_CONFIG"}
+    return subprocess.Popen(["sleep", "30"], cwd=cwd, env={**base, **env})
+
+
+@needs_proc
+def test_a_hand_run_eval_alongside_the_trial_stops_it_unrecorded(run, fast_poll):
+    write_eval(run, f"sleep 5\necho '{OK_LINE}'\n")
+    other = bystander(run.root, BOAR_CONFIG="hand.json")
+    try:
+        start = time.monotonic()
+        with pytest.raises(evalrun.ConcurrentEval, match=f"pid {other.pid}"):
+            trial(run, budget=30)
+        assert time.monotonic() - start < 3
+    finally:
+        other.kill()
+        other.wait()
+    assert not run.eval_group_path.exists()
+
+
+@needs_proc
+@pytest.mark.parametrize("where, env", [("elsewhere", {"BOAR_CONFIG": "x.json"}), ("repo", {})])
+def test_other_processes_do_not_stop_the_trial(run, tmp_path_factory, fast_poll, where, env):
+    write_eval(run, f"sleep 0.5\necho '{OK_LINE}'\n")
+    other = bystander(run.root if where == "repo" else tmp_path_factory.mktemp("elsewhere"), **env)
+    try:
+        assert trial(run, repeats=1)["state"] == "complete"
+    finally:
+        other.kill()
+        other.wait()
+
+
+@needs_proc
+def test_the_trials_own_children_do_not_stop_it(run, fast_poll):
+    # A child in a session of its own: outside the eval's process group, but still its descendant.
+    write_eval(run, f"{sys.executable} -c 'import os, time; os.setsid(); time.sleep(0.6)' &\nwait\necho '{OK_LINE}'\n")
+    assert trial(run, repeats=1)["state"] == "complete"
+
+
 def test_eval_hash_ignores_bytecode_but_tracks_edits(run):
     assert evalrun.eval_hash(run) is None
     write_eval(run, f"echo '{OK_LINE}'\n")

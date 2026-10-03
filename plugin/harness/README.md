@@ -59,7 +59,11 @@ prints a `next: [TAG] …` line.
 | `_worker round\|finalize\|eval` | Hidden: the detached worker's entry point | — |
 
 While a worker holds the run (a detached worker, or a CLI running `--foreground` work), every state-changing
-command except `abort` is refused, and a second `round run`, `finalize` or `eval check` is refused.
+command except `abort` is refused, and a second `round run`, `finalize` or `eval check` is refused. While a
+trial's eval runs, the worker also looks every 2 s for another run of this repo's eval: a process with
+`BOAR_CONFIG` in its environment and its working directory in the repo, outside the trial's own processes
+(Linux, via `/proc`). Finding one stops the trial without recording it, and the worker stops with the reason
+(see deviation 27).
 
 `next` tags: `NONE, S2, S3, S4, S5, ASK_USER, R1, WAIT, R3, R4, R5, R6, FINALIZE, REPORT, DONE, ABORTED`.
 

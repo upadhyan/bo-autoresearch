@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from boar import gitops, stats, store
+from boar.errors import Refused
 from boar.store import Run
 
 COMPLETE, INFEASIBLE, FAILED = "complete", "infeasible", "failed"
@@ -27,9 +28,16 @@ COMPLETE, INFEASIBLE, FAILED = "complete", "infeasible", "failed"
 # Only the tail of stdout is parsed; an eval may print a lot before its result line.
 _TAIL_BYTES = 64 * 1024
 
+# How often a running trial looks for another eval of the same repo running alongside it.
+CONCURRENT_POLL_S = 2.0
+
 
 class Interrupted(Exception):
     """The worker was told to stop mid-trial. The trial must not be recorded."""
+
+
+class ConcurrentEval(Refused):
+    """Another process ran this repo's eval during a trial. The trial is stopped and must not be recorded."""
 
 
 _live: dict[str, Any] = {"proc": None, "stop": False}
@@ -309,6 +317,66 @@ def _exe_problem(exe: Path) -> str | None:
     return None
 
 
+def other_evals(root: Path, own: int) -> list[str]:
+    """This user's processes that run an eval of the repo at `root` but are not `own` or its descendants.
+
+    A run of the eval is a process with BOAR_CONFIG in its environment and its working directory in the
+    repo, as a hand-run `BOAR_CONFIG=… <run dir>/eval/run` from the repo root has. Needs /proc (Linux);
+    elsewhere it finds nothing.
+    """
+    proc_dir = Path("/proc")
+    if not proc_dir.is_dir():
+        return []
+    root, uid = root.resolve(), os.getuid()
+    parents: dict[int, int] = {}
+    candidates: list[int] = []
+    for entry in proc_dir.iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        try:
+            if entry.stat().st_uid != uid:
+                continue
+            parents[pid] = int((entry / "stat").read_text().rsplit(") ", 1)[1].split()[1])
+            if not any(v.startswith(b"BOAR_CONFIG=") for v in (entry / "environ").read_bytes().split(b"\0")):
+                continue
+            cwd = Path(os.readlink(entry / "cwd"))
+        except (OSError, IndexError, ValueError):
+            continue
+        if cwd == root or root in cwd.parents:
+            candidates.append(pid)
+
+    def descends_from_own(pid: int) -> bool:
+        seen: set[int] = set()
+        while pid > 1 and pid not in seen:
+            if pid == own:
+                return True
+            seen.add(pid)
+            pid = parents.get(pid, 0)
+        return False
+
+    return [f"pid {p}: {store.process_cmdline(p).strip()[:120]}" for p in candidates if not descends_from_own(p)]
+
+
+def _wait(proc: subprocess.Popen, timeout_s: float, root: Path) -> int:
+    """`proc.wait(timeout_s)`, raising ConcurrentEval as soon as another run of this repo's eval shows up."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        left = deadline - time.monotonic()
+        try:
+            return proc.wait(timeout=max(0.0, min(CONCURRENT_POLL_S, left)))
+        except subprocess.TimeoutExpired:
+            if left <= CONCURRENT_POLL_S:
+                raise
+        others = other_evals(root, proc.pid)
+        if others:
+            raise ConcurrentEval(
+                f"another run of this repo's eval was going during the trial ({'; '.join(others)}); it competes "
+                "for the machine and can trip the trial's guards, so the trial was stopped and not recorded. Let "
+                "that run finish or stop it, and run nothing else while a worker runs"
+            )
+
+
 def _invoke(
     exe: Path, cwd: Path, env: dict, out_dir: Path, k: int, timeout_s: float, group_path: Path
 ) -> tuple[dict | None, str | None]:
@@ -331,7 +399,7 @@ def _invoke(
             if _live["stop"]:
                 _kill_group(proc)
             try:
-                rc = proc.wait(timeout=timeout_s)
+                rc = _wait(proc, timeout_s, cwd)
             except subprocess.TimeoutExpired:
                 _kill_group(proc)
                 proc.wait()

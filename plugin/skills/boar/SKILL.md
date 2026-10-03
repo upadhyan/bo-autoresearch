@@ -30,7 +30,7 @@ Read the request and every file it names (often an ideas file). Draft the spec a
 - **Goal**: one sentence, in the user's words.
 - **Metric**: name, unit, how it is measured, and a line that reads literally `Direction: min` or `Direction: max` (the harness parses it).
 - **Target population**: the real workloads or conditions an improvement has to carry over to.
-- **Guards**: the conditions every trial must satisfy (outputs correct, accuracy at or above a floor, RAM under a ceiling, …).
+- **Guards**: the conditions every trial must satisfy, each one something the eval can check on a single run (outputs correct, accuracy at or above a floor, RAM under a ceiling, …). A way to game the metric belongs under Known cheats, where the reviewer rules on it at proposal time.
 - **Scope**: which changes are allowed (files, components, dependencies) and which are not.
 - **Known cheats**: the ways this particular metric could be gamed, beyond the general list under [Hard rules](#hard-rules).
 - **User ideas**: the user's list, copied word for word.
@@ -80,7 +80,7 @@ When `boar next` says the eval was rejected, rebuild it to answer the reviewer's
 
 ### [S5] and [R5] Review
 
-Dispatch the reviewer with the Agent tool, subagent type `boar-reviewer` (installed as a plugin it may be listed as `boar:boar-reviewer`; use the name your agent list shows). The prompt is exactly:
+Dispatch the reviewer with the Agent tool in the foreground (`run_in_background: false`), so its verdicts are recorded when the call returns, subagent type `boar-reviewer` (installed as a plugin it may be listed as `boar:boar-reviewer`; use the name your agent list shows). The prompt is exactly:
 
     Review BOAR run <run-id>: <item ids from boar next>.
 
@@ -100,7 +100,7 @@ Done when every active lever changes behaviour when set away from its default. C
 
     BOAR_CONFIG=<run dir>/work/check-<lever>.json BOAR_SPLIT=dev <run dir>/eval/run
 
-Run the eval once more with a config of `{}` to confirm the guards still pass at baseline. `git status` must then show only your own edits: `boar round run` commits anything these runs wrote into the repo, and a lever whose code writes into the repo or eval/ fails every trial that sets it. A lever that crashes will show up in R2 as a failed trial.
+Run the eval once more with a config of `{}`, as a command of its own, and read its result line: start `boar round run` only once it shows `"guards_ok": true`, and fix whatever it reports first. `git status` must then show only your own edits: `boar round run` commits anything these runs wrote into the repo, and a lever whose code writes into the repo or eval/ fails every trial that sets it. A lever that crashes will show up in R2 as a failed trial.
 
 Then run `boar round run`. It commits the whole working tree (`git add -A`) to the boar branch, so keep scratch files in `<run dir>/work/`, outside the repo's tracked tree. That commit is the round's code until the next R1 (see **Code** under [Hard rules](#hard-rules)). It returns at once while a detached worker runs the round (about an hour with the defaults). Go to WAIT.
 
@@ -108,7 +108,7 @@ Then run `boar round run`. It commits the whole working tree (`git add -A`) to t
 
 ### [WAIT]
 
-A detached worker is running `boar eval check`, `boar round run` or `boar finalize`. Run `boar wait` (Bash timeout 600000 ms; it returns within about 9 minutes) and repeat until it prints `finished: …`, then run `boar next`. Keep calling `boar wait` rather than ending your turn: every other `boar` command that changes state is refused while the worker is alive. Keep HEAD, the worktree and eval/ untouched and the machine quiet meanwhile: trials run the code in the worktree, and runtime metrics need an idle machine. A round or finalize worker compares all three before and after every trial: a change it finds before a trial stops it, and a change a trial leaves behind fails that trial and is undone. If `boar wait` reports that the worker died or stopped, read what it prints, fix the cause (restore what moved, or an environmental cause outside the worktree), and resume as it says.
+A detached worker is running `boar eval check`, `boar round run` or `boar finalize`. Run `boar wait` (Bash timeout 600000 ms; it returns within about 9 minutes) and repeat until it prints `finished: …`, then run `boar next`. Keep calling `boar wait` rather than ending your turn: every other `boar` command that changes state is refused while the worker is alive. Keep HEAD, the worktree and eval/ untouched and the machine quiet meanwhile: run only `boar wait`, `boar status` and file reads, and leave the eval, the target code and prototypes until `finished`. Trials run the code in the worktree, and runtime metrics need an idle machine. A round or finalize worker compares all three before and after every trial: a change it finds before a trial stops it, and a change a trial leaves behind fails that trial and is undone. If `boar wait` reports that the worker died or stopped, read what it prints, fix the cause (restore what moved, or an environmental cause outside the worktree), and resume as it says.
 
 ### [R3] Analyse
 
@@ -157,6 +157,6 @@ No active run here. Before init that is expected: do S1. After init it means you
 - **Files.** You write the spec draft (before init), `research.md`, `work/`, `eval/` (until the reviewer accepts it) and the narrative sections of `report.md`. Every other file under `.boar/` belongs to the harness: change run state only through `boar` commands.
 - **Frozen eval.** Once accepted, `eval/` stays byte-for-byte unchanged for the rest of the run, and changing the eval means a new run. The harness keeps a copy of the accepted eval: when eval/ changes outside a trial, `boar round run` and `boar finalize` refuse and `boar next` lists the changed files; run `boar eval restore` to put the accepted copy back.
 - **Branch.** Every change to the target code goes on `boar/<run-id>`; the user's branch stays untouched.
-- **Code.** Edit the target code only in R1, before `boar round run`. Trials, the holdout check and the report all measure the round's commit, so HEAD and the worktree stay as committed until the next R1, and for good after the last round's `boar round run`. Prototype in `<run dir>/work/` meanwhile.
+- **Code.** Edit the target code only in R1, before `boar round run`. Trials, the holdout check and the report all measure the round's commit, so HEAD and the worktree stay as committed until the next R1, and for good after the last round's `boar round run`. Prototype in `<run dir>/work/` in R3 and R4, once the round's worker has finished.
 - **No cheats.** An improvement must carry over to the target population. These move the eval without moving the population, so they are never an improvement: treating the eval's inputs as a special case; caching or memoizing results across eval runs; doing less work than the task requires; changing how things are measured (timers, sampling, logging that hides work); weakening a guard; giving up a quality the spec implies (precision, determinism); using more resources than the deployment the spec describes; anything under the spec's Known cheats. A user idea of this kind still goes to the reviewer as a proposal, and every change in the target code's behaviour sits behind a reviewed lever.
 - **Abort** with `boar abort --reason "…"` only when the run truly cannot continue (the target can no longer build or run and can't be repaired, the machine is unusable). A refusal or a hard phase calls for fixing the cause.
