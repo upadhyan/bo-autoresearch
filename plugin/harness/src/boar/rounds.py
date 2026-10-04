@@ -15,7 +15,7 @@ from typing import Any
 import optuna
 from optuna.trial import TrialState
 
-from boar import evalrun, gitops, stats, store, warmstart, worker
+from boar import control, evalrun, gitops, stats, store, warmstart, worker
 from boar.errors import Refused
 from boar.store import Run
 
@@ -209,11 +209,39 @@ def start_round(run: Run, foreground: bool) -> str:
 # --- the round body ---------------------------------------------------------------
 
 
-def _enqueue(study: optuna.Study, space: dict, defaults: dict, incumbent_config: dict | None) -> None:
-    """Queue the incumbent (or the baseline) so it is measured again on this round's commit."""
-    base = incumbent_config or {}
-    params = {name: base.get(name, defaults[name]) for name in space}
-    study.enqueue_trial(params, user_attrs={"queued": "baseline" if incumbent_config is None else "incumbent"})
+def extra_queue(hyps: list[dict], r: int) -> list[dict]:
+    """The configs round `r` runs on top of its N trials: what last round's investigations queued, and the joint
+    trial of each enabler that activates this round.
+
+    Each is {"label", "config"}, `config` a partial config that is filled from the incumbent when queued.
+    """
+    out = []
+    for h in store.active_hypotheses(hyps):
+        queue = (control.investigation(h, r - 1) or {}).get("queue") or []
+        out += [{"label": f"investigate {h['id']} ({i}/{len(queue)})", "config": c} for i, c in enumerate(queue, 1)]
+    for h in store.active_hypotheses(hyps):
+        if h.get("enables") and h.get("activated_round") == r:
+            out.append({"label": f"joint {h['id']}+{h['enables']}", "config": h["joint_config"]})
+    return out
+
+
+def _labels(warm: dict) -> list[str]:
+    first = "baseline" if warm.get("incumbent_config") is None else "incumbent"
+    return [first, *(q["label"] for q in warm.get("queue") or [])]
+
+
+def _enqueue(study: optuna.Study, space: dict, defaults: dict, warm: dict, skip: set[str] = frozenset()) -> None:
+    """Queue the incumbent (or the baseline), so it is measured again on this round's commit, then the extra configs.
+
+    Each extra config is filled from the incumbent; a lever it names that is pinned now stays at its default.
+    """
+    base = warm.get("incumbent_config") or {}
+    partials = [{}] + [q["config"] for q in warm.get("queue") or []]
+    for label, partial in zip(_labels(warm), partials):
+        if label in skip:
+            continue
+        params = {name: partial.get(name, base.get(name, defaults[name])) for name in space}
+        study.enqueue_trial(params, user_attrs={"queued": label})
 
 
 def _sampler(cfg: dict, seed: int) -> optuna.samplers.TPESampler:
@@ -238,8 +266,11 @@ def _open_study(run: Run, r: int, cfg: dict, hyps: list[dict]) -> optuna.Study:
         valid, excluded = warmstart.select(trials, hyps, r)
         study.add_trials(warmstart.build_frozen_trials(valid, space, defaults))
         inc = warmstart.incumbent(trials, hyps, r, cfg["direction"]) if r > 1 else None
-        warm = {"copied": len(valid), "excluded": excluded, "incumbent_config": inc["config"] if inc else None}
-        _enqueue(study, space, defaults, warm["incumbent_config"])
+        warm = {
+            "copied": len(valid), "excluded": excluded, "incumbent_config": inc["config"] if inc else None,
+            "queue": extra_queue(hyps, r),
+        }
+        _enqueue(study, space, defaults, warm)
         run.update_state(lambda s: s["rounds"][str(r)].__setitem__("warm", warm))
         log(f"round {r}: copied {len(valid)} warm trials, left out {excluded}; queued {config_text(warm['incumbent_config'] or {})}")
         return study
@@ -252,9 +283,9 @@ def _open_study(run: Run, r: int, cfg: dict, hyps: list[dict]) -> optuna.Study:
     study.sampler = _sampler(cfg, cfg["seed"] + r + 1_000_003 * len(study.trials))
     for t in study.get_trials(deepcopy=False, states=(TrialState.RUNNING,)):
         study.tell(t.number, state=TrialState.FAIL)
-    queued_done = any(t.get("queued") for t in run.trials() if t["round"] == r)
-    if not queued_done and not study.get_trials(deepcopy=False, states=(TrialState.WAITING,)):
-        _enqueue(study, space, defaults, warm.get("incumbent_config"))
+    done = {t.get("queued") for t in run.trials() if t["round"] == r}
+    waiting = {t.user_attrs.get("queued") for t in study.get_trials(deepcopy=False, states=(TrialState.WAITING,))}
+    _enqueue(study, space, defaults, warm, skip=done | waiting)
     log(f"round {r}: resuming")
     return study
 
@@ -269,7 +300,7 @@ def run_round_worker(run: Run) -> None:
     dists = warmstart.distributions(store.search_space(hyps))
     defaults = store.lever_defaults(hyps)
     study = _open_study(run, r, cfg, hyps)
-    n_target = cfg["trials_per_round"]
+    n_target = control.round_size(cfg, run.state()["rounds"][str(r)])
     step, command = f"round {r}", "boar round run"
     while True:
         trials = run.trials()
@@ -360,11 +391,13 @@ def _drift(
     return {**out, "flag": flag, "why": why}
 
 
-def _lever_effects(trials: list[dict], space: dict, defaults: dict) -> list[list[str]]:
-    complete = [t for t in trials if t["state"] == "complete"]
+def _lever_effects(trials: list[dict], space: dict, defaults: dict, key: str | None = None) -> list[list[str]]:
+    """Each lever's marginal effect on the metric, or with `key` on that diagnostic, over the complete trials."""
+    complete = [t for t in trials if t["state"] == "complete" and (key is None or key in (t.get("diagnostics") or {}))]
     rows = []
     for name, lever in space.items():
-        pts = [(t["config"].get(name, defaults[name]), t["metric"]) for t in complete]
+        pts = [(t["config"].get(name, defaults[name]), t["metric"] if key is None else t["diagnostics"][key])
+               for t in complete]
         distinct = {json.dumps(v) for v, _ in pts}
         if not pts:
             text = "no complete trials"
@@ -403,7 +436,7 @@ def _facts(run: Run, r: int) -> dict:
     earlier_trials = [t for t in trials if t["round"] < r]
     drift_floor = stats.noise_floor(earlier_trials, defaults)
     drift_base = stats.noise_base(earlier_trials, defaults)
-    queued = next((t for t in round_trials if t.get("queued")), None)
+    queued = next((t for t in round_trials if t.get("queued") in ("baseline", "incumbent")), None)
     inc = warmstart.incumbent(trials, hyps, r + 1, direction)
     inc_trial = None
     if inc is not None:
@@ -424,7 +457,32 @@ def _facts(run: Run, r: int) -> dict:
         "noise_base": stats.noise_base(trials, defaults),
         "incumbent": inc,
         "incumbent_trial": inc_trial,
+        "hyps": hyps,
     }
+
+
+def _diagnostics(f: dict, r: int) -> list[str]:
+    """The summary's Diagnostics section: lever effects on each diagnostic, bound observables, investigations."""
+    keys = control.diag_keys(f["after"])
+    if keys:
+        rows = [[f"`{key}`", *row] for key in keys for row in _lever_effects(f["after"], f["space"], f["defaults"], key)]
+        out = [
+            "Each lever's marginal effect on each numeric diagnostic (the medians from diag.json), over the same "
+            "trials as the lever effects. Diagnostics never affect the metric, the warm start or the incumbent.",
+            "",
+            md_table(["diagnostic", "lever", "hypothesis", "effect"], rows),
+        ]
+    else:
+        out = ["No trial in the warm-start set or this round wrote numbers to diag.json."]
+    active = store.active_hypotheses(f["hyps"])
+    bound = "; ".join(f"{h['id']}: `{h['observable_key']}`" if h.get("observable_key") else f"{h['id']}: none yet"
+                      for h in active)
+    out += ["", f"Observable keys: {bound or 'no active hypothesis'}."]
+    probes = [(h, control.investigation(h, r - 1)) for h in active if control.investigation(h, r - 1)]
+    if probes:
+        out += ["", "Investigations measured this round:", ""]
+        out += [f"- {h['id']} (round {r - 1}): cause: {inv['cause']}; measures {', '.join(inv['measure'])}" for h, inv in probes]
+    return out
 
 
 def write_summary(run: Run, r: int, facts: dict | None = None) -> Path:
@@ -435,7 +493,7 @@ def write_summary(run: Run, r: int, facts: dict | None = None) -> Path:
     out = [
         f"# Round {r} summary",
         "",
-        f"Commit `{rec.get('commit')}`. Trials run: {id_list(ids)} ({len(ids)} of {cfg['trials_per_round']}). "
+        f"Commit `{rec.get('commit')}`. Trials run: {id_list(ids)} ({len(ids)} of {control.round_size(cfg, rec)}). "
         f"Metric direction: {cfg['direction']} ({better} is better).",
         "",
         "## Incumbent",
@@ -506,6 +564,10 @@ def write_summary(run: Run, r: int, facts: dict | None = None) -> Path:
         "",
         md_table(["lever", "hypothesis", "effect"], _lever_effects(f["after"], f["space"], defaults)),
         "",
+        "## Diagnostics",
+        "",
+        *_diagnostics(f, r),
+        "",
         "## Infeasible and failed trials",
         "",
     ]
@@ -520,9 +582,11 @@ def write_summary(run: Run, r: int, facts: dict | None = None) -> Path:
         out.append("None.")
     out += ["", "## All trials this round", ""]
     out.append(md_table(
-        ["trial", "queued", "state", "metric", "duration (s)", "config"],
+        ["trial", "queued", "state", "metric", "duration (s)", "config", "diagnostics"],
         [[t["trial"], t.get("queued") or "", t["state"], fmt(t.get("metric")), fmt(t.get("duration_s"), 4),
-          config_text(store.non_default(t["config"], defaults))] for t in f["round_trials"]],
+          config_text(store.non_default(t["config"], defaults)),
+          f"[diag](../../trials/{t['trial']}/)" if any(run.trial_dir(t["trial"]).glob("diag-*")) else ""]
+         for t in f["round_trials"]],
     ))
     path = run.summary_path(r)
     store.write_text(path, "\n".join(out) + "\n")

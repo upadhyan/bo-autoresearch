@@ -6,6 +6,7 @@ pass instead of one refusal per mistake.
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from typing import Any
@@ -15,7 +16,7 @@ LEVER_TYPES = ("bool", "int", "float", "categorical")
 LEVER_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*$")
 
 _PROPOSAL_REQUIRED = ("statement", "mechanism", "source", "levers")
-_PROPOSAL_KEYS = {*_PROPOSAL_REQUIRED, "citations", "supersedes"}
+_PROPOSAL_KEYS = {*_PROPOSAL_REQUIRED, "citations", "supersedes", "enables", "joint_config"}
 _LEVER_KEYS = {
     "bool": {"name", "type", "default"},
     "int": {"name", "type", "low", "high", "log", "default"},
@@ -41,8 +42,14 @@ def _same(a: Any, b: Any) -> bool:
     return type(a) is type(b) and a == b
 
 
-def validate(data: Any, existing_levers: set[str], active_ids: set[str], allow_supersedes: bool) -> list[str]:
-    """Every problem with a proposal file, as messages naming the proposal index and lever."""
+def validate(
+    data: Any, existing_levers: set[str], active_ids: set[str], allow_supersedes: bool,
+    blocked_ids: set[str] = frozenset(), space: dict[str, dict] | None = None,
+) -> list[str]:
+    """Every problem with a proposal file, as messages naming the proposal index and lever.
+
+    `blocked_ids` are the hypotheses an `enables` may name; `space` holds the active levers a `joint_config` may set.
+    """
     if not isinstance(data, list):
         return ["the proposal file must hold a JSON list of proposals"]
     if not data:
@@ -76,14 +83,47 @@ def validate(data: Any, existing_levers: set[str], active_ids: set[str], allow_s
             elif sup not in active_ids:
                 listed = ", ".join(sorted(active_ids)) or "none"
                 errors.append(f"{where}: 'supersedes' must name an active hypothesis (active: {listed}), got {sup!r}")
+        enables, joint = p.get("enables"), p.get("joint_config")
+        if enables is not None:
+            if not allow_supersedes:
+                errors.append(f"{where}: 'enables' must be null in setup (nothing is blocked yet)")
+            elif not isinstance(enables, str) or enables not in blocked_ids:
+                listed = ", ".join(sorted(blocked_ids)) or "none"
+                errors.append(f"{where}: 'enables' must name a hypothesis decided blocked this round (blocked: {listed}), got {enables!r}")
+            if joint is None:
+                errors.append(f"{where}: an 'enables' proposal needs a 'joint_config': the partial config of its joint trial")
+        elif joint is not None:
+            errors.append(f"{where}: 'joint_config' goes with 'enables'; leave it null otherwise")
         if "levers" not in p:
             continue
         levers = p["levers"]
         if not isinstance(levers, list) or not levers:
             errors.append(f"{where}: 'levers' must be a non-empty list")
             continue
+        found: list[str] = []
         for j, lever in enumerate(levers):
-            errors.extend(_lever_errors(f"{where}.levers[{j}]", lever, existing_levers, seen))
+            found.extend(_lever_errors(f"{where}.levers[{j}]", lever, existing_levers, seen))
+        errors.extend(found)
+        if enables is not None and joint is not None and not found:
+            errors.extend(_joint_errors(where, joint, levers, space or {}))
+    return errors
+
+
+def _joint_errors(where: str, joint: Any, levers: list[dict], space: dict[str, dict]) -> list[str]:
+    from boar import warmstart
+
+    if not isinstance(joint, dict) or not joint:
+        return [f"{where}: 'joint_config' must be a non-empty object of lever values"]
+    own = {lever["name"]: lever for lever in levers}
+    errors = []
+    for name, value in joint.items():
+        lever = own.get(name) or space.get(name)
+        if lever is None:
+            errors.append(f"{where}: 'joint_config': {name!r} is not one of its levers or a lever of an active hypothesis")
+        elif not warmstart.allowed(lever, value):
+            errors.append(f"{where}: 'joint_config': {json.dumps(value)} is not a valid value of {name!r}")
+    if not any(n in own and not _same(v, own[n]["default"]) for n, v in joint.items()):
+        errors.append(f"{where}: 'joint_config' must set at least one of its own levers away from default")
     return errors
 
 

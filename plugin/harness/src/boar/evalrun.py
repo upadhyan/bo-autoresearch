@@ -15,6 +15,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,9 @@ _TAIL_BYTES = 64 * 1024
 
 # How often a running trial looks for another eval of the same repo running alongside it.
 CONCURRENT_POLL_S = 2.0
+
+# A repeat's BOAR_DIAG_DIR larger than this keeps only its diag.json.
+DIAG_CAP_BYTES = 20 * 1024 * 1024
 
 
 class Interrupted(Exception):
@@ -461,6 +465,53 @@ def eval_environ() -> dict[str, str]:
     return env
 
 
+def _tree_bytes(path: Path) -> int:
+    total = 0
+    for dirpath, _, files in os.walk(path):
+        for name in files:
+            with contextlib.suppress(OSError):
+                total += os.lstat(os.path.join(dirpath, name)).st_size
+    return total
+
+
+def _keep_diag(tmp: Path, dest: Path, k: int) -> tuple[dict | None, str | None]:
+    """Move repeat k's BOAR_DIAG_DIR `tmp` to `dest`; returns (diag.json's numbers or None, a problem or None).
+
+    An empty directory leaves nothing behind. Over DIAG_CAP_BYTES only diag.json is kept. Diagnostics never
+    fail a trial, so every problem is returned, never raised.
+    """
+    problems = []
+    try:
+        if not any(tmp.iterdir()):
+            return None, None
+        size = _tree_bytes(tmp)
+        if size > DIAG_CAP_BYTES:
+            dest.mkdir(parents=True)
+            if (tmp / "diag.json").is_file() and not (tmp / "diag.json").is_symlink():
+                shutil.copyfile(tmp / "diag.json", dest / "diag.json")
+            problems.append(
+                f"repeat {k}: the diag dir held {size / 2**20:.1f} MB, over the {DIAG_CAP_BYTES // 2**20} MB cap; "
+                "kept only diag.json"
+            )
+        else:
+            shutil.move(str(tmp), str(dest))
+    except OSError as e:
+        problems.append(f"repeat {k}: the diag dir could not be saved ({e.strerror or e})")
+    values, why = None, None
+    diag = dest / "diag.json"
+    if diag.is_file():
+        try:
+            obj = json.loads(diag.read_text())
+        except (OSError, ValueError) as e:
+            why = f"repeat {k}: diag.json is not valid JSON ({_clip(str(e), 80)})"
+        else:
+            if not isinstance(obj, dict) or not all(_finite(v) is not None for v in obj.values()):
+                why = f"repeat {k}: diag.json must be a flat JSON object of finite numbers"
+            else:
+                values = obj
+    return values, "; ".join(problems + ([why] if why else [])) or None
+
+
 def run_trial(run: Run, config: dict, split: str, repeats: int, out_dir: Path, budget_s: float) -> dict:
     """Evaluate one config `repeats` times within a shared wall-clock budget.
 
@@ -484,6 +535,8 @@ def run_trial(run: Run, config: dict, split: str, repeats: int, out_dir: Path, b
     }
     values: list[float] = []
     per_repeat: list[dict] = []
+    diags: list[dict] = []
+    diag_errors: list[str] = []
     state, error = COMPLETE, _exe_problem(exe)
     start = time.monotonic()
     if error:
@@ -491,9 +544,21 @@ def run_trial(run: Run, config: dict, split: str, repeats: int, out_dir: Path, b
     else:
         for k in range(1, repeats + 1):
             remaining = budget_s - (time.monotonic() - start)
-            outcome, problem = (None, "timeout") if remaining <= 0 else _invoke(
-                exe, run.root, env, out_dir, k, remaining, run.eval_group_path
-            )
+            if remaining <= 0:
+                outcome, problem = None, "timeout"
+            else:
+                tmp = Path(tempfile.mkdtemp(prefix="boar-diag-"))
+                try:
+                    outcome, problem = _invoke(
+                        exe, run.root, {**env, "BOAR_DIAG_DIR": str(tmp)}, out_dir, k, remaining, run.eval_group_path
+                    )
+                    diag_values, diag_problem = _keep_diag(tmp, out_dir / f"diag-{k}", k)
+                finally:
+                    shutil.rmtree(tmp, ignore_errors=True)
+                if diag_values is not None:
+                    diags.append(diag_values)
+                if diag_problem:
+                    diag_errors.append(diag_problem)
             if problem:
                 state, error = FAILED, f"timeout after {budget_s:g}s" if problem == "timeout" else problem
                 break
@@ -509,6 +574,8 @@ def run_trial(run: Run, config: dict, split: str, repeats: int, out_dir: Path, b
         "metrics": _median_metrics(per_repeat),
         "duration_s": round(time.monotonic() - start, 3),
         "error": error,
+        "diagnostics": _median_metrics(diags),
+        "diag_error": "; ".join(diag_errors) or None,
     }
 
 

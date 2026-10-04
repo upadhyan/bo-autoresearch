@@ -122,7 +122,7 @@ def add_trials(run, r, n):
     start = len(run.trials()) + 1
     for t in range(start, start + n):
         run.append_trial({"trial": t, "round": r, "commit": "c", "config": {"a": 1, "b": 1}, "state": "complete",
-                          "metric": 1.0, "repeats": [1.0], "metrics": {}, "duration_s": 1.0, "error": None, "queued": None})
+                          "metric": 1.0, "repeats": [1.0], "metrics": {}, "duration_s": 1.0, "error": None, "queued": None, "diagnostics": {"obs": 1.0}})
     return list(range(start, start + n))
 
 
@@ -227,7 +227,7 @@ def test_round_tags_in_order(boar, env, repo, evalfake):
     assert out.startswith("[R3] Decide on: H1, H2") and str(run.summary_path(1)) in out
     boar("decide", "H1", "fix", "--reason", "crashes at 8", "--trials", ids[0])
     assert first(boar).startswith("[R3] Decide on: H2")
-    boar("decide", "H2", "keep", "--reason", "helps")
+    boar("decide", "H2", "keep", "--observable-key", "obs", "--reason", "helps")
     out = boar("next")[1]
     assert out.startswith("[R4] Propose new hypotheses") and "last round" not in out
     boar("propose", props(env, "c"))
@@ -245,8 +245,8 @@ def test_r5_lists_pending_removals(boar, env, repo, evalfake):
     run = to_round1(boar, env)
     add_trials(run, 1, 3)
     run.update_state(lambda s: s["rounds"]["1"].update(run_status="done"))
-    boar("decide", "H1", "remove", "--reason", "flat", "--trials", "1", "2", "3")
-    boar("decide", "H2", "keep", "--reason", "x")
+    boar("decide", "H1", "remove", "--observable-key", "obs", "--reason", "flat", "--trials", "1", "2", "3")
+    boar("decide", "H2", "keep", "--observable-key", "obs", "--reason", "x")
     boar("propose", "--none", "--reason", "nothing new")
     assert first(boar) == "[R5] Send the boar-reviewer agent: rm-H1-r1."
     boar("review", "record", "rm-H1-r1", "accept", "--reason", "flat across the range")
@@ -502,8 +502,8 @@ def test_r6_does_not_suggest_fix_in_the_last_round(boar, env, repo, evalfake):
     run = to_round1(boar, env, "--rounds", "1")
     add_trials(run, 1, 3)
     run.update_state(lambda s: s["rounds"]["1"].update(run_status="done"))
-    boar("decide", "H1", "remove", "--reason", "flat", "--trials", "1", "2", "3")
-    boar("decide", "H2", "keep", "--reason", "x")
+    boar("decide", "H1", "remove", "--observable-key", "obs", "--reason", "flat", "--trials", "1", "2", "3")
+    boar("decide", "H2", "keep", "--observable-key", "obs", "--reason", "x")
     boar("propose", "--none", "--reason", "last round")
     boar("review", "record", "rm-H1-r1", "reject", "--reason", "trial 3 crashed from a bug; calls for fix")
     out = boar("next")[1]
@@ -517,8 +517,8 @@ def test_r6_does_not_suggest_fix_for_a_hypothesis_superseded_this_round(boar, en
     run = to_round1(boar, env)
     add_trials(run, 1, 3)
     run.update_state(lambda s: s["rounds"]["1"].update(run_status="done"))
-    boar("decide", "H1", "remove", "--reason", "flat", "--trials", "1", "2", "3")
-    boar("decide", "H2", "keep", "--reason", "x")
+    boar("decide", "H1", "remove", "--observable-key", "obs", "--reason", "flat", "--trials", "1", "2", "3")
+    boar("decide", "H2", "keep", "--observable-key", "obs", "--reason", "x")
     boar("propose", props(env, "c", supersedes="H1"))
     boar("review", "record", "rm-H1-r1", "reject", "--reason", "a bug")
     boar("review", "record", "H3", "accept", "--reason", "ok")

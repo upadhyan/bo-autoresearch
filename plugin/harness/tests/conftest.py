@@ -19,9 +19,21 @@ import pytest
 
 TARGET_PY = '''\
 """Toy target: a cost with two real slow paths and one knob that does nothing."""
+import json
+import os
+
+
+def _diag(config):
+    """Counters for BOAR_DIAG_DIR: the passes made and the batch size used."""
+    where = os.environ.get("BOAR_DIAG_DIR")
+    if where:
+        batch = max(int(config.get("fast_b", 1)), int(config.get("fast_b_wide", 1)))
+        with open(os.path.join(where, "diag.json"), "w") as f:
+            json.dump({"passes": 2 if config.get("fast_a", False) else 3, "batch": batch}, f)
 
 
 def cost(config):
+    _diag(config)
     c = 100.0
     if config.get("fast_a", False):
         c -= 20.0
@@ -358,8 +370,13 @@ class Driver:
     def review(self, item: str, decision: str, reason: str = REASON) -> str:
         return self.ok("review", "record", item, decision, "--reason", reason)
 
-    def decide(self, hid: str, decision: str, reason: str = "keep it: too little evidence yet", trials=None) -> str:
+    def decide(
+        self, hid: str, decision: str, reason: str = "keep it: too little evidence yet", trials=None, key: str | None = "passes"
+    ) -> str:
+        """`key` is the observable key, passed with every decision but fix (the toy target measures `passes`)."""
         args = ["decide", hid, decision, "--reason", reason]
+        if key and decision != "fix":
+            args += ["--observable-key", key]
         if trials:
             args += ["--trials", ",".join(str(t) for t in trials)]
         return self.ok(*args)

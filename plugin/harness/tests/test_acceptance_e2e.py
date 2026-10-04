@@ -188,7 +188,7 @@ def test_full_scripted_run(driver):
     d.decide(ha, "keep", "fast_a=True trials beat the baseline by far more than the noise floor", trials=[1, 2])
     d.decide(hb, "keep")
     ids = [str(t["trial"]) for t in d.trials()]
-    d.ok("decide", hn, "remove", "--reason", REMOVAL_REASON, "--trials", ",".join(ids[:3]), *ids[3:6], ",".join(ids[6:]))
+    d.ok("decide", hn, "remove", "--observable-key", "passes", "--reason", REMOVAL_REASON, "--trials", ",".join(ids[:3]), *ids[3:6], ",".join(ids[6:]))
     st = d.state()
     removal = next(rm for rm in st["removals"] if rm["hypothesis"] == hn)
     assert removal["id"] == f"rm-{hn}-r2" and removal["verdict"] is None
@@ -231,7 +231,7 @@ def test_full_scripted_run(driver):
 
     for h in (ha, hb):
         d.decide(h, "keep")
-    d.refused("decide", hn, "keep", "--reason", "it is gone")
+    d.refused("decide", hn, "keep", "--observable-key", "passes", "--reason", "it is gone")
     d.refused("finalize")
     d.ok("propose", "--none", "--reason", "Both remaining hypotheses are converging.")
     d.close()
@@ -340,7 +340,7 @@ def test_run_finalizes_early_when_no_hypothesis_is_left(driver):
     d = driver.start("round1_run", **driver.SMALL)
     ids = [str(t["trial"]) for t in d.trials()]
     for lever in ("fast_a", "fast_b", "noop"):
-        d.ok("decide", d.hid(lever), "remove", "--reason", "no effect beyond the noise floor", "--trials", *ids)
+        d.ok("decide", d.hid(lever), "remove", "--observable-key", "passes", "--reason", "no effect beyond the noise floor", "--trials", *ids)
     d.ok("propose", "--none", "--reason", "Nothing left to try.")
     for rm in d.state()["removals"]:
         d.review(rm["id"], "accept", "The cited trials show no effect beyond the noise floor.")

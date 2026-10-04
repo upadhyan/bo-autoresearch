@@ -69,7 +69,15 @@ def _review_record(args: argparse.Namespace) -> int:
 
 def _decide(args: argparse.Namespace) -> int:
     trials = control.parse_trials(args.trials)
-    print(_with_next(control.decide(args.id, args.decision, args.reason, trials)))
+    print(_with_next(control.decide(
+        args.id, args.decision, args.reason, trials, observable_key=args.observable_key, cause=args.cause,
+        measure=args.measure, queue=args.queue,
+    )))
+    return 0
+
+
+def _diag_prune(args: argparse.Namespace) -> int:
+    print(_with_next(control.diag_prune()))
     return 0
 
 
@@ -181,12 +189,25 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--reason", required=True)
     t.set_defaults(func=_review_record)
 
-    s = sub.add_parser("decide", help="R3: keep|fix|remove an active hypothesis")
+    s = sub.add_parser("decide", help="R3: keep|fix|investigate|blocked|remove an active hypothesis")
     s.add_argument("id")
-    s.add_argument("decision", choices=["keep", "fix", "remove"])
-    s.add_argument("--reason", required=True)
+    s.add_argument("decision", choices=list(control.DECISIONS))
+    s.add_argument("--reason", help="required, except that investigate falls back to its --cause")
     s.add_argument("--trials", nargs="+", default=[], help="cited trial ids, space- or comma-separated")
+    s.add_argument(
+        "--observable-key", help="the diagnostic key that measures the hypothesis's observable (required on its first "
+        "decision other than fix)"
+    )
+    s.add_argument("--cause", help="investigate: the suspected cause the next round measures")
+    s.add_argument("--measure", nargs="+", default=[], help="investigate: diagnostic keys R1 adds, comma-separated")
+    s.add_argument("--queue", help="investigate: JSON list of at most 2 partial configs, one the hypothesis's off-state")
     s.set_defaults(func=_decide)
+
+    s = sub.add_parser("diag", help="`diag prune` (R6): delete all but diag.json from unprotected diagnostics dirs")
+    ds = s.add_subparsers(dest="diag_command", metavar="prune", required=True)
+    ds.add_parser(
+        "prune", help="keep diag.json; spare this round's trials, the incumbent's and every cited one"
+    ).set_defaults(func=_diag_prune)
 
     s = sub.add_parser("withdraw", help="drop a pending or accepted-but-inactive proposal")
     s.add_argument("id")

@@ -376,8 +376,12 @@ def propose(path: str | Path, start: Path | None = None) -> str:
         raise Refused(f"{path} is not valid JSON: {e}") from None
     with _editing(run) as (state, hyps):
         r = _propose_round(state, hyps)
-        active_ids = {h["id"] for h in store.active_hypotheses(hyps)}
-        errors = schema.validate(data, set(store.all_levers(hyps)), active_ids, allow_supersedes=r > 0)
+        active = store.active_hypotheses(hyps)
+        blocked = {h["id"] for h in active if (h["decisions"].get(str(r)) or {}).get("decision") == "blocked"}
+        errors = schema.validate(
+            data, set(store.all_levers(hyps)), {h["id"] for h in active}, allow_supersedes=r > 0, blocked_ids=blocked,
+            space=store.search_space(hyps),
+        )
         if errors:
             lines = "\n".join(f"  - {e}" for e in errors)
             raise Refused(f"{path} has {len(errors)} problem(s); nothing was added:\n{lines}")
@@ -397,11 +401,14 @@ def propose(path: str | Path, start: Path | None = None) -> str:
                     "citations": list(p.get("citations", [])),
                     "levers": [schema.normalize_lever(lever) for lever in p["levers"]],
                     "supersedes": p.get("supersedes"),
+                    "enables": p.get("enables"),
+                    "joint_config": p.get("joint_config"),
                     "verdict": None,
                     "activated_round": None,
                     "removed_round": None,
                     "removed_reason": None,
                     "withdrawn_reason": None,
+                    "observable_key": None,
                     "decisions": {},
                 }
             )
@@ -612,7 +619,7 @@ def _setup_bookkeeping(state: dict, hyps: list[dict], config: dict, waiting_befo
 
 
 def _proposal_view(h: dict) -> dict:
-    keys = ("id", "round", "statement", "mechanism", "source", "citations", "levers", "supersedes")
+    keys = ("id", "round", "statement", "mechanism", "source", "citations", "levers", "supersedes", "enables", "joint_config")
     return {k: h.get(k) for k in keys}
 
 
@@ -634,6 +641,12 @@ def _material(run: Run, state: dict, hyps: list[dict], item: str) -> list[str]:
         lines += ["hypothesis:", *_block(view), f"stated reason: {rm['reason']}", "cited trials (from trials.jsonl):"]
         lines += [f"  {json.dumps(by_id[t]) if t in by_id else f'trial {t}: not found'}" for t in rm["trials"]]
         lines.append(f"round summary (incumbent, noise floor, lever effects): {run.summary_path(rm['round'])}")
+        lines.append(f"observable key: {h.get('observable_key') or 'none'} (the observable itself is stated in {run.research_path})")
+        for rnd, dec in sorted(h["decisions"].items(), key=lambda kv: int(kv[0])):
+            if dec["decision"] == "investigate":
+                lines.append(f"investigated in round {rnd}: cause: {dec['cause']}; measured: {', '.join(dec['measure'])}")
+        dirs = [str(p) for t in rm["trials"] for p in sorted(run.trial_dir(t).glob("diag-*"))]
+        lines += ["diagnostics directories of the cited trials:", *(f"  {p}" for p in dirs or ["(none)"])]
         return lines
     h = store.hypothesis(hyps, item)
     where = "setup" if h["round"] == 0 else f"round {h['round']}"
@@ -644,6 +657,13 @@ def _material(run: Run, state: dict, hyps: list[dict], item: str) -> list[str]:
     lines += _block(_proposal_view(h))
     if h.get("supersedes"):
         lines.append(f"supersedes {h['supersedes']}; see it with `boar review show {h['supersedes']}`")
+    if h.get("enables"):
+        blocked = store.hypothesis(hyps, h["enables"])
+        dec = (blocked.get("decisions") or {}).get(str(h["round"])) or {}
+        by_id = {t["trial"]: t for t in run.trials()}
+        lines += [f"enables {blocked['id']}, decided blocked in round {h['round']}:", *_block(_proposal_view(blocked)),
+                  f"blocked because: {dec.get('reason')}", "trials that reason cites (from trials.jsonl):"]
+        lines += [f"  {json.dumps(by_id[t]) if t in by_id else f'trial {t}: not found'}" for t in dec.get("trials") or []]
     return lines
 
 
@@ -717,11 +737,116 @@ def parse_trials(tokens: list[str] | None) -> list[int]:
     return out
 
 
-def decide(hid: str, decision: str, reason: str | None, trials: list[int], start: Path | None = None) -> str:
+DECISIONS = ("keep", "fix", "investigate", "blocked", "remove")
+MAX_QUEUE = 2
+
+
+def round_size(cfg: dict, rec: dict) -> int:
+    """N trials, plus one for each extra config the round queued."""
+    return cfg["trials_per_round"] + len((rec.get("warm") or {}).get("queue") or [])
+
+
+def investigation(h: dict, r: int) -> dict | None:
+    """`h`'s round-`r` decision if it was investigate, else None."""
+    dec = (h.get("decisions") or {}).get(str(r)) or {}
+    return dec if dec.get("decision") == "investigate" else None
+
+
+def parse_names(tokens: list[str] | None) -> list[str]:
+    """Names given space- and/or comma-separated, deduplicated in order."""
+    out: list[str] = []
+    for tok in tokens or []:
+        for part in tok.replace(",", " ").split():
+            if part not in out:
+                out.append(part)
+    return out
+
+
+def _queue(path: str, h: dict, hyps: list[dict]) -> list[dict]:
+    """The --queue file's partial configs, checked against the current search space; refuses on any problem."""
+    from boar import warmstart
+
+    try:
+        data = json.loads(Path(path).read_text())
+    except OSError as e:
+        raise Refused(f"can't read {path}: {e.strerror or e}") from None
+    except json.JSONDecodeError as e:
+        raise Refused(f"{path} is not valid JSON: {e}") from None
+    if not isinstance(data, list) or not data or not all(isinstance(c, dict) for c in data):
+        raise Refused(f"{path} must hold a JSON list of partial lever configs (objects)")
+    if len(data) > MAX_QUEUE:
+        raise Refused(f"{path} queues {len(data)} configs; an investigation queues at most {MAX_QUEUE}")
+    space = store.search_space(hyps)
+    problems = []
+    for i, config in enumerate(data):
+        for name, value in config.items():
+            if name not in space:
+                problems.append(f"config[{i}]: {name!r} is not a lever of an active hypothesis")
+            elif not warmstart.allowed(space[name], value):
+                problems.append(f"config[{i}]: {json.dumps(value)} is not a valid value of {name!r}")
+    if problems:
+        raise Refused(f"{path} has {len(problems)} problem(s):\n" + "\n".join(f"  - {p}" for p in problems))
+    own = {lever["name"]: lever["default"] for lever in h["levers"]}
+    if not any(all(n in c and schema._same(c[n], v) for n, v in own.items()) for c in data):
+        listed = json.dumps(own, sort_keys=True)
+        raise Refused(f"{path} needs the off-state among its configs: one that sets {h['id']}'s levers to their defaults, {listed}")
+    return data
+
+
+def active_cap(config: dict, hyps: list[dict], r: int) -> int:
+    """How many hypotheses round `r`'s close may leave active: max_active, plus one per hypothesis blocked this round."""
+    blocked = [h for h in store.active_hypotheses(hyps) if (h["decisions"].get(str(r)) or {}).get("decision") == "blocked"]
+    return config["max_active"] + len(blocked)
+
+
+def over_cap(config: dict, hyps: list[dict], plan: dict, r: int) -> bool:
+    """Closing would activate proposals past the cap. A close that activates nothing never is: a run left over the
+    cap when a blocked slot lapses evicts nothing, it just activates nothing until it is back under."""
+    return bool(plan["activated"]) and len(plan["active_after"]) > active_cap(config, hyps, r)
+
+
+def r4_owed(state: dict, hyps: list[dict], r: int) -> list[str]:
+    """What R4 of round `r` still owes: a proposal superseding each investigated hypothesis resolved keep, and one
+    enabling each hypothesis decided blocked. `propose --none` settles both."""
+    if state["rounds"][str(r)].get("propose_none"):
+        return []
+    owed = []
+    for h in store.active_hypotheses(hyps):
+        decision = (h["decisions"].get(str(r)) or {}).get("decision")
+        if decision == "keep" and investigation(h, r - 1):
+            if not any(x["round"] == r and x.get("supersedes") == h["id"] for x in hyps):
+                owed.append(f"a proposal that supersedes {h['id']} (its investigation resolved keep)")
+        elif decision == "blocked":
+            if not any(x["round"] == r and x.get("enables") == h["id"] for x in hyps):
+                owed.append(f"a proposal that enables {h['id']} (decided blocked)")
+    return owed
+
+
+def diag_keys(trials: list[dict]) -> list[str]:
+    """Every diagnostic key some trial measured, sorted."""
+    return sorted({k for t in trials for k in (t.get("diagnostics") or {})})
+
+
+def decide(
+    hid: str, decision: str, reason: str | None, trials: list[int], start: Path | None = None,
+    observable_key: str | None = None, cause: str | None = None, measure: list[str] | None = None,
+    queue: str | None = None,
+) -> str:
     run = store.require_live_run(start)
+    if decision not in DECISIONS:
+        raise Refused(f"decision must be one of {', '.join(DECISIONS)}, got {decision!r}")
+    measured_now = parse_names(measure)
+    if decision != "investigate" and (cause or measured_now or queue):
+        raise Refused("--cause, --measure and --queue go with investigate only")
+    if decision == "investigate":
+        cause = (cause or "").strip()
+        if not cause:
+            raise Refused("investigate needs --cause: the suspected cause the next round measures")
+        if not measured_now:
+            raise Refused("investigate needs --measure: the diagnostic keys the next R1 adds")
+        if not (reason and reason.strip()):
+            reason = cause
     reason = _reason(reason)
-    if decision not in ("keep", "fix", "remove"):
-        raise Refused(f"decision must be keep, fix or remove, got {decision!r}")
     with _editing(run) as (state, hyps):
         if state["phase"] != ROUND:
             raise Refused(f"decide is for R3 of a round; now in {state['phase']}")
@@ -737,12 +862,53 @@ def decide(hid: str, decision: str, reason: str | None, trials: list[int], start
                 f"round {r} is the last round ({r}/{n_rounds}): no R1 follows to repair {hid}, and a fix would drop the "
                 "trials that set its levers from the final incumbent; decide keep and leave the bug for Caveats"
             )
+        if decision == "investigate":
+            if r >= n_rounds - 1:
+                raise Refused(
+                    f"round {r} is one of the last two rounds ({r}/{n_rounds}): an investigation needs a round to measure "
+                    "and a round after it to act on what it finds"
+                )
+            earlier = [s for s in (h.get("decisions") or {}) if int(s) < r and investigation(h, int(s))]
+            if earlier:
+                raise Refused(f"{hid} was investigated in round {earlier[0]}; a hypothesis gets one investigation")
+        probe = investigation(h, r - 1)
+        if decision == "blocked" and not probe:
+            raise Refused(
+                f"blocked resolves an investigation, and {hid} was not investigated in round {r - 1}; "
+                "investigate it first, or decide keep, fix or remove"
+            )
+        if probe and decision in ("keep", "blocked", "remove") and not trials:
+            raise Refused(
+                f"{hid} was investigated in round {r - 1}: cite the trials whose diagnostics resolve it "
+                f"({', '.join(probe['measure'])}) with --trials"
+            )
         if decision in ("fix", "remove") and not trials:
             raise Refused(f"{decision} needs --trials: cite the trial ids that show it")
-        known = {t["trial"] for t in run.trials()}
+        all_trials = run.trials()
+        known = {t["trial"] for t in all_trials}
         unknown = [t for t in trials if t not in known]
         if unknown:
             raise Refused(f"trial(s) {', '.join(map(str, unknown))} are not in this run's trials.jsonl")
+        if probe and decision in ("keep", "blocked", "remove"):
+            cited = diag_keys([t for t in all_trials if t["trial"] in trials])
+            missing = [k for k in probe["measure"] if k not in cited]
+            if missing:
+                raise Refused(
+                    f"no cited trial measured {', '.join(missing)}, which the round {r - 1} investigation of {hid} "
+                    f"named; cite trials that did, or decide fix if the instrumentation never wrote it"
+                )
+        measured = diag_keys(all_trials)
+        if observable_key is not None and observable_key not in measured:
+            raise Refused(
+                f"no trial measured diagnostic {observable_key!r} (measured: {_join(measured)}); the observable's "
+                "instrumentation must write it to diag.json in $BOAR_DIAG_DIR"
+            )
+        if observable_key is None and decision != "fix" and not h.get("observable_key"):
+            raise Refused(
+                f"{hid} has no observable key yet: its first decision other than fix binds the observable stated in "
+                f"research.md to the diagnostic that measures it, with --observable-key <key> (measured: {_join(measured)}). "
+                "If the instrumentation never wrote it, decide fix"
+            )
         rid = f"rm-{hid}-r{r}"
         old = next((rm for rm in state["removals"] if rm["id"] == rid), None)
         judged = ((old or {}).get("verdict") or {}).get("decision")
@@ -752,8 +918,10 @@ def decide(hid: str, decision: str, reason: str | None, trials: list[int], start
             raise Refused(
                 f"the reviewer rejected {rid} ({old['verdict']['reason']}); {hid} can't be proposed for removal "
                 f"again this round. Decide keep{'' if r >= n_rounds else ', or fix if the reason points to a bug'}"
+                f"{'' if r >= n_rounds - 1 else ', or investigate what the reason leaves open'}"
             )
         if decision == "remove":
+            _refuse_unpaired_removal(hyps, h, [t for t in all_trials if t["trial"] in trials])
             _refuse_final_removal(run, state, hyps, r, hid)
         # A judged removal stays on record (the report lists rejections); only a pending one is replaced.
         if judged is None:
@@ -764,15 +932,40 @@ def decide(hid: str, decision: str, reason: str | None, trials: list[int], start
             state["removals"].append(
                 {"id": rid, "hypothesis": hid, "round": r, "reason": reason, "trials": trials, "verdict": None}
             )
-        h["decisions"][str(r)] = {"decision": decision, "reason": reason, "trials": trials, "at": store.now_iso()}
+        record = {"decision": decision, "reason": reason, "trials": trials, "at": store.now_iso()}
+        if decision == "investigate":
+            record.update(cause=cause, measure=measured_now, queue=_queue(queue, h, hyps) if queue else [])
+        h["decisions"][str(r)] = record
+        if observable_key is not None:
+            h["observable_key"] = observable_key
     tail = {
         "keep": "stays active",
         "fix": "stays active; R1 of the next round repairs it",
+        "investigate": "stays active; R1 of the next round adds the measurements, and R2 runs any queued configs",
+        "blocked": "stays active; R4 proposes a hypothesis that enables it",
         "remove": f"pending removal {rid} needs a reviewer verdict",
     }[decision]
     note = "; replaced the pending removal" if old is not None and decision == "remove" else ""
     dropped = "; dropped the pending removal" if old is not None and decision != "remove" else ""
     return f"{hid}: {decision} (round {r}): {tail}{note}{dropped}"
+
+
+def _refuse_unpaired_removal(hyps: list[dict], h: dict, cited: list[dict]) -> None:
+    """An active enabler and the hypothesis it enables go only on a cited trial that moved both."""
+    partners = [x for x in store.active_hypotheses(hyps) if x.get("enables") == h["id"]]
+    if h.get("enables") and store.hypothesis(hyps, h["enables"])["status"] == ACTIVE:
+        partners.append(store.hypothesis(hyps, h["enables"]))
+    defaults = store.lever_defaults(hyps)
+
+    def moved(t: dict, x: dict) -> bool:
+        return any(lv["name"] in store.non_default(t["config"], defaults) for lv in x["levers"])
+
+    for x in partners:
+        if not any(moved(t, h) and moved(t, x) for t in cited):
+            raise Refused(
+                f"{h['id']} and {x['id']} are a blocked hypothesis and its enabler: cite a trial that set levers of "
+                f"both away from default (the joint trial, say) before removing either"
+            )
 
 
 def _refuse_final_removal(run: Run, state: dict, hyps: list[dict], r: int, hid: str) -> None:
@@ -961,11 +1154,8 @@ def round_run(foreground: bool, start: Path | None = None) -> str:
     frozen = eval_frozen(run, state)
     if frozen:
         problems.append(frozen)
-    n = len(store.active_hypotheses(hyps))
-    if n < 1:
+    if not store.active_hypotheses(hyps):
         problems.append("no hypothesis is active")
-    elif n > config["max_active"]:
-        problems.append(f"{n} hypotheses are active but max_active is {config['max_active']}")
     wrong = _require_branch(run, state)
     if wrong:
         problems.append(wrong)
@@ -976,6 +1166,70 @@ def round_run(foreground: bool, start: Path | None = None) -> str:
     return rounds.start_round(run, foreground)
 
 
+def close_problems(state: dict, hyps: list[dict], r: int) -> list[str]:
+    """Which of round `r`'s R2–R5 done-when conditions don't hold yet ([] once R6 may run)."""
+    rec = state["rounds"][str(r)]
+    if rec["run_status"] != "done":
+        return [f"R2: round {r} has not run; `boar round run`"]
+    problems = []
+    missing = undecided(hyps, r)
+    if missing:
+        problems.append(f"R3: no round {r} decision on {_join(missing)}; `boar decide`")
+    if not any(h["round"] == r for h in hyps) and not rec.get("propose_none"):
+        problems.append("R4: no proposal this round; `boar propose <file>` or `boar propose --none --reason …`")
+    else:
+        problems += [f"R4: {o}, or `boar propose --none --reason …`" for o in r4_owed(state, hyps, r)]
+    waiting = [h["id"] for h in hyps if h["round"] == r and awaiting_verdict(h)]
+    waiting += [rm["id"] for rm in state["removals"] if rm["round"] == r and rm.get("verdict") is None]
+    if waiting:
+        problems.append(f"R5: no verdict yet on {_join(waiting)}; send them to the boar-reviewer")
+    return problems
+
+
+def diag_prune(start: Path | None = None) -> str:
+    """R6: delete all but diag.json from the diagnostics directories of trials nothing protects."""
+    run = store.require_live_run(start)
+    with run.locked():
+        state, hyps = run.state(), run.hypotheses()
+        if state["phase"] != ROUND:
+            raise Refused(f"diag prune is for R6 of a round; now in {state['phase']}")
+        r = state["round"]
+        problems = close_problems(state, hyps, r)
+        if problems:
+            raise Refused(
+                "diag prune is for R6, once the reviewer has seen everything this round cites:\n"
+                + "\n".join(f"  - {p}" for p in problems)
+            )
+        trials = run.trials()
+        inc, _ = incumbent_after_close(run, state, hyps, r)
+        protected = {t["trial"] for t in trials if t["round"] == r} | set((inc or {}).get("trials") or [])
+        protected |= {n for h in hyps for dec in (h.get("decisions") or {}).values() for n in dec.get("trials") or []}
+        protected |= {n for rm in state["removals"] for n in rm["trials"]}
+        pruned, freed = 0, 0
+        for t in trials:
+            if t["trial"] in protected:
+                continue
+            gone = False
+            for diag in run.trial_dir(t["trial"]).glob("diag-*"):
+                for entry in diag.iterdir():
+                    if entry.name == "diag.json" and entry.is_file() and not entry.is_symlink():
+                        continue
+                    freed += _tree_size(entry)
+                    _rmtree(entry)
+                    gone = True
+            pruned += gone
+    return (
+        f"pruned {pruned} trial(s)' diagnostics directories, freeing {freed / 2**20:.1f} MB; diag.json is kept "
+        f"everywhere, and {len(protected)} protected trials (this round's, the incumbent's, every cited one) are untouched"
+    )
+
+
+def _tree_size(path: Path) -> int:
+    if path.is_symlink() or not path.is_dir():
+        return path.lstat().st_size
+    return sum(p.lstat().st_size for p in path.rglob("*") if not p.is_dir() or p.is_symlink())
+
+
 def round_close(start: Path | None = None) -> str:
     run = store.require_live_run(start)
     config = run.config()
@@ -984,19 +1238,7 @@ def round_close(start: Path | None = None) -> str:
             raise Refused(f"round close is R6 of a round; now in {state['phase']}")
         r = state["round"]
         rec = state["rounds"][str(r)]
-        problems = []
-        if rec["run_status"] != "done":
-            problems.append(f"R2: round {r} has not run; `boar round run`")
-        else:
-            missing = undecided(hyps, r)
-            if missing:
-                problems.append(f"R3: no round {r} decision on {_join(missing)}; `boar decide`")
-            if not any(h["round"] == r for h in hyps) and not rec.get("propose_none"):
-                problems.append("R4: no proposal this round; `boar propose <file>` or `boar propose --none --reason …`")
-            waiting = [h["id"] for h in hyps if h["round"] == r and awaiting_verdict(h)]
-            waiting += [rm["id"] for rm in state["removals"] if rm["round"] == r and rm.get("verdict") is None]
-            if waiting:
-                problems.append(f"R5: no verdict yet on {_join(waiting)}; send them to the boar-reviewer")
+        problems = close_problems(state, hyps, r)
         if problems:
             raise Refused(f"round {r} can't close yet:\n" + "\n".join(f"  - {p}" for p in problems))
         plan = plan_close(state, hyps, r)
@@ -1006,10 +1248,12 @@ def round_close(start: Path | None = None) -> str:
 
             before = warmstart.incumbent(run.trials(), hyps, r + 1, config["direction"])
             change = incumbent_change(before, incumbent_after_close(run, state, hyps, r)[0])
-        if len(plan["active_after"]) > config["max_active"]:
+        if over_cap(config, hyps, plan, r):
+            cap = active_cap(config, hyps, r)
+            lent = f" (plus {cap - config['max_active']} lent to blocked hypotheses)" if cap > config["max_active"] else ""
             raise Refused(
                 f"closing would leave {len(plan['active_after'])} hypotheses active but max_active is "
-                f"{config['max_active']}; withdraw accepted proposals ({_join(plan['activated'])}) with "
+                f"{config['max_active']}{lent}; withdraw accepted proposals ({_join(plan['activated'])}) with "
                 "`boar withdraw <id> --reason …` until it fits"
             )
         for hid, why in plan["removed"].items():
@@ -1074,7 +1318,7 @@ def finalize(foreground: bool, report: bool = False, start: Path | None = None) 
 # Headings write_report generates, each on a line of its own; a report without them is not the run's report.
 REPORT_SECTIONS = (
     "## 1. Result", "## 2. What worked", "## 3. What didn't", "## 4. Rejected by review", "## 5. Caveats",
-    "## 6. Experimental log",
+    "## 6. Experimental log", "## 7. Investigations",
 )
 REPORT_MISSING = "report.md is missing"
 

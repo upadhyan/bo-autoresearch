@@ -1,6 +1,6 @@
 {
   "name": "boar",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "BOAR (Bayesian Optimization AutoResearch): /boar runs an unattended research loop that turns a measurable improvement task into hypotheses, tunes their levers with Bayesian optimization against a frozen eval under independent review, and reports what worked.",
   "author": {
     "name": "Nakul Upadhya"

@@ -8,6 +8,7 @@ The eval turns a lever config into a metric value. It lives in `<run dir>/eval/`
   - `BOAR_CONFIG`: the path to a JSON file mapping every lever name to its value. It lists every lever ever defined, pinned ones at their default. `boar eval check` passes the defaults of the hypotheses proposed so far, possibly `{}`.
   - `BOAR_SPLIT`: `dev` or `holdout`.
   - `BOAR_RUN_DIR`: the run directory (informational).
+  - `BOAR_DIAG_DIR`: a fresh, empty temporary directory for the target's diagnostics. The eval leaves it in the target's environment and never reads it; see [Diagnostics](#diagnostics).
 - One invocation is one repeat. The harness repeats it `repeats` times per trial and takes the median.
 - The last non-empty line of stdout is a single JSON object:
 
@@ -42,6 +43,26 @@ The eval is frozen before most levers exist, so it handles the config genericall
 
 - The measuring code (timers, memory sampling, the metric computation, the guard checks) never reads `BOAR_CONFIG`. If the eval imports the target in-process, keep the measuring code in eval/ and let only the target's own modules call the reader.
 
+## Diagnostics
+
+The target code, not the eval, measures each hypothesis's observable. Instrumentation added in R1 writes a flat JSON object of numbers to `diag.json` in `$BOAR_DIAG_DIR`, and any other file it likes there, only when that variable is set:
+
+```python
+import json, os
+
+def diag(**values):
+    where = os.environ.get("BOAR_DIAG_DIR")
+    if where:
+        with open(os.path.join(where, "diag.json"), "w") as f:
+            json.dump(values, f)
+
+# at the end of the run:  diag(cache_hits=hits, passes=passes)
+```
+
+- The eval passes its environment through to the target process (the same inheritance that carries `BOAR_CONFIG`), so the variable reaches the target. Its timing, metric and guard code never read `BOAR_DIAG_DIR`, and diagnostics never affect the metric, the guards, the warm start or the incumbent.
+- The harness saves repeat k's directory as `trials/<n>/diag-<k>/`; a directory over 20 MB keeps only its `diag.json`. The trial's `diagnostics` are the per-key medians over its repeats; a `diag.json` that isn't a flat object of numbers sets the trial's `diag_error` and never fails the trial.
+- Instrumentation runs in scored trials and ships in the final code: counters, not profilers.
+
 ## Workloads
 
 - **Dev and holdout**: two disjoint sets of workloads, both drawn from the spec's target population. BO only ever sees dev; holdout is used once, at finalize. Store them in eval/ (for example `eval/data/dev/` and `eval/data/holdout/`) so they freeze with it, or generate them with a generator in eval/ from fixed seeds that differ between the splits.
@@ -58,4 +79,4 @@ The eval is frozen before most levers exist, so it handles the config genericall
 1. Run it by hand from the repo root, once per split, with a config file holding `{}`: `BOAR_CONFIG=<file> BOAR_SPLIT=dev <run dir>/eval/run`, then the same with `BOAR_SPLIT=holdout`. Confirm the last line parses, the guards pass, each invocation (holdout too) takes about `trial_target_s / repeats` and holdout's stays well under 3 × that, and `git status` shows nothing the runs wrote (delete anything they did: round 1's commit would sweep it onto the run branch).
 2. Run `boar eval check`: one baseline trial on dev that checks the contract, the guards at baseline, the timing, that the run left the repo and eval/ as they were (a file that was already uncommitted counts as written even when rewritten with the same bytes), and that no symlink leads out of eval/. It also warns about every untracked file it finds: round 1's commit sweeps those in, so delete any that an eval run wrote, such as a cache primed by a manual run. It runs in a detached worker; `boar wait` prints `finished: eval check PASS|FAIL …` with any problems (details in `eval_check.json` and `eval_check.log`). A pass sends the eval to review. Any later edit to eval/ needs a fresh passing check before the reviewer can accept it.
 
-The reviewer accepts the eval only when dev and holdout don't overlap and both are typical of the target population; the workloads (or their seeds and generator) and the guard references live inside eval/; it writes only to a temporary directory; the metric measures what the spec names; the eval's guards cover every guard in the spec; and the lever config reaches only the target code, never the code that does the measuring.
+The reviewer accepts the eval only when dev and holdout don't overlap and both are typical of the target population; the workloads (or their seeds and generator) and the guard references live inside eval/; it writes only to a temporary directory; the metric measures what the spec names; the eval's guards cover every guard in the spec; and the lever config reaches only the target code, never the code that does the measuring; and the eval passes its environment through, so `BOAR_DIAG_DIR` reaches the target, while its metric and guard code never read it.

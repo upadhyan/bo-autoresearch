@@ -331,6 +331,23 @@ def write_report(run: Run) -> Path:
                if log_rows else "No round ran.")
     out += ["", "Full log: [trials.jsonl](trials.jsonl). Round summaries: `rounds/<r>/summary.md`.", ""]
 
+    out += ["## 7. Investigations", ""]
+    rows = []
+    for h in hyps:
+        for key, dec in sorted((h.get("decisions") or {}).items(), key=lambda kv: int(kv[0])):
+            if dec["decision"] != "investigate":
+                continue
+            then = str(int(key) + 1)
+            resolved = (h.get("decisions") or {}).get(then)
+            rows.append([
+                h["id"], dec["cause"], ", ".join(dec["measure"]),
+                f"{control.decision_text(state, h, then)} (round {then})" if resolved else "unresolved",
+                resolved["reason"] if resolved else "—",
+            ])
+    out.append(md_table(["hypothesis", "cause", "measurements", "outcome", "reason"], rows) if rows
+               else "No hypothesis was investigated.")
+    out += [""]
+
     path = run.report_path
     store.write_text(path, "\n".join(out))
     return path

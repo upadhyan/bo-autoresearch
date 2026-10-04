@@ -144,7 +144,7 @@ def finish_round(run, r, n_trials=3, config=None):
     for n in ids:
         run.append_trial(
             {"trial": n, "round": r, "commit": "abc", "config": config or {}, "state": "complete", "metric": 1.0,
-             "repeats": [1.0], "metrics": {}, "duration_s": 1.0, "error": None, "queued": None}
+             "repeats": [1.0], "metrics": {}, "duration_s": 1.0, "error": None, "queued": None, "diagnostics": {"obs": 1.0}}
         )
 
     def done(s):
@@ -354,8 +354,8 @@ def test_propose_is_gated_to_setup_and_r4(boar, env, repo, evalfake):
     ids = finish_round(run, 1)
     code, _, err = boar("propose", p)
     assert code == 1 and "now in R3 (decide on H1, H2 first)" in err
-    boar("decide", "H1", "keep", "--reason", "helps")
-    boar("decide", "H2", "keep", "--reason", "unclear", "--trials", ids[0])
+    boar("decide", "H1", "keep", "--observable-key", "obs", "--reason", "helps")
+    boar("decide", "H2", "keep", "--observable-key", "obs", "--reason", "unclear", "--trials", ids[0])
     code, out, err = boar("propose", p)
     assert code == 0, err
     assert run.hypotheses()[-1]["round"] == 1 and "(round 1)" in out
@@ -369,8 +369,8 @@ def test_propose_none(boar, env, repo, evalfake):
     code, _, err = boar("propose", "--none", "--reason", "nothing")
     assert code == 1 and "now in R1" in err
     finish_round(run, 1)
-    boar("decide", "H1", "keep", "--reason", "x")
-    boar("decide", "H2", "keep", "--reason", "x")
+    boar("decide", "H1", "keep", "--observable-key", "obs", "--reason", "x")
+    boar("decide", "H2", "keep", "--observable-key", "obs", "--reason", "x")
     assert boar("propose", "--none", "--reason", "  ")[0] == 1
     assert boar("propose", "--none")[0] == 1
     code, _, err = boar("propose", "--none", "--reason", "results are clear")
@@ -387,8 +387,8 @@ def test_propose_none_refused_in_setup(boar, env, repo):
 def test_supersedes_in_r4_must_name_an_active_hypothesis(boar, env, repo, evalfake):
     run = to_round1(boar, env)
     finish_round(run, 1)
-    boar("decide", "H1", "keep", "--reason", "x")
-    boar("decide", "H2", "keep", "--reason", "x")
+    boar("decide", "H1", "keep", "--observable-key", "obs", "--reason", "x")
+    boar("decide", "H2", "keep", "--observable-key", "obs", "--reason", "x")
     code, _, err = boar("propose", write_props(env, prop("c", supersedes="H7")))
     assert code == 1 and "must name an active hypothesis" in err
     assert boar("propose", write_props(env, prop("c", supersedes="H2")))[0] == 0
@@ -574,39 +574,39 @@ def test_withdrawing_the_last_pending_proposal_counts_a_failed_batch(boar, env, 
 
 def test_decide_preconditions(boar, env, repo, evalfake):
     init(boar, env)
-    code, _, err = boar("decide", "H1", "keep", "--reason", "x")
+    code, _, err = boar("decide", "H1", "keep", "--observable-key", "obs", "--reason", "x")
     assert code == 1 and "decide is for R3 of a round; now in setup" in err
     boar("abort", "--reason", "x")
     git(repo, "checkout", "-q", "main")
     run = to_round1(boar, env)
-    code, _, err = boar("decide", "H1", "keep", "--reason", "x")
+    code, _, err = boar("decide", "H1", "keep", "--observable-key", "obs", "--reason", "x")
     assert code == 1 and "has not finished running" in err
     ids = finish_round(run, 1)
     code, _, err = boar("decide", "H1", "fix", "--reason", "crashed")
     assert code == 1 and "fix needs --trials" in err
-    code, _, err = boar("decide", "H1", "remove", "--reason", "no effect", "--trials", "99")
+    code, _, err = boar("decide", "H1", "remove", "--observable-key", "obs", "--reason", "no effect", "--trials", "99")
     assert code == 1 and "trial(s) 99 are not in this run" in err
-    code, _, err = boar("decide", "H1", "keep", "--reason", "x", "--trials", "1,x")
+    code, _, err = boar("decide", "H1", "keep", "--observable-key", "obs", "--reason", "x", "--trials", "1,x")
     assert code == 1 and "integers" in err
-    boar("decide", "H1", "keep", "--reason", "x")
-    boar("decide", "H2", "keep", "--reason", "x")
+    boar("decide", "H1", "keep", "--observable-key", "obs", "--reason", "x")
+    boar("decide", "H2", "keep", "--observable-key", "obs", "--reason", "x")
     boar("propose", write_props(env, prop("c")))
-    code, _, err = boar("decide", "H3", "keep", "--reason", "x", "--trials", ids[0])
+    code, _, err = boar("decide", "H3", "keep", "--observable-key", "obs", "--reason", "x", "--trials", ids[0])
     assert code == 1 and "H3 is not active (status pending)" in err
 
 
 def test_decide_remove_creates_a_pending_removal_and_keep_drops_it(boar, env, repo, evalfake):
     run = to_round1(boar, env)
     ids = finish_round(run, 1, n_trials=7)
-    code, out, err = boar("decide", "H1", "remove", "--reason", "flat", "--trials", "3,4", "7", "3")
+    code, out, err = boar("decide", "H1", "remove", "--observable-key", "obs", "--reason", "flat", "--trials", "3,4", "7", "3")
     assert code == 0, err
     assert "pending removal rm-H1-r1" in out
     (rm,) = run.state()["removals"]
     assert rm == {"id": "rm-H1-r1", "hypothesis": "H1", "round": 1, "reason": "flat", "trials": [3, 4, 7], "verdict": None}
     assert run.hypotheses()[0]["decisions"]["1"]["trials"] == [3, 4, 7]
-    boar("decide", "H1", "remove", "--reason", "flatter", "--trials", ids[0])
+    boar("decide", "H1", "remove", "--observable-key", "obs", "--reason", "flatter", "--trials", ids[0])
     assert [rm["reason"] for rm in run.state()["removals"]] == ["flatter"]
-    code, out, _ = boar("decide", "H1", "keep", "--reason", "on reflection, unclear")
+    code, out, _ = boar("decide", "H1", "keep", "--observable-key", "obs", "--reason", "on reflection, unclear")
     assert "dropped the pending removal" in out
     assert run.state()["removals"] == []
     assert run.hypotheses()[0]["decisions"]["1"]["decision"] == "keep"
@@ -615,14 +615,14 @@ def test_decide_remove_creates_a_pending_removal_and_keep_drops_it(boar, env, re
 def test_after_a_rejected_removal_the_hypothesis_can_be_marked_fix(boar, env, repo, evalfake):
     run = to_round1(boar, env)
     finish_round(run, 1)
-    boar("decide", "H1", "remove", "--reason", "flat", "--trials", "1", "2")
-    boar("decide", "H2", "keep", "--reason", "x")
+    boar("decide", "H1", "remove", "--observable-key", "obs", "--reason", "flat", "--trials", "1", "2")
+    boar("decide", "H2", "keep", "--observable-key", "obs", "--reason", "x")
     boar("propose", "--none", "--reason", "nothing new")
     boar("review", "record", "rm-H1-r1", "reject", "--reason", "implementation bug: this calls for fix")
     out = boar("next")[1]
     assert out.startswith("[R6]") and "rm-H1-r1 was rejected (implementation bug" in out and "boar decide H1 fix" in out
     assert "r1 remove (rejected)" in boar("status")[1], "a rejected removal left H1 active"
-    code, _, err = boar("decide", "H1", "remove", "--reason", "still flat", "--trials", "1")
+    code, _, err = boar("decide", "H1", "remove", "--observable-key", "obs", "--reason", "still flat", "--trials", "1")
     assert code == 1 and "the reviewer rejected rm-H1-r1" in err
     code, out, err = boar("decide", "H1", "fix", "--reason", "lever never applied", "--trials", "1", "2")
     assert code == 0, err
@@ -644,11 +644,11 @@ def test_decide_refuses_fix_in_the_last_round(boar, env, repo, evalfake):
     code, _, err = boar("decide", "H1", "fix", "--reason", "crashed", "--trials", "1")
     assert code == 1 and "round 1 is the last round (1/1): no R1 follows to repair H1" in err
     assert "1" not in run.hypotheses()[0]["decisions"]
-    boar("decide", "H1", "remove", "--reason", "flat", "--trials", "1", "2")
+    boar("decide", "H1", "remove", "--observable-key", "obs", "--reason", "flat", "--trials", "1", "2")
     boar("review", "record", "rm-H1-r1", "reject", "--reason", "a bug")
-    code, _, err = boar("decide", "H1", "remove", "--reason", "still flat", "--trials", "1")
+    code, _, err = boar("decide", "H1", "remove", "--observable-key", "obs", "--reason", "still flat", "--trials", "1")
     assert code == 1 and err.rstrip().endswith("Decide keep")
-    assert boar("decide", "H1", "keep", "--reason", "helps", "--trials", "1")[0] == 0
+    assert boar("decide", "H1", "keep", "--observable-key", "obs", "--reason", "helps", "--trials", "1")[0] == 0
 
 
 def _measured_round(run, r, points):
@@ -662,7 +662,7 @@ def _measured_round(run, r, points):
         ids.append(n)
         run.append_trial(
             {"trial": n, "round": r, "commit": "abc", "config": config, "state": "complete", "metric": metric,
-             "repeats": [metric, metric], "metrics": {}, "duration_s": 1.0, "error": None, "queued": None}
+             "repeats": [metric, metric], "metrics": {}, "duration_s": 1.0, "error": None, "queued": None, "diagnostics": {"obs": 1.0}}
         )
     run.update_state(lambda s: s["rounds"][str(r)].update(run_status="done", new_trials=ids))
 
@@ -671,7 +671,7 @@ def test_decide_refuses_a_last_round_removal_that_would_change_the_final_incumbe
     """A numeric lever is almost never sampled at its default: removing it would leave the baseline as the result."""
     run = to_round1(boar, env, "--rounds", "1")
     _measured_round(run, 1, [({"a": 3, "b": 5}, 2.0), ({"a": 7}, 9.0)])
-    code, _, err = boar("decide", "H1", "remove", "--reason", "no effect", "--trials", "2", "3")
+    code, _, err = boar("decide", "H1", "remove", "--observable-key", "obs", "--reason", "no effect", "--trials", "2", "3")
     assert code == 1 and "round 1 is the last round (1/1): an accepted removal of H1 pins its levers" in err, err
     assert 'would change from {"a": 3, "b": 5} metric 2 (trials 2) to the baseline metric 10 (trials 1)' in err
     assert err.rstrip().endswith("argue the lack of effect in the report's What didn't")
@@ -682,18 +682,18 @@ def test_decide_refuses_a_last_round_removal_that_would_change_the_final_incumbe
 def test_decide_allows_a_last_round_removal_that_keeps_the_final_incumbent(boar, env, repo, evalfake):
     run = to_round1(boar, env, "--rounds", "1")
     _measured_round(run, 1, [({"b": 5}, 2.0), ({"a": 7}, 9.0)])
-    code, out, err = boar("decide", "H1", "remove", "--reason", "no effect", "--trials", "3")
+    code, out, err = boar("decide", "H1", "remove", "--observable-key", "obs", "--reason", "no effect", "--trials", "3")
     assert code == 0 and "pending removal rm-H1-r1" in out, err
     # With H1's removal pending, removing H2 too would leave the baseline.
-    code, _, err = boar("decide", "H2", "remove", "--reason", "no effect", "--trials", "2")
+    code, _, err = boar("decide", "H2", "remove", "--observable-key", "obs", "--reason", "no effect", "--trials", "2")
     assert code == 1 and 'from {"b": 5} metric 2 (trials 2) to the baseline' in err, err
 
 
 def test_r6_and_round_close_warn_when_a_removal_moves_the_incumbent(boar, env, repo, evalfake):
     run = to_round1(boar, env, "--rounds", "2")
     _measured_round(run, 1, [({"a": 3, "b": 5}, 2.0), ({"b": 5}, 4.0)])
-    assert boar("decide", "H1", "remove", "--reason", "flat", "--trials", "2", "3")[0] == 0
-    boar("decide", "H2", "keep", "--reason", "helps")
+    assert boar("decide", "H1", "remove", "--observable-key", "obs", "--reason", "flat", "--trials", "2", "3")[0] == 0
+    boar("decide", "H2", "keep", "--observable-key", "obs", "--reason", "helps")
     boar("propose", "--none", "--reason", "nothing new")
     boar("review", "record", "rm-H1-r1", "accept", "--reason", "flat across the range")
     out = boar("next")[1]
@@ -707,7 +707,7 @@ def test_r6_and_round_close_warn_when_a_removal_moves_the_incumbent(boar, env, r
 def test_decide_refuses_to_change_an_accepted_removal(boar, env, repo, evalfake):
     run = to_round1(boar, env)
     finish_round(run, 1)
-    boar("decide", "H1", "remove", "--reason", "flat", "--trials", "1", "2")
+    boar("decide", "H1", "remove", "--observable-key", "obs", "--reason", "flat", "--trials", "1", "2")
     boar("review", "record", "rm-H1-r1", "accept", "--reason", "flat across the range")
     for decision in ("keep", "fix", "remove"):
         code, _, err = boar("decide", "H1", decision, "--reason", "x", "--trials", "1")
@@ -723,8 +723,8 @@ def test_withdraw_only_touches_pending_proposals(boar, env, repo, evalfake):
     code, _, err = boar("withdraw", "H1", "--reason", "x")
     assert code == 1 and "H1 is active" in err and "boar decide H1 remove" in err
     finish_round(run, 1)
-    boar("decide", "H1", "keep", "--reason", "x")
-    boar("decide", "H2", "keep", "--reason", "x")
+    boar("decide", "H1", "keep", "--observable-key", "obs", "--reason", "x")
+    boar("decide", "H2", "keep", "--observable-key", "obs", "--reason", "x")
     boar("propose", write_props(env, prop("c"), prop("d")))
     boar("review", "record", "H4", "reject", "--reason", "cheat")
     code, _, err = boar("withdraw", "H4", "--reason", "x")
@@ -766,12 +766,10 @@ def test_round_run_preconditions(boar, env, repo, evalfake, roundsfake):
     assert "eval/ has changed since the reviewer accepted it" in err
     assert f"lives on boar/{run.id} but main is checked out" in err
     assert roundsfake == []
+    # max_active is round close's to enforce: a run left over it when a blocked slot lapses still runs.
     edit_hyps(run, lambda hs: hs[-1].update(status="active"))
     evalfake["current"] = "h1"
     git(repo, "checkout", "-q", f"boar/{run.id}")
-    code, _, err = boar("round", "run")
-    assert code == 1 and "3 hypotheses are active but max_active is 2" in err
-    edit_hyps(run, lambda hs: hs.pop())
     code, out, err = boar("round", "run", "--foreground")
     assert code == 0, err
     assert out.strip() == "round started" and roundsfake == [True]
@@ -806,12 +804,12 @@ def test_round_close_lists_every_unmet_condition(boar, env, repo, evalfake):
     code, _, err = boar("round", "close")
     assert code == 1 and "R2: round 1 has not run" in err
     finish_round(run, 1)
-    boar("decide", "H1", "remove", "--reason", "flat", "--trials", "1", "2")
+    boar("decide", "H1", "remove", "--observable-key", "obs", "--reason", "flat", "--trials", "1", "2")
     code, _, err = boar("round", "close")
     assert code == 1
     assert "R3: no round 1 decision on H2" in err and "R4: no proposal this round" in err
     assert "R5: no verdict yet on rm-H1-r1" in err
-    boar("decide", "H2", "keep", "--reason", "x")
+    boar("decide", "H2", "keep", "--observable-key", "obs", "--reason", "x")
     boar("propose", write_props(env, prop("c")))
     code, _, err = boar("round", "close")
     assert code == 1 and "R3" not in err and "R4" not in err and "R5: no verdict yet on H3, rm-H1-r1" in err
@@ -821,9 +819,9 @@ def test_round_close_lists_every_unmet_condition(boar, env, repo, evalfake):
 def test_round_close_applies_removals_supersedes_and_activations(boar, env, repo, evalfake):
     run = to_round1(boar, env, names=(("a",), ("b",), ("x",)))
     finish_round(run, 1)
-    boar("decide", "H1", "remove", "--reason", "flat across 1..8", "--trials", "1", "2")
-    boar("decide", "H2", "keep", "--reason", "helps")
-    boar("decide", "H3", "remove", "--reason", "flat", "--trials", "3")
+    boar("decide", "H1", "remove", "--observable-key", "obs", "--reason", "flat across 1..8", "--trials", "1", "2")
+    boar("decide", "H2", "keep", "--observable-key", "obs", "--reason", "helps")
+    boar("decide", "H3", "remove", "--observable-key", "obs", "--reason", "flat", "--trials", "3")
     boar("propose", write_props(env, prop("b_wide", supersedes="H2"), prop("cheat")))
     boar("review", "record", "rm-H1-r1", "accept", "--reason", "wide spread, no effect")
     boar("review", "record", "rm-H3-r1", "reject", "--reason", "one point only")
@@ -851,8 +849,8 @@ def test_round_close_applies_removals_supersedes_and_activations(boar, env, repo
 def test_round_close_refuses_over_max_active(boar, env, repo, evalfake):
     run = to_round1(boar, env, "--max-active", "2")
     finish_round(run, 1)
-    boar("decide", "H1", "keep", "--reason", "x")
-    boar("decide", "H2", "keep", "--reason", "x")
+    boar("decide", "H1", "keep", "--observable-key", "obs", "--reason", "x")
+    boar("decide", "H2", "keep", "--observable-key", "obs", "--reason", "x")
     boar("propose", write_props(env, prop("c")))
     boar("review", "record", "H3", "accept", "--reason", "ok")
     code, _, err = boar("round", "close")
@@ -867,8 +865,8 @@ def test_round_close_refuses_over_max_active(boar, env, repo, evalfake):
 def test_last_round_close_moves_to_finalize(boar, env, repo, evalfake):
     run = to_round1(boar, env, "--rounds", "1")
     finish_round(run, 1)
-    boar("decide", "H1", "keep", "--reason", "x")
-    boar("decide", "H2", "keep", "--reason", "x")
+    boar("decide", "H1", "keep", "--observable-key", "obs", "--reason", "x")
+    boar("decide", "H2", "keep", "--observable-key", "obs", "--reason", "x")
     assert "This is the last round (1/1)" in boar("next")[1]
     boar("propose", "--none", "--reason", "last round")
     code, out, _ = boar("round", "close")
@@ -879,7 +877,7 @@ def test_last_round_close_moves_to_finalize(boar, env, repo, evalfake):
 def test_close_with_nothing_active_moves_to_finalize_early(boar, env, repo, evalfake):
     run = to_round1(boar, env, names=(("a",),))
     finish_round(run, 1)
-    boar("decide", "H1", "remove", "--reason", "flat", "--trials", "1")
+    boar("decide", "H1", "remove", "--observable-key", "obs", "--reason", "flat", "--trials", "1")
     boar("propose", "--none", "--reason", "nothing left")
     boar("review", "record", "rm-H1-r1", "accept", "--reason", "ok")
     code, out, _ = boar("round", "close")

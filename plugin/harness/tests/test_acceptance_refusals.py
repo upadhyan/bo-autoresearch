@@ -20,7 +20,7 @@ def test_round_run_refused_until_r5_is_complete(driver):
     d.refused("round", "run")
     d.decide(ha, "keep")
     d.decide(hb, "keep")
-    d.ok("decide", hn, "remove", "--reason", "no effect beyond the noise floor", "--trials", "1", "2")
+    d.ok("decide", hn, "remove", "--observable-key", "passes", "--reason", "no effect beyond the noise floor", "--trials", "1", "2")
     d.refused("round", "run")
     d.ok("propose", "--none", "--reason", "nothing new to try")
     assert d.tag() == "R5"
@@ -123,26 +123,26 @@ def test_propose_refuses_invalid_files_whole(driver):
 def test_decide_refusals(driver):
     d = driver.start("round1", **driver.SMALL)
     ha, hn, hc = d.hid("fast_a"), d.hid("noop"), d.hid("cache_output")
-    d.refused("decide", ha, "keep", "--reason", "before the round ran")
+    d.refused("decide", ha, "keep", "--observable-key", "passes", "--reason", "before the round ran")
     d.round_run()
-    d.refused("decide", hc, "keep", "--reason", "it was rejected")
-    d.refused("decide", "H99", "keep", "--reason", "no such hypothesis")
-    d.refused("decide", ha, "keep", "--reason", "cites a trial from nowhere", "--trials", "999")
-    d.refused("decide", ha, "remove", "--reason", "a removal must cite trials")
+    d.refused("decide", hc, "keep", "--observable-key", "passes", "--reason", "it was rejected")
+    d.refused("decide", "H99", "keep", "--observable-key", "passes", "--reason", "no such hypothesis")
+    d.refused("decide", ha, "keep", "--observable-key", "passes", "--reason", "cites a trial from nowhere", "--trials", "999")
+    d.refused("decide", ha, "remove", "--observable-key", "passes", "--reason", "a removal must cite trials")
     d.refused("decide", ha, "fix", "--reason", "a fix must cite trials")
     assert d.hyp(ha)["decisions"] == {}
     assert d.state()["removals"] == []
 
     d.decide(ha, "keep", trials=[1])
     d.decide(d.hid("fast_b"), "keep")
-    d.ok("decide", hn, "remove", "--reason", "no effect", "--trials", "1,2")
+    d.ok("decide", hn, "remove", "--observable-key", "passes", "--reason", "no effect", "--trials", "1,2")
     assert len(d.state()["removals"]) == 1
     d.decide(hn, "keep")
     assert d.state()["removals"] == [], "changing a remove to keep drops its pending removal"
-    d.ok("decide", hn, "remove", "--reason", "no effect after all", "--trials", "1", "2")
+    d.ok("decide", hn, "remove", "--observable-key", "passes", "--reason", "no effect after all", "--trials", "1", "2")
     d.ok("propose", "--none", "--reason", "nothing new")
     d.review(_removal_id(d, hn), "accept", "No effect within the noise floor.")
-    d.refused("decide", hn, "keep", "--reason", "too late: the removal has a verdict")
+    d.refused("decide", hn, "keep", "--observable-key", "passes", "--reason", "too late: the removal has a verdict")
 
 
 def test_finalize_refused_while_rounds_remain(driver):
@@ -159,7 +159,7 @@ def test_round_close_refused_over_max_active_until_withdraw(driver):
     d = driver.start("round1_run", proposals=[driver.prop_a(), driver.prop_cheat()], max_active=1, **driver.SMALL)
     ha = d.hid("fast_a")
     d.refused("round", "close")
-    d.ok("decide", ha, "remove", "--reason", "no effect", "--trials", "1", "2")
+    d.ok("decide", ha, "remove", "--observable-key", "passes", "--reason", "no effect", "--trials", "1", "2")
     hb, hn = d.propose(d.prop_b(), d.prop_noop())
     d.review(_removal_id(d, ha), "accept", "No effect within the noise floor.")
     d.review(hb, "accept")

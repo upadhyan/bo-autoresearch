@@ -76,7 +76,7 @@ def _wait_step(run: Run, state: dict, rec: dict) -> Step:
     else:
         r = rec.get("round", state["round"])
         done = sum(1 for t in run.trials() if t.get("round") == r)
-        progress = f"round {r}, {done}/{config['trials_per_round']} trials done"
+        progress = f"round {r}, {done}/{control.round_size(config, state['rounds'].get(str(r)) or {})} trials done"
     if not detached(rec):
         return Step(
             "WAIT",
@@ -213,17 +213,26 @@ def _round_step(run: Run, state: dict, hyps: list[dict], config: dict) -> Step:
     if rec["run_status"] == "not_started":
         new = [h for h in active if h.get("activated_round") == r]
         repair = [h for h in active if (h.get("decisions", {}).get(str(r - 1)) or {}).get("decision") == "fix"]
+        measure = [(h, control.investigation(h, r - 1)) for h in active if control.investigation(h, r - 1)]
         details = [f"new: {h['id']} ({', '.join(lv['name'] for lv in h['levers'])})" for h in new]
         details += [f"repair: {h['id']}: {h['decisions'][str(r - 1)]['reason']}" for h in repair]
+        details += [f"measure: {h['id']}: {', '.join(inv['measure'])} (cause: {inv['cause']})" for h, inv in measure]
+        if new:
+            details.append(
+                "Instrument each new hypothesis's observable (research.md): the target code writes it to diag.json in "
+                "$BOAR_DIAG_DIR, only when that variable is set."
+            )
         details += [
             "Every lever must read its value from the BOAR_CONFIG JSON the eval passes through; its default must "
             "reproduce baseline.",
             f"All changes go on branch {state['branch']}. `boar round run` commits them and starts "
             f"{config['trials_per_round']} trials in the background; then run `boar wait` until it finishes.",
         ]
-        if new or repair:
+        if new or repair or measure:
             what = f"Implement levers for: {', '.join(h['id'] for h in new) or 'none'}; repair: "
-            what += f"{', '.join(h['id'] for h in repair) or 'none'}; then `boar round run`."
+            what += f"{', '.join(h['id'] for h in repair) or 'none'}"
+            what += f"; measure: {', '.join(h['id'] for h, _ in measure)}" if measure else ""
+            what += "; then `boar round run`."
         else:
             what = "Nothing new to implement or repair; run `boar round run`."
         return Step("R1", what, details)
@@ -243,12 +252,36 @@ def _round_step(run: Run, state: dict, hyps: list[dict], config: dict) -> Step:
             "the trials that set its levers from the final incumbent; decide keep and leave the bug for Caveats."
             if last else "fix: a lever crashed or misbehaved through an implementation bug (R1 repairs it)."
         )
+        probes = [(h, control.investigation(h, r - 1)) for h in active if control.investigation(h, r - 1)]
+        choices = ["keep", *([] if last else ["fix"]), *(["investigate"] if r < config["rounds"] - 1 else []),
+                   *(["blocked"] if probes else []), "remove"]
+        unbound = [h["id"] for h in active if h["id"] in missing and not h.get("observable_key")]
+        diag = []
+        if unbound:
+            diag.append(
+                f"observable key: {', '.join(unbound)} have none yet; a first decision other than fix binds the "
+                "observable stated in research.md with --observable-key <diag key> (summary: Diagnostics)."
+            )
+        diag += [f"resolve: {h['id']} (investigated in round {r - 1}: {inv['cause']}; measured {', '.join(inv['measure'])})"
+                 for h, inv in probes if h["id"] in missing]
+        if probes:
+            diag.append(
+                "Resolve by what the measurements show: observable did not move -> fix; moved weakly or only at some "
+                "values -> keep, then supersede it in R4; moved but another quantity got worse -> blocked (R4 then "
+                "proposes an enabler); moved, nothing else changed, metric flat -> remove. Except for fix, cite trials "
+                "whose diagnostics hold every measured key."
+            )
+        if "investigate" in choices:
+            diag.append(
+                "investigate: the metric alone can't say why; --cause \"…\" --measure k1,k2 [--queue <json list of at "
+                "most 2 partial configs, one the off-state>] keeps it active one more round (once per hypothesis)."
+            )
         return Step(
             "R3",
-            f"Decide on: {', '.join(missing)} — `boar decide <id> {'keep|remove' if last else 'keep|fix|remove'} "
-            "--reason … --trials …`.",
+            f"Decide on: {', '.join(missing)} — `boar decide <id> {'|'.join(choices)} --reason … --trials …`.",
             [
                 f"Round summary: {run.summary_path(r)}",
+                *diag,
                 f"keep: it helps, or the evidence is not in yet. {fix} remove: trials that varied its levers show no "
                 "effect beyond the noise floor, or consistent harm (takes effect only if the reviewer accepts it)."
                 + (" In the last round a removal that would change the final incumbent is refused: the trials that "
@@ -257,11 +290,18 @@ def _round_step(run: Run, state: dict, hyps: list[dict], config: dict) -> Step:
                    "so the incumbent may move to one with its levers at default."),
             ],
         )
-    if not any(h["round"] == r for h in hyps) and not rec.get("propose_none"):
-        details = [
+    owed = control.r4_owed(state, hyps, r)
+    if (not any(h["round"] == r for h in hyps) and not rec.get("propose_none")) or owed:
+        details = [f"owed: {o}." for o in owed]
+        details += [
             'To retune a lever, propose a new hypothesis with "supersedes": "<id>" '
             "(for example, widen a range when the incumbent sits at its edge).",
         ]
+        if any("enables" in o for o in owed):
+            details.append(
+                'An enabler carries "enables": "<id>" and a "joint_config": a partial config (filled from the incumbent) '
+                "that sets at least one of its own levers away from default; the harness runs it when the enabler activates."
+            )
         if r >= config["rounds"]:
             details.append(
                 f"This is the last round ({r}/{config['rounds']}): new hypotheses would never run, and an accepted "
@@ -283,11 +323,11 @@ def _round_step(run: Run, state: dict, hyps: list[dict], config: dict) -> Step:
         )
     plan = control.plan_close(state, hyps, r)
     n = len(plan["active_after"])
-    if n > config["max_active"]:
+    if control.over_cap(config, hyps, plan, r):
         return Step(
             "R6",
             f"Closing would leave {n} hypotheses active but max_active is {config['max_active']}; withdraw "
-            f"{n - config['max_active']} accepted proposal(s) with `boar withdraw <id> --reason …`, then run "
+            f"{min(n - control.active_cap(config, hyps, r), len(plan['activated']))} accepted proposal(s) with `boar withdraw <id> --reason …`, then run "
             "`boar round close`.",
             [f"accepted: {', '.join(plan['activated'])}"],
         )

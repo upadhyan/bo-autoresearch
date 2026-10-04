@@ -14,7 +14,9 @@ A JSON list of hypotheses. The harness assigns each one its `id` (H1, H2, …), 
     "source": "research",
     "citations": ["work/profile.txt", "research.md#parse-stage"],
     "levers": [{"name": "parse_workers", "type": "int", "low": 1, "high": 8, "default": 1}],
-    "supersedes": null
+    "supersedes": null,
+    "enables": null,
+    "joint_config": null
   }
 ]
 ```
@@ -27,6 +29,8 @@ A JSON list of hypotheses. The harness assigns each one its `id` (H1, H2, …), 
 | `citations` | Where the evidence lives: research.md sections, files in `work/`, URLs, round summaries, trial ids. |
 | `levers` | One or more levers (below). |
 | `supersedes` | `null`, or the id of the active hypothesis this one replaces (R4 only; always `null` in setup). |
+| `enables` | `null`, or the id of a hypothesis decided `blocked` this round whose bottleneck this one relieves (R4 only). |
+| `joint_config` | With `enables` only: a partial lever config, filled from the incumbent, that sets at least one of this hypothesis's own levers away from default. The harness runs it as an extra trial in the round this hypothesis activates. |
 
 ## Levers
 
@@ -43,6 +47,7 @@ A JSON list of hypotheses. The harness assigns each one its `id` (H1, H2, …), 
 - **Realistic ranges.** Ranges stay within what the target population and the spec's deployment allow (worker counts up to the cores the deployment has, cache sizes inside the RAM guard). A range that only pays off on the eval's inputs is a cheat.
 - **Unique lever names.** Names are unique across the whole run, including rejected, withdrawn and removed hypotheses, and `boar propose` refuses a reused one. Prefix them with the mechanism (`parse_workers`, `parse_chunk_kb`), and give a re-proposal fresh names.
 - **Retuning uses `supersedes`.** To widen or shift a range, change a type, or rework a lever, propose a new hypothesis with `"supersedes": "<id>"` and fresh lever names. When it activates at round close, the old hypothesis is removed and its levers stay pinned at their defaults; in R1 the new levers take over the mechanism.
+- **An observable.** Each hypothesis's section in research.md has an **Observable:** line: what should measurably change in the target if the mechanism works, and in which direction. The reviewer rejects a proposal whose observable can't be measured. R1 instruments it, and the first R3 decision binds it to a diagnostic key.
 - **Budget.** At most `max_active` hypotheses (default 6) are active when a round starts, sharing `trials_per_round` trials (default 6). A few strong hypotheses beat many weak ones.
 
 `boar propose` refuses the whole file on any error and lists every error: fix them all and resubmit. On success it prints the assigned ids.

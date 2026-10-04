@@ -165,7 +165,7 @@ def test_round_1_runs_baseline_first_and_records_everything(run):
                for t in trials)
     assert all(t["state"] == "complete" and len(t["repeats"]) == 2 for t in trials)
     assert set(first) == {"trial", "round", "commit", "config", "state", "metric", "repeats", "metrics",
-                          "duration_s", "error", "queued"}
+                          "duration_s", "error", "queued", "diagnostics", "diag_error"}
 
     rec = run.state()["rounds"]["1"]
     head = git(run.root, "rev-parse", "HEAD")
@@ -175,7 +175,7 @@ def test_round_1_runs_baseline_first_and_records_everything(run):
     assert git(run.root, "branch", "--show-current") == f"boar/{RUN_ID}"
     assert rec["run_status"] == "done" and rec["new_trials"] == [1, 2, 3, 4]
     assert rec["warm"] == {"copied": 0, "excluded": {"rule1_state": 0, "rule2_outside_space": 0, "rule3_fixed": 0},
-                           "incumbent_config": None}
+                           "incumbent_config": None, "queue": []}
     defaults = store.lever_defaults(run.hypotheses())
     best = stats.incumbent(trials, defaults, "min")
     assert rec["incumbent_trial"] in best["trials"]
@@ -246,7 +246,7 @@ def test_round_2_warm_starts_from_round_1_and_requeues_the_incumbent(run):
     rounds.start_round(run, foreground=True)
     rec = run.state()["rounds"]["2"]
     inc = stats.incumbent(valid, defaults, "min")
-    assert rec["warm"] == {"copied": len(valid), "excluded": counts, "incumbent_config": inc["config"]}
+    assert rec["warm"] == {"copied": len(valid), "excluded": counts, "incumbent_config": inc["config"], "queue": []}
     round2 = [t for t in run.trials() if t["round"] == 2]
     assert len(round2) == 4 and [t["trial"] for t in round2] == [5, 6, 7, 8]
     assert round2[0]["queued"] == "incumbent"

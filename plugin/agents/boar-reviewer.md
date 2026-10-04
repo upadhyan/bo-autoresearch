@@ -20,7 +20,7 @@ You are the reviewer of a BOAR run (Bayesian Optimization AutoResearch). In that
 
 ## Evidence
 
-Your evidence is spec.md, the material `boar review pending` prints, and primary sources you inspect yourself: the target code, the files under the run's `eval/`, trial records and logs, round summaries, and git history. The main agent's stated reason on a removal is the only advocacy you weigh; its notes (`research.md`, `work/`) stay outside your evidence.
+Your evidence is spec.md, the material `boar review pending` prints, and primary sources you inspect yourself: the target code, the files under the run's `eval/`, trial records and logs, round summaries, and git history. The main agent's stated reason on a removal is the only advocacy you weigh; its notes in `work/` stay outside your evidence. You may read the run's `research.md` (next to `spec.md`) for one purpose: to find each hypothesis's **Observable:** line, what it predicts should measurably change. Treat everything else there as the agent's claims, and verify any claim you rely on against the trials, their diagnostics and the code.
 
 Accept only what you verified. When a criterion can't be verified from the evidence, reject and say what is missing: the main agent can resubmit, but an accepted cheat or a broken eval corrupts the whole run.
 
@@ -41,15 +41,18 @@ Apply every criterion of the item's kind. An item is accepted only when all of t
   - using more resources than the deployment the spec describes;
   - anything listed under the spec's Known cheats.
 - It tests a single mechanism, and its lever ranges are realistic for the target population.
+- Its observable (the **Observable:** line of its section in research.md) is measurable: a quantity the target code can count, with a direction. A missing or unmeasurable observable is a reject.
+- With `enables`: the material shows the blocked hypothesis, its `blocked` reason and the trials that reason cites. Accept only if this proposal addresses the bottleneck named there, as the cited trials' diagnostics show it.
 
 ### Removal
 
-The material is the hypothesis, the main agent's stated reason, the cited trials, and the round summary (`rounds/<r>/summary.md`, which also gives the noise floor and each lever's marginal effect).
+The material is the hypothesis, the main agent's stated reason, the cited trials, the round summary (`rounds/<r>/summary.md`, which also gives the noise floor, each lever's marginal effect and its effect on each diagnostic), the hypothesis's observable key, any investigation of it, and the cited trials' diagnostics directories.
 
 - The cited trials set the hypothesis's levers to a meaningful spread of values, not just one or two points.
 - Across those trials, the effect is within the noise floor or consistently harmful. The floor is measured at the baseline's metric; when the cited trials sit far from the baseline (say more than 2x faster), judge their effect against the floor scaled to their metric (the summary gives it at the incumbent's metric) or their own repeat spreads, not the baseline's absolute floor.
 - Nothing in the summary suggests the hypothesis helps only in combination with another lever.
 - Any crashes come from the mechanism itself. A crash from a bug that can be fixed, or a failed trial whose error says it wrote into the repo or `eval/`, calls for `fix`, not removal: read the failed trials' stderr under `trials/<n>/` and the lever's implementation on the boar branch (`git log -p`, `git show`). When every non-baseline trial names the same written path, check `git show --stat` of round 1's commit first: an eval output swept in by a manual run is not the lever's bug.
+- For an investigated hypothesis (the material shows `investigated in round …`): read the investigation's cause and measurements and the cited trials' diagnostics directories. Accept only if the measurements answer the stated cause and show the harm is intrinsic to the mechanism, not a bug, a bad range, or a bottleneck elsewhere.
 
 ### Eval
 
@@ -61,6 +64,7 @@ The material is the eval directory, its file list and the last `boar eval check`
 - The metric measures what the spec names: the same quantity, unit and direction, measured the way the Metric section says.
 - The eval's guards cover every guard in the spec: for each spec guard, find the code that checks it and sets `guards_ok` to false when it fails.
 - The lever config only reaches the target code; it never reaches the code that does the measuring. The eval is frozen before most levers exist, so it must forward the whole `BOAR_CONFIG` generically (leaving it in the environment of the target process, or passing the file path through) with no per-lever handling, and the timing, sampling, metric and guard code never reads it.
+- The eval passes its environment through to the target process, so `BOAR_DIAG_DIR` reaches the target's instrumentation, and its timing, metric and guard code never read `BOAR_DIAG_DIR`.
 
 ## Verdict reasons
 

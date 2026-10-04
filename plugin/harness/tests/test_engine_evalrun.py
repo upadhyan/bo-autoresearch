@@ -552,3 +552,49 @@ def test_restore_eval_puts_back_the_snapshot_and_keeps_what_was_written(run, tmp
     assert evalrun.eval_hash(run) == h
     assert (keep / "data" / "w.txt").read_text() == "tampered" and (keep / "cache.json").exists()
     assert os.access(run.eval_dir / "run", os.X_OK)
+
+
+# --- diagnostics: BOAR_DIAG_DIR -------------------------------------------------
+
+
+def test_each_repeat_gets_an_empty_diag_dir_outside_the_repo_saved_with_the_trial(run):
+    write_eval(run, COUNT + 'ls -A "$BOAR_DIAG_DIR" > "$BOAR_RUN_DIR/seen-$n"\necho "$BOAR_DIAG_DIR" >> "$BOAR_RUN_DIR/dirs"\n'
+               'echo "trace $n" > "$BOAR_DIAG_DIR/trace.txt"\n'
+               'echo "{\\"hits\\": $((n*10)), \\"misses\\": 4}" > "$BOAR_DIAG_DIR/diag.json"\n'
+               f"echo '{OK_LINE}'\n")
+    res = trial(run)
+    assert res["state"] == "complete"
+    assert res["diagnostics"] == {"hits": 20, "misses": 4} and res["diag_error"] is None
+    dirs = run.path("dirs").read_text().split()
+    assert len(set(dirs)) == 3 and not any(Path(d).resolve().is_relative_to(run.root.resolve()) for d in dirs)
+    assert all(run.path(f"seen-{n}").read_text() == "" for n in (1, 2, 3))
+    out = run.path("trials", "1")
+    assert (out / "diag-2" / "trace.txt").read_text() == "trace 2\n"
+    assert json.loads((out / "diag-3" / "diag.json").read_text()) == {"hits": 30, "misses": 4}
+    assert not any(Path(d).exists() for d in dirs)
+
+
+@pytest.mark.parametrize("diag", ['not json', '[1, 2]', '{\\"hits\\": \\"many\\"}', '{\\"nested\\": {\\"a\\": 1}}'])
+def test_a_malformed_diag_json_is_recorded_and_never_fails_the_trial(run, diag):
+    write_eval(run, f'echo "{diag}" > "$BOAR_DIAG_DIR/diag.json"\necho \'{OK_LINE}\'\n')
+    res = trial(run, repeats=2)
+    assert res["state"] == "complete" and res["metric"] == 2.5
+    assert res["diagnostics"] == {}
+    assert "repeat 1: diag.json" in res["diag_error"] and "repeat 2: diag.json" in res["diag_error"]
+
+
+def test_an_oversized_diag_dir_keeps_only_its_diag_json(run, monkeypatch):
+    monkeypatch.setattr(evalrun, "DIAG_CAP_BYTES", 1000)
+    write_eval(run, 'head -c 5000 /dev/zero > "$BOAR_DIAG_DIR/trace.bin"\necho \'{"hits": 3}\' > "$BOAR_DIAG_DIR/diag.json"\n'
+               f"echo '{OK_LINE}'\n")
+    res = trial(run, repeats=1)
+    assert res["state"] == "complete" and res["diagnostics"] == {"hits": 3}
+    assert "over the 0 MB cap; kept only diag.json" in res["diag_error"]
+    assert sorted(p.name for p in run.path("trials", "1", "diag-1").iterdir()) == ["diag.json"]
+
+
+def test_a_repeat_that_writes_no_diagnostics_leaves_no_diag_dir(run):
+    write_eval(run, f"echo '{OK_LINE}'\n")
+    res = trial(run, repeats=1)
+    assert res["diagnostics"] == {} and res["diag_error"] is None
+    assert not run.path("trials", "1", "diag-1").exists()
