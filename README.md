@@ -24,8 +24,12 @@ claude plugin install boar@bo-autoresearch
 Or, inside Claude Code: `/plugin marketplace add upadhyan/bo-autoresearch`, then
 `/plugin install boar@bo-autoresearch`.
 
-That's all. The plugin ships its harness, the `boar` CLI, and the first `/boar` sets it up with uv,
-which takes about a minute.
+
+To upgrade, 
+```sh
+claude plugin marketplace update bo-autoresearch
+claude plugin update boar@bo-autoresearch
+```
 
 ## Use
 
