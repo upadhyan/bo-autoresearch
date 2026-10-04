@@ -39,7 +39,7 @@ def run(tmp_path, monkeypatch) -> Run:
     git(tmp_path, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "empty")
     r = Run(root=tmp_path, id="run1")
     store.write_json(r.config_path, {"rounds": 2, "trials_per_round": 3, "repeats": 3, "trial_target_s": 5,
-                                     "holdout_repeats": 2, "max_active": 6, "seed": 0, "direction": "min"})
+                                     "holdout_repeats": 2, "seed": 0, "direction": "min"})
     store.write_json(r.hypotheses_path, [])
     return r
 

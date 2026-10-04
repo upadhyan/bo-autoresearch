@@ -527,25 +527,6 @@ def test_setup_waits_for_the_eval_and_every_verdict(boar, env, repo, evalfake):
     assert [h["status"] for h in run.hypotheses()] == ["active", "rejected"]
 
 
-def test_setup_over_max_active_waits_for_withdraw(boar, env, repo, evalfake):
-    run = init(boar, env, "--max-active", "1")
-    boar("propose", write_props(env, prop("a"), prop("b")))
-    boar("eval", "check", "--foreground")
-    boar("review", "record", "eval", "accept", "--reason", "ok")
-    boar("review", "record", "H1", "accept", "--reason", "ok")
-    code, out, _ = boar("review", "record", "H2", "accept", "--reason", "ok")
-    assert "2 proposals accepted but max_active is 1" in out
-    assert run.state()["phase"] == "setup"
-    code, out, _ = boar("next")
-    assert out.startswith("[S5] 2 proposals accepted but max_active is 1; withdraw 1")
-    code, out, err = boar("withdraw", "H2", "--reason", "lower priority")
-    assert code == 0, err
-    assert "setup complete: H1 active" in out
-    hyps = run.hypotheses()
-    assert hyps[1]["status"] == "withdrawn" and hyps[1]["withdrawn_reason"] == "lower priority"
-    assert run.state()["phase"] == "round"
-
-
 def test_failed_proposal_batches_are_counted_once_per_batch(boar, env, repo):
     run = init(boar, env)
     for attempt in range(1, 4):
@@ -559,14 +540,6 @@ def test_failed_proposal_batches_are_counted_once_per_batch(boar, env, repo):
         if attempt < 3:
             assert boar("next")[1].startswith(f"[S3] No hypothesis accepted (failed attempt {attempt}/3)")
     assert boar("next")[1].startswith("[ASK_USER] No hypothesis was accepted in 3 attempts")
-
-
-def test_withdrawing_the_last_pending_proposal_counts_a_failed_batch(boar, env, repo):
-    run = init(boar, env)
-    boar("propose", write_props(env, prop("a"), prop("b")))
-    boar("review", "record", "H1", "reject", "--reason", "no")
-    boar("withdraw", "H2", "--reason", "duplicate")
-    assert run.state()["setup_failed_batches"] == 1
 
 
 # --- decide -----------------------------------------------------------------------------------
@@ -715,24 +688,6 @@ def test_decide_refuses_to_change_an_accepted_removal(boar, env, repo, evalfake)
     assert run.reviews()[-1]["kind"] == "removal" and run.reviews()[-1]["round"] == 1
 
 
-# --- withdraw -----------------------------------------------------------------------------------
-
-
-def test_withdraw_only_touches_pending_proposals(boar, env, repo, evalfake):
-    run = to_round1(boar, env)
-    code, _, err = boar("withdraw", "H1", "--reason", "x")
-    assert code == 1 and "H1 is active" in err and "boar decide H1 remove" in err
-    finish_round(run, 1)
-    boar("decide", "H1", "keep", "--observable-key", "obs", "--reason", "x")
-    boar("decide", "H2", "keep", "--observable-key", "obs", "--reason", "x")
-    boar("propose", write_props(env, prop("c"), prop("d")))
-    boar("review", "record", "H4", "reject", "--reason", "cheat")
-    code, _, err = boar("withdraw", "H4", "--reason", "x")
-    assert code == 1 and "H4 is rejected" in err
-    assert boar("withdraw", "H3", "--reason", "redundant")[0] == 0
-    assert run.hypotheses()[2]["status"] == "withdrawn"
-
-
 # --- round run --------------------------------------------------------------------------------
 
 
@@ -756,7 +711,7 @@ def test_round_run_refused_in_setup(boar, env, repo, evalfake, roundsfake):
 
 
 def test_round_run_preconditions(boar, env, repo, evalfake, roundsfake):
-    run = to_round1(boar, env, "--max-active", "2")
+    run = to_round1(boar, env)
     edit_hyps(run, lambda hs: hs.append({**hs[0], "id": "H9", "status": "pending", "verdict": None, "levers": []}))
     evalfake["current"] = "changed"
     git(repo, "checkout", "-q", "main")
@@ -766,7 +721,7 @@ def test_round_run_preconditions(boar, env, repo, evalfake, roundsfake):
     assert "eval/ has changed since the reviewer accepted it" in err
     assert f"lives on boar/{run.id} but main is checked out" in err
     assert roundsfake == []
-    # max_active is round close's to enforce: a run left over it when a blocked slot lapses still runs.
+    # With H9 settled, the other problems fixed, the round runs.
     edit_hyps(run, lambda hs: hs[-1].update(status="active"))
     evalfake["current"] = "h1"
     git(repo, "checkout", "-q", f"boar/{run.id}")
@@ -846,20 +801,17 @@ def test_round_close_applies_removals_supersedes_and_activations(boar, env, repo
     assert "new: H4 (b_wide)" in out
 
 
-def test_round_close_refuses_over_max_active(boar, env, repo, evalfake):
-    run = to_round1(boar, env, "--max-active", "2")
+def test_round_close_activates_every_accepted_proposal(boar, env, repo, evalfake):
+    run = to_round1(boar, env)
     finish_round(run, 1)
     boar("decide", "H1", "keep", "--observable-key", "obs", "--reason", "x")
     boar("decide", "H2", "keep", "--observable-key", "obs", "--reason", "x")
     boar("propose", write_props(env, prop("c")))
     boar("review", "record", "H3", "accept", "--reason", "ok")
-    code, _, err = boar("round", "close")
-    assert code == 1 and "3 hypotheses active but max_active is 2" in err and "boar withdraw" in err
-    assert boar("next")[1].startswith("[R6] Closing would leave 3 hypotheses active but max_active is 2")
-    boar("withdraw", "H3", "--reason", "room")
     code, out, err = boar("round", "close")
     assert code == 0, err
     assert run.state()["round"] == 2
+    assert [h["status"] for h in run.hypotheses()] == ["active", "active", "active"]
 
 
 def test_last_round_close_moves_to_finalize(boar, env, repo, evalfake):
@@ -1035,19 +987,6 @@ def test_foreground_eval_check_holds_the_worker_slot(boar, env, repo, evalfake, 
     assert rec["pid"] == os.getpid() and rec["command"] == "eval check"
     assert code2 == 1 and "still running in the background" in err2
     assert run.running() is None and not run.running_path.exists()
-
-
-def test_withdrawing_an_unreviewed_batch_is_not_a_failed_attempt(boar, env, repo):
-    run = init(boar, env)
-    for attempt in range(1, 4):
-        boar("propose", write_props(env, prop(f"a{attempt}"), name=f"p{attempt}.json"))
-        code, out, _ = boar("withdraw", f"H{attempt}", "--reason", "typo; resubmitting")
-        assert code == 0 and "failed attempt" not in out
-    assert run.state()["setup_failed_batches"] == 0
-    assert boar("next")[1].startswith("[S3] No hypothesis accepted; propose")
-    boar("propose", write_props(env, prop("z"), name="pz.json"))
-    boar("review", "record", "H4", "reject", "--reason", "cheat")
-    assert run.state()["setup_failed_batches"] == 1
 
 
 # --- the eval freeze: a manifest and a copy, so a change can be named and undone -------------------

@@ -26,7 +26,7 @@ def hyp(hid: str, status: str, *levers: dict, decisions: dict | None = None, act
         "levers": list(levers), "supersedes": None,
         "verdict": {"decision": "accept", "reason": "ok", "at": "2026-10-02T00:00:00+00:00"},
         "activated_round": activated if status in ("active", "removed") else None,
-        "removed_round": None, "removed_reason": None, "withdrawn_reason": None,
+        "removed_round": None, "removed_reason": None,
         "decisions": {str(r): {"decision": d, "reason": "r", "trials": [1], "at": "2026-10-02T00:00:00+00:00"}
                       for r, d in (decisions or {}).items()},
     }

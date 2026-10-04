@@ -21,7 +21,7 @@ from typing import Any, Iterator
 from boar import config as cfgmod
 from boar import gitops, schema, store
 from boar.errors import Refused
-from boar.store import ABORTED, ACTIVE, DONE, FINALIZE, PENDING, REJECTED, REMOVED, ROUND, SETUP, WITHDRAWN, Run
+from boar.store import ABORTED, ACTIVE, DONE, FINALIZE, PENDING, REJECTED, REMOVED, ROUND, SETUP, Run
 
 REVIEW_HINT = 'boar review record <id> accept|reject --reason "<one paragraph>"'
 
@@ -407,7 +407,6 @@ def propose(path: str | Path, start: Path | None = None) -> str:
                     "activated_round": None,
                     "removed_round": None,
                     "removed_reason": None,
-                    "withdrawn_reason": None,
                     "observable_key": None,
                     "decisions": {},
                 }
@@ -545,9 +544,7 @@ def review_record(item: str, decision: str, reason: str | None, start: Path | No
             h["verdict"] = verdict
             if decision == "reject":
                 h["status"] = REJECTED
-                if h["round"] == 0:
-                    state["setup_batch_rejected"] = True
-        notes = _setup_bookkeeping(state, hyps, run.config(), waiting_before) if state["phase"] == SETUP else []
+        notes = _setup_bookkeeping(state, hyps, waiting_before) if state["phase"] == SETUP else []
     run.append_review(
         {"item": item, "kind": kind, "decision": decision, "reason": reason, "round": rnd, "at": verdict["at"]}
     )
@@ -585,33 +582,23 @@ def _copy_eval(src: Path, dst: Path) -> None:
         shutil.copytree(src, dst, symlinks=True, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
 
 
-def _setup_bookkeeping(state: dict, hyps: list[dict], config: dict, waiting_before: int) -> list[str]:
-    """Count a failed proposal batch, and start round 1 once setup's done-when holds.
-
-    A batch fails only if the reviewer rejected something in it: one the agent withdrew whole is a correction.
-    """
+def _setup_bookkeeping(state: dict, hyps: list[dict], waiting_before: int) -> list[str]:
+    """Count a failed proposal batch, and start round 1 once setup's done-when holds."""
     notes = []
     setup = [h for h in hyps if h["round"] == 0]
     waiting = sum(awaiting_verdict(h) for h in setup)
     acc = [h for h in setup if accepted(h)]
     if waiting_before and not waiting:
-        rejected = state.pop("setup_batch_rejected", False)
-        if setup and not acc and rejected:
+        if setup and not acc:
             state["setup_failed_batches"] += 1
             notes.append(f"no setup proposal was accepted (failed attempt {state['setup_failed_batches']}/3)")
     if state["eval"]["status"] == "accepted" and not waiting and acc:
-        if len(acc) > config["max_active"]:
-            notes.append(
-                f"{len(acc)} proposals accepted but max_active is {config['max_active']}; withdraw "
-                f"{len(acc) - config['max_active']} with `boar withdraw <id> --reason …` to start round 1"
-            )
-        else:
-            for h in acc:
-                h["status"] = ACTIVE
-                h["activated_round"] = 1
-            state["phase"], state["round"] = ROUND, 1
-            state["rounds"]["1"] = fresh_round()
-            notes.append(f"setup complete: {_join([h['id'] for h in acc])} active; round 1 begins")
+        for h in acc:
+            h["status"] = ACTIVE
+            h["activated_round"] = 1
+        state["phase"], state["round"] = ROUND, 1
+        state["rounds"]["1"] = fresh_round()
+        notes.append(f"setup complete: {_join([h['id'] for h in acc])} active; round 1 begins")
     return notes
 
 
@@ -791,18 +778,6 @@ def _queue(path: str, h: dict, hyps: list[dict]) -> list[dict]:
         listed = json.dumps(own, sort_keys=True)
         raise Refused(f"{path} needs the off-state among its configs: one that sets {h['id']}'s levers to their defaults, {listed}")
     return data
-
-
-def active_cap(config: dict, hyps: list[dict], r: int) -> int:
-    """How many hypotheses round `r`'s close may leave active: max_active, plus one per hypothesis blocked this round."""
-    blocked = [h for h in store.active_hypotheses(hyps) if (h["decisions"].get(str(r)) or {}).get("decision") == "blocked"]
-    return config["max_active"] + len(blocked)
-
-
-def over_cap(config: dict, hyps: list[dict], plan: dict, r: int) -> bool:
-    """Closing would activate proposals past the cap. A close that activates nothing never is: a run left over the
-    cap when a blocked slot lapses evicts nothing, it just activates nothing until it is back under."""
-    return bool(plan["activated"]) and len(plan["active_after"]) > active_cap(config, hyps, r)
 
 
 def r4_owed(state: dict, hyps: list[dict], r: int) -> list[str]:
@@ -990,26 +965,6 @@ def _refuse_final_removal(run: Run, state: dict, hyps: list[dict], r: int, hid: 
         f"{incumbent_label(after)}, with no round left to search again. Decide keep and argue the lack of effect "
         "in the report's What didn't"
     )
-
-
-# --- withdraw -----------------------------------------------------------------------
-
-
-def withdraw(hid: str, reason: str | None, start: Path | None = None) -> str:
-    run = store.require_live_run(start)
-    reason = _reason(reason)
-    with _editing(run) as (state, hyps):
-        h = store.hypothesis(hyps, hid)
-        if h["status"] != PENDING:
-            msg = f"{hid} is {h['status']}; only a pending proposal (awaiting review, or accepted but not yet active) can be withdrawn"
-            if h["status"] == ACTIVE:
-                msg += f"; to drop an active hypothesis, `boar decide {hid} remove …` and have the removal reviewed"
-            raise Refused(msg)
-        waiting_before = sum(awaiting_verdict(x) for x in hyps if x["round"] == 0)
-        h["status"] = WITHDRAWN
-        h["withdrawn_reason"] = reason
-        notes = _setup_bookkeeping(state, hyps, run.config(), waiting_before) if state["phase"] == SETUP else []
-    return "\n".join([f"withdrew {hid}", *notes])
 
 
 # --- round run / close, finalize --------------------------------------------------------
@@ -1248,14 +1203,6 @@ def round_close(start: Path | None = None) -> str:
 
             before = warmstart.incumbent(run.trials(), hyps, r + 1, config["direction"])
             change = incumbent_change(before, incumbent_after_close(run, state, hyps, r)[0])
-        if over_cap(config, hyps, plan, r):
-            cap = active_cap(config, hyps, r)
-            lent = f" (plus {cap - config['max_active']} lent to blocked hypotheses)" if cap > config["max_active"] else ""
-            raise Refused(
-                f"closing would leave {len(plan['active_after'])} hypotheses active but max_active is "
-                f"{config['max_active']}{lent}; withdraw accepted proposals ({_join(plan['activated'])}) with "
-                "`boar withdraw <id> --reason …` until it fits"
-            )
         for hid, why in plan["removed"].items():
             h = store.hypothesis(hyps, hid)
             h.update(status=REMOVED, removed_round=r, removed_reason=why)

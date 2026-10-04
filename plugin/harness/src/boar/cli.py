@@ -81,11 +81,6 @@ def _diag_prune(args: argparse.Namespace) -> int:
     return 0
 
 
-def _withdraw(args: argparse.Namespace) -> int:
-    print(_with_next(control.withdraw(args.id, args.reason)))
-    return 0
-
-
 def _round_run(args: argparse.Namespace) -> int:
     print(control.round_run(args.foreground))
     return 0
@@ -208,11 +203,6 @@ def build_parser() -> argparse.ArgumentParser:
     ds.add_parser(
         "prune", help="keep diag.json; spare this round's trials, the incumbent's and every cited one"
     ).set_defaults(func=_diag_prune)
-
-    s = sub.add_parser("withdraw", help="drop a pending or accepted-but-inactive proposal")
-    s.add_argument("id")
-    s.add_argument("--reason", required=True)
-    s.set_defaults(func=_withdraw)
 
     s = sub.add_parser("round", help="`round run` (R2) or `round close` (R6)")
     rs = s.add_subparsers(dest="round_command", metavar="run|close", required=True)

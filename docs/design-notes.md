@@ -15,9 +15,9 @@ Where the implementation deliberately differs from [design.md](../design.md), an
    polls the worker. `--foreground` runs the work inline. Re-running the same command resumes an
    interrupted worker. The worker runs from the run directory, so a target repo with its own `boar`
    module can't shadow the harness.
-3. **`boar withdraw`** (new). Without it, the `max_active` refusals at setup and at R6 would have no way
-   out, because an accepted proposal can't otherwise be dropped. It can't touch an active hypothesis:
-   removing one still needs a reviewed removal.
+3. **No active-hypothesis cap** (since 0.3.0). design.md once capped active hypotheses with `max_active`,
+   and `boar withdraw` dropped accepted proposals to fit under it. Both are gone: a count-based refusal
+   stalled unattended runs on proposals the reviewer had accepted. Pruning is left to reviewed removals.
 4. **`boar review pending` and `boar review show`** (new, read-only). The reviewer pulls its material from
    the harness: the proposal; the eval's directory, file list and last check; for a removal, the
    hypothesis, the stated reason, the cited trial rows and the summary path. That way the main agent can
@@ -90,9 +90,8 @@ Where the implementation deliberately differs from [design.md](../design.md), an
     is the baseline. The report flags a recommended config that failed or broke a guard on holdout, and calls
     a change within the noise floor "within noise" rather than better or worse.
 16. **Setup failures.** `S4` and `S3` say "failed attempt k/3". After 3 rejected evals or 3 batches with
-    no proposal accepted, `next` prints `ASK_USER`, which releases the hook. A batch counts as failed only if
-    the reviewer rejected something in it and accepted nothing; a batch the agent withdrew whole doesn't
-    count. After the third eval rejection, a new `eval check` returns the run to S4, and a fourth rejection
+    no proposal accepted, `next` prints `ASK_USER`, which releases the hook. A batch counts as failed when the
+    reviewer accepted nothing in it. After the third eval rejection, a new `eval check` returns the run to S4, and a fourth rejection
     asks again. `next` also prints `ASK_USER`
     when the state is inconsistent (setup complete but round 1 not started), so the agent can't loop
     forever.

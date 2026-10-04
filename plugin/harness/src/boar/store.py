@@ -47,7 +47,7 @@ TODO_MARKER = "<!-- boar:todo -->"
 
 # Hypothesis statuses. A hypothesis is `pending` until reviewed; an accepted
 # proposal stays `pending` (verdict accept) until activation.
-PENDING, ACTIVE, REJECTED, REMOVED, WITHDRAWN = "pending", "active", "rejected", "removed", "withdrawn"
+PENDING, ACTIVE, REJECTED, REMOVED = "pending", "active", "rejected", "removed"
 
 # Run phases.
 SETUP, ROUND, FINALIZE, DONE, ABORTED = "setup", "round", "finalize", "done", "aborted"

@@ -155,8 +155,8 @@ def test_finalize_refused_while_rounds_remain(driver):
     assert not (d.run_dir / "holdout.jsonl").exists()
 
 
-def test_round_close_refused_over_max_active_until_withdraw(driver):
-    d = driver.start("round1_run", proposals=[driver.prop_a(), driver.prop_cheat()], max_active=1, **driver.SMALL)
+def test_round_close_activates_every_accepted_proposal(driver):
+    d = driver.start("round1_run", proposals=[driver.prop_a(), driver.prop_cheat()], **driver.SMALL)
     ha = d.hid("fast_a")
     d.refused("round", "close")
     d.ok("decide", ha, "remove", "--observable-key", "passes", "--reason", "no effect", "--trials", "1", "2")
@@ -164,33 +164,11 @@ def test_round_close_refused_over_max_active_until_withdraw(driver):
     d.review(_removal_id(d, ha), "accept", "No effect within the noise floor.")
     d.review(hb, "accept")
     d.review(hn, "accept")
-    err = d.refused("round", "close")
-    assert "withdraw" in err
-    d.refused("withdraw", ha, "--reason", "active hypotheses leave only by reviewed removal")
-    assert d.state()["round"] == 1 and d.hyp(ha)["status"] == "active"
-
-    d.ok("withdraw", hn, "--reason", "keep round 2 focused on batching")
-    assert d.hyp(hn)["status"] == "withdrawn"
-    d.refused("withdraw", hn, "--reason", "already withdrawn")
     d.close()
     st = d.state()
     assert st["round"] == 2
-    assert d.hyp(ha)["status"] == "removed" and d.hyp(hb)["status"] == "active"
-
-
-def test_setup_waits_for_withdraw_when_too_many_are_accepted(driver):
-    d = driver.start("checked", proposals=[driver.prop_a(), driver.prop_b()], max_active=1, **driver.SMALL)
-    ha, hb = d.hid("fast_a"), d.hid("fast_b")
-    for item in (ha, hb, "eval"):
-        d.review(item, "accept")
-    assert d.state()["phase"] == "setup"
-    text = d.next()
-    assert d.tag_of(text) == "S5" and "withdraw" in text
-    d.refused("round", "run")
-    d.ok("withdraw", hb, "--reason", "max_active is 1")
-    st = d.state()
-    assert st["phase"] == "round" and st["round"] == 1
-    assert d.hyp(ha)["status"] == "active" and d.hyp(hb)["status"] == "withdrawn"
+    assert d.hyp(ha)["status"] == "removed"
+    assert d.hyp(hb)["status"] == "active" and d.hyp(hn)["status"] == "active"
 
 
 def test_init_refusals(driver, monkeypatch, tmp_path):

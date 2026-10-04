@@ -55,7 +55,7 @@ def hyp(hid: str, status: str, *levers: dict) -> dict:
         "mechanism": f"mechanism of {hid}", "source": "user", "citations": [], "levers": list(levers),
         "supersedes": None, "verdict": {"decision": "accept", "reason": "fine", "at": store.now_iso()},
         "activated_round": 1 if status == "active" else None, "removed_round": None,
-        "removed_reason": None, "withdrawn_reason": None, "decisions": {},
+        "removed_reason": None, "decisions": {},
     }
 
 
@@ -120,7 +120,7 @@ def run(tmp_path, monkeypatch) -> Run:
     monkeypatch.chdir(repo)
     r = Run(root=repo, id=RUN_ID)
     store.write_json(r.config_path, {"rounds": 3, "trials_per_round": 2, "repeats": 1, "trial_target_s": 5,
-                                     "holdout_repeats": 1, "max_active": 6, "seed": 0, "direction": "min"})
+                                     "holdout_repeats": 1, "seed": 0, "direction": "min"})
     r.spec_path.write_text("# Spec\n\n## Goal\nMake the toy cheaper.\n\n## Metric\nDirection: min\n")
     r.save_hypotheses([hyp("H1", "active", FAST_A), hyp("H2", "active", FAST_B), hyp("H3", "rejected", CHEAT)])
     r.save_state({

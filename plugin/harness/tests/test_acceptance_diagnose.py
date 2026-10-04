@@ -198,12 +198,12 @@ def test_r4_owes_a_supersede_after_a_keep_resolution_and_an_enabler_after_blocke
     assert d.next().startswith("[R5]")
 
 
-def test_a_blocked_pair_gets_an_extra_slot_and_its_joint_trial(driver):
-    d = driver.start("round1_run", **FOUR, max_active=3)
+def test_a_blocked_pair_gets_its_joint_trial(driver):
+    d = driver.start("round1_run", **FOUR)
     ha, _ = to_blocked(d)
     [he] = d.propose(enabler(d, ha, {"fast_b_wide": 8}))
     d.review(he, "accept")
-    out = d.close()  # 4 active against max_active 3: the blocked hypothesis lends a slot
+    out = d.close()
     assert "round 3 begins" in out and len([h for h in d.hyps() if h["status"] == "active"]) == 4
     d.round_run()
     round3 = d.trials(3)
@@ -211,14 +211,12 @@ def test_a_blocked_pair_gets_an_extra_slot_and_its_joint_trial(driver):
     joint = next(t for t in round3 if t["queued"] == f"joint {he}+{ha}")
     inc = d.state()["rounds"]["3"]["warm"]["incumbent_config"] or {}
     assert joint["config"] == {"fast_a": False, "fast_b": 1, "noop": False, "cache_output": False, **inc, "fast_b_wide": 8}
-    # The slot lapses at this close: nothing is evicted, but nothing new may activate until the run is under the cap.
     for hid in (ha, he, d.hid("fast_b"), d.hid("noop")):
         d.decide(hid, "keep", key="batch")
     [hx] = d.propose(d.proposal("One more idea", d.lever("extra_knob"), source="synthesis"))
     d.review(hx, "accept")
-    assert "max_active is 3" in d.refused("round", "close")
-    d.ok("withdraw", hx, "--reason", "no slot")
     assert "round 4 begins" in d.close()
+    assert len([h for h in d.hyps() if h["status"] == "active"]) == 5
     d.round_run()
 
 

@@ -187,14 +187,6 @@ def _setup_step(run: Run, state: dict, hyps: list[dict], config: dict) -> Step:
         )
     if stale:
         return Step("S4", recheck)
-    if len(acc) > config["max_active"]:
-        extra = len(acc) - config["max_active"]
-        return Step(
-            "S5",
-            f"{len(acc)} proposals accepted but max_active is {config['max_active']}; "
-            f"withdraw {extra} with `boar withdraw <id> --reason …`.",
-            [f"accepted: {', '.join(acc)}"],
-        )
     return Step(
         "ASK_USER",
         "Setup looks complete but round 1 has not started; the run state is inconsistent. Ask the user.",
@@ -322,15 +314,6 @@ def _round_step(run: Run, state: dict, hyps: list[dict], config: dict) -> Step:
             ["It reads them with `boar review pending` and records each verdict with `boar review record`."],
         )
     plan = control.plan_close(state, hyps, r)
-    n = len(plan["active_after"])
-    if control.over_cap(config, hyps, plan, r):
-        return Step(
-            "R6",
-            f"Closing would leave {n} hypotheses active but max_active is {config['max_active']}; withdraw "
-            f"{min(n - control.active_cap(config, hyps, r), len(plan['activated']))} accepted proposal(s) with `boar withdraw <id> --reason …`, then run "
-            "`boar round close`.",
-            [f"accepted: {', '.join(plan['activated'])}"],
-        )
     details = [f"removes {hid}: {why}" for hid, why in plan["removed"].items()]
     # A rejected removal leaves the hypothesis active and unrepaired unless the agent re-decides it.
     for rm in state["removals"]:

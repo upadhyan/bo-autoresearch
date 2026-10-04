@@ -12,12 +12,11 @@ DEFAULTS: dict[str, int] = {
     "repeats": 3,
     "trial_target_s": 600,
     "holdout_repeats": 6,
-    "max_active": 6,
     "seed": 0,
 }
 
 # Keys that must be at least 1. trials_per_round needs 2: one trial each round re-measures the incumbent.
-_POSITIVE = {"rounds", "trials_per_round", "repeats", "trial_target_s", "holdout_repeats", "max_active"}
+_POSITIVE = {"rounds", "trials_per_round", "repeats", "trial_target_s", "holdout_repeats"}
 _MINIMUM = {"trials_per_round": 2}
 # Optuna takes seeds in [0, 2**32); the engine reduces seed + round modulo 2**32, so keep the given one in range.
 _SEED_LIMIT = 2**32

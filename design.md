@@ -133,7 +133,7 @@ A hypothesis's first decision other than `fix` binds its observable to a diagnos
 
 **R5 Review.** The reviewer judges every new proposal and every removal from R3. Done when ⚙: every proposal and every removal has a verdict.
 
-**R6 Close** ⚙ `boar round close`. Applies the accepted removals. A hypothesis whose removal was rejected stays active. Activates the accepted proposals, removing any hypothesis they supersede. Refuses if activating them would leave more hypotheses active than `max_active` allows, plus one for each hypothesis decided `blocked` this round; closing with no activation never refuses, so a run left over the cap when a blocked slot lapses evicts nothing and activates nothing until it is back under. If rounds remain and at least one hypothesis is active, the next round starts at R1. Otherwise the run moves to finalize.
+**R6 Close** ⚙ `boar round close`. Applies the accepted removals. A hypothesis whose removal was rejected stays active. Activates every accepted proposal, removing any hypothesis they supersede. If rounds remain and at least one hypothesis is active, the next round starts at R1. Otherwise the run moves to finalize.
 
 ### Finalize
 
@@ -160,7 +160,7 @@ R3 judging a hypothesis on its effect on one metric can't tell a bad idea from a
 
 Except for `fix`, the decision cites trials, and every measured key appears in the diagnostics of at least one cited trial. `fix` is the way out when the instrumentation itself is broken. A `keep` resolution obliges R4 to propose a hypothesis that supersedes it, unless R4 runs `propose --none`.
 
-**Blocked.** Only as the resolution of an investigation, and not in the last round. It is never reviewed. The hypothesis stays active, and R4 must propose a hypothesis with `enables: <id>` and a `joint_config` (a partial config, filled from the incumbent; at least one of the enabler's own levers off default), unless R4 runs `propose --none`. When the enabler activates, the harness queues its joint config as an extra trial. While the pair waits, `max_active` rises by one: the slot lasts until the round after the block closes. If no enabler is accepted by then, the hypothesis is an ordinary one again. Once an enabler is active, neither it nor the hypothesis it enables can be removed unless a cited trial set at least one lever of each away from default.
+**Blocked.** Only as the resolution of an investigation, and not in the last round. It is never reviewed. The hypothesis stays active, and R4 must propose a hypothesis with `enables: <id>` and a `joint_config` (a partial config, filled from the incumbent; at least one of the enabler's own levers off default), unless R4 runs `propose --none`. When the enabler activates, the harness queues its joint config as an extra trial. If no enabler is accepted by the round after the block, the hypothesis is an ordinary one again. Once an enabler is active, neither it nor the hypothesis it enables can be removed unless a cited trial set at least one lever of each away from default.
 
 **Cleanup.** `boar diag prune`, allowed only in R6 once every R3–R5 done-when condition holds, deletes everything but `diag.json` from the diagnostics directories of trials nothing protects. Protected: the incumbent's trials, the current round's trials, and every trial cited by a decision or a removal.
 
@@ -223,7 +223,7 @@ The harness is a Python CLI called `boar`, and it depends on `optuna`. It doesn'
 | `review record <id> accept\|reject --reason …` | Stores a verdict on a proposal, removal or the eval | The item isn't pending |
 | `round run` | R2 | Setup isn't done or the previous round isn't closed; the eval hash changed; verdicts are pending |
 | `decide <id> keep\|fix\|investigate\|blocked\|remove --reason … --trials … [--observable-key k]` | Records an R3 decision; `remove` creates a pending removal; `investigate` also takes `--cause`, `--measure` and `--queue` | The hypothesis isn't active; a cited trial isn't in this run; any rule under [Diagnosis](#diagnosis) |
-| `round close` | R6 | Any of the R3–R5 done-when conditions isn't met; activations would leave more hypotheses active than the cap |
+| `round close` | R6 | Any of the R3–R5 done-when conditions isn't met |
 | `diag prune` | Deletes all but `diag.json` from unprotected diagnostics directories | Not in R6, or an R3–R5 done-when condition isn't met |
 | `finalize` | Holdout check and report skeleton | Rounds remain and a hypothesis is active |
 | `next [--hook]` | Prints the next thing the agent must do. With `--hook`, exits 2 while there is one | — |
@@ -325,7 +325,6 @@ This directory lives in the target repo and is gitignored.
 | `repeats` | 3 | Eval runs per trial |
 | `trial_target_s` | 600 | How long the agent designs a trial to take, counting all its repeats. A target, not a limit: `eval check` refuses a baseline trial over 2× this, and a trial still running at 3× it is killed as hung |
 | `holdout_repeats` | 6 | Runs of each config at finalize |
-| `max_active` | 6 | Hypotheses a round close may leave active when it activates proposals, plus one per hypothesis blocked that round. Only 6 new trials run per round, so more hypotheses than this spreads BO too thin, even with warm start |
 | `seed` | 0 | Sampler seed |
 
 With these defaults a round takes about an hour, and a run about 12 hours plus finalize.
