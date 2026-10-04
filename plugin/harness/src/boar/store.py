@@ -405,12 +405,19 @@ def pid_alive(pid: Any) -> bool:
         return False
     except PermissionError:
         return True
-    # A zombie child still answers kill(0); treat it as dead.
+    # A zombie child still answers kill(0); treat it as dead. /proc on Linux, ps where there is none (macOS).
     try:
         with open(f"/proc/{pid}/stat") as f:
             return f.read().split(") ", 1)[1][:1] != "Z"
-    except (OSError, IndexError):
+    except IndexError:
         return True
+    except OSError:
+        pass
+    try:
+        stat = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return bool(stat.strip()) and not stat.strip().startswith("Z")
 
 
 def active_run(start: Path | None = None) -> Run | None:

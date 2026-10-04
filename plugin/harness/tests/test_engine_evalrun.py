@@ -136,8 +136,10 @@ def test_hang_is_killed_with_its_whole_process_group(run):
 
 
 def test_repeats_share_one_budget(run):
-    write_eval(run, f"sleep 0.3\necho '{OK_LINE}'\n")
-    res = trial(run, repeats=3, budget=0.75)
+    # Two repeats take at most ~2.3s (each costs ~50ms over its sleep, the first eval in a process ~150ms more);
+    # three take at least 3s. The budget sits between with margin on both sides.
+    write_eval(run, f"sleep 1\necho '{OK_LINE}'\n")
+    res = trial(run, repeats=3, budget=2.6)
     assert res["state"] == "failed" and res["error"].startswith("timeout")
     assert len(res["repeats"]) == 2
 

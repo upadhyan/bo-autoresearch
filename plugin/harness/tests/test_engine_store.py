@@ -94,6 +94,16 @@ def test_storage_url_keeps_the_study_in_the_run_dir(tmp_path, name):
 # --- the worker slot ----------------------------------------------------------------------
 
 
+def test_an_unreaped_child_counts_as_dead():
+    """A zombie still answers kill(0); pid_alive must see through it with /proc or, without it (macOS), ps."""
+    child = subprocess.Popen(["true"])
+    deadline = time.monotonic() + 5
+    while store.pid_alive(child.pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not store.pid_alive(child.pid)
+    child.wait()
+
+
 def test_running_needs_the_recorded_process_not_just_a_live_pid(run, sleeper):
     other = sleeper()
     store.write_json(run.running_path, {"pid": other.pid, "command": "round run", "round": 1})
