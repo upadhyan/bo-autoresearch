@@ -24,6 +24,9 @@ last commit. For each variant it prints a table of median [IQR] over seeds:
   as in the harness. The `all` row is each run's total.
 - **re-measured**: trials whose config an earlier trial already measured.
 
+Each variant after the first also gets a table of its difference from the first on each seed, in the `all` row's
+regret and eval runs: the mean, a 95% bootstrap CI of the mean, and how many seeds came out lower, tied and higher.
+
 ## What is simulated
 
 A target like [`examples/toy`](../examples/toy) with levers of every type and a guard (`PROPOSALS`, `true_metric`),
