@@ -1,4 +1,5 @@
-"""#46: can re-measuring the top copied configs on a new commit detect drift, and does dropping what it contradicts help?
+"""#46: does re-measuring the top copied configs on a new commit detect drift, and does dropping what it
+contradicts help?
 
 docs/experiments/46-drift-check.md has the results. Run from the repo root:
 
@@ -26,7 +27,11 @@ DRIFT = [
     {"world": {"route": {"per_request": 4.5, "per_file": 0.2, "once": 0.6}}},  # per_file now beats once
     {"world": {"scale": 1.0}},  # a uniform speed-up: no reorder
 ]
-SCENARIOS = {"default": bench.SCENARIO, "drift": DRIFT}
+# The one real run's shape: 30 rounds, levers added early, no shift at all, and a new commit in 12 rounds (19 of its
+# 29 incumbent re-measures were on an unchanged commit).
+STEADY = [{"add": ["H1", "H2", "H3"]}, {"add": ["H4"]}, {"add": ["H5"]}, {"add": ["H6"]},
+          *([{}, {}, {"world": {}}] * 9)[:26]]
+SCENARIOS = {"default": bench.SCENARIO, "drift": DRIFT, "steady": STEADY}
 
 
 def worlds(scenario: list[dict], rounds: int) -> list[dict]:
@@ -38,7 +43,9 @@ def worlds(scenario: list[dict], rounds: int) -> list[dict]:
     return out
 
 
-def contradicted(earlier: list[dict], new: list[dict], floor: float | None, base: float | None) -> list[tuple[str, str]]:
+def contradicted(
+    earlier: list[dict], new: list[dict], floor: float | None, base: float | None
+) -> list[tuple[str, str]]:
     """The pairs of configs measured again in `new` whose order there goes against their pooled order over `earlier`,
     by more than the noise floor (scaled to the pair's earlier metric) on both sides. With no floor, any reversal."""
     before = stats.pooled(earlier, bench.DEFAULTS)
@@ -150,6 +157,15 @@ VARIANTS = {"harness": bench.Harness(), "recheck": Recheck(3), "drop-trials": Re
 NOISES = (0.0, 0.01, 0.02, 0.05, 0.1)
 
 
+def moved(runs: list[list[dict]], lever: str) -> str:
+    """How many sampled trials set `lever` away from its default, from the round bench.SCENARIO adds it in."""
+    hid = next(h for h, p in bench.PROPOSALS.items() if any(lv["name"] == lever for lv in p["levers"]))
+    first = next(r for r, step in enumerate(bench.SCENARIO, 1) if hid in step.get("add", []))
+    sampled = [t for run in runs for rec in run[first - 1:] for t in rec["trials"] if not t["queued"]]
+    off = sum(t["config"][lever] != bench.DEFAULTS[lever] for t in sampled)
+    return f"{off}/{len(sampled)} sampled trials from round {first} set {lever} away from its default"
+
+
 def _rates(checks: list[dict]) -> list[str]:
     def share(xs: list[dict], key: str) -> str:
         return f"{sum(c[key] for c in xs)}/{len(xs)}"
@@ -188,6 +204,7 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--variant", action="append", choices=sorted(VARIANTS),
                     help="repeat to compare with the first (default harness)")
     ap.add_argument("--detect", action="store_true", help="measure the check's detection accuracy instead")
+    ap.add_argument("--lever", help="also count the sampled trials that set this lever away from its default")
     args = ap.parse_args(argv)
     bench.SCENARIO = SCENARIOS[args.scenario]
     cfg = {"rounds": len(bench.SCENARIO), "trials_per_round": args.trials, "repeats": args.repeats}
@@ -203,6 +220,8 @@ def main(argv: list[str] | None = None) -> None:
             label, c = f"{name} at {args.base_trials} trials per round", {**cfg, "trials_per_round": args.base_trials}
         runs = [bench.simulate(VARIANTS[name], seed, c) for seed in range(args.seeds)]
         print(f"{label}: {args.seeds} seeds; median [IQR] over seeds\n\n{bench.report(runs)}\n")
+        if args.lever:
+            print(f"{label}: {moved(runs, args.lever)}\n")
         if base is None:
             base, base_label = runs, label
         else:

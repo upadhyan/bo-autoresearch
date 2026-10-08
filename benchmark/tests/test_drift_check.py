@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import itertools
 import random
+import re
 
 import bench
 import drift_check
@@ -26,8 +27,8 @@ def test_a_pair_is_contradicted_when_its_order_reverses_by_more_than_the_floor_o
                trial(3, 1, {"batch": 32}, [10.9, 10.9])]
     new = [trial(4, 2, {"batch": 2}, [12.0, 12.0], "incumbent"), trial(5, 2, {"batch": 8}, [10.5, 10.5], "recheck 1"),
            trial(6, 2, {"batch": 32}, [12.1, 12.1], "recheck 2")]
-    # A floor of 0.2 at a metric of 10 is 0.22 at 11. batch 2 and 8 swap by 1 and 1.5; batch 8 and 32 swap by 0.1
-    # earlier, within the floor; batch 2 and 32 keep their order.
+    # A floor of 0.2 at a metric of 10 is about 0.21 at 10.5-11. batch 2 and 8 swap by 1 and 1.5; batch 8 and 32
+    # swap by 0.1 earlier, within the floor; batch 2 and 32 keep their order.
     assert drift_check.contradicted(earlier, new, 0.2, 10.0) == [('{"batch": 2}', '{"batch": 8}')]
     # With no floor (repeats that never differ), any reversal counts.
     assert len(drift_check.contradicted(earlier, new, None, None)) == 2
@@ -63,7 +64,8 @@ def checked_round() -> tuple[list[dict], list[dict]]:
     hyps = hypotheses({"add": ["H1", "H2", "H3", "H4"]})
     trials = [trial(1, 1, {}, [13.0, 13.2], "baseline"), trial(2, 1, {"batch": 2}, [9.0, 9.0]),
               trial(3, 1, {"batch": 8}, [11.0, 11.0]), trial(4, 1, {"batch": 32}, [12.0, 12.0]),
-              trial(5, 2, {"batch": 2}, [12.0, 12.0], "incumbent"), trial(6, 2, {"batch": 8}, [10.5, 10.5], "recheck 1"),
+              trial(5, 2, {"batch": 2}, [12.0, 12.0], "incumbent"),
+              trial(6, 2, {"batch": 8}, [10.5, 10.5], "recheck 1"),
               trial(7, 2, {"batch": 32}, [12.6, 12.6], "recheck 2"), trial(8, 2, {"batch": 4}, [11.5, 11.5])]
     return trials, hyps
 
@@ -147,3 +149,36 @@ def test_the_command_line_measures_detection_over_noise_levels_and_configs_re_me
     assert [row[:2] for row in rows] == [[str(noise), str(n)] for noise in drift_check.NOISES for n in (2, 3, 4)]
     assert table_rows(out, f"By round, at noise {bench.NOISE} with 3 configs re-measured:")
     assert bench.NOISE == 0.02
+
+
+def test_the_steady_scenario_never_shifts_the_metric_and_commits_in_12_of_30_rounds():
+    assert len(drift_check.STEADY) == 30 and sum(map(bool, drift_check.STEADY)) == 12  # a non-empty step commits
+    assert drift_check.worlds(drift_check.STEADY, 30) == [bench.WORLD] * 30
+    assert [h for step in drift_check.STEADY for h in step.get("add", [])] == list(bench.PROPOSALS)
+
+
+class AsyncOn(bench.Harness):
+    """Sets prefetch_async on in every sampled trial once H6 is active."""
+
+    def backend(self, space, seed, n_startup):
+        backend = super().backend(space, seed, n_startup)
+        ask = backend.ask
+
+        def ask_on(n):
+            params, queued = ask(n)
+            return ({**params, "prefetch_async": True} if "prefetch_async" in space and not queued else params), queued
+
+        backend.ask = ask_on
+        return backend
+
+
+def test_the_command_line_counts_the_sampled_trials_that_move_a_lever_once_it_exists(monkeypatch, capsys):
+    monkeypatch.setattr(bench, "SCENARIO", bench.SCENARIO)
+    monkeypatch.setitem(drift_check.VARIANTS, "async-on", AsyncOn())
+    drift_check.main(["--scenario", "steady", "--seeds", "1", "--trials", "2", "--repeats", "1",
+                      "--variant", "harness", "--variant", "async-on", "--lever", "prefetch_async"])
+    out = capsys.readouterr().out
+    counts = dict(re.findall(r"^(\S+): (\d+/\d+) sampled trials from round 4 set prefetch_async away", out, re.M))
+    on, sampled = counts["async-on"].split("/")
+    assert on == sampled and int(sampled) > 30  # every sampled trial since H6 arrived, none from before
+    assert set(counts) == {"harness", "async-on"}
