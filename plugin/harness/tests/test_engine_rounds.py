@@ -724,12 +724,23 @@ def test_drift_is_judged_against_the_floor_from_earlier_rounds(run):
     assert facts["noise_floor"] == pytest.approx(0.2)
 
 
-def test_summary_says_why_there_is_no_floor_when_baseline_repeats_are_bit_identical(run):
-    for t in (_hand_trial(1, 1, {}, [100.0, 100.0], "baseline"), _hand_trial(2, 1, {"fast_a": True}, [80.0, 80.0])):
+def _bit_identical_baseline(run):
+    for t in (_hand_trial(1, 1, {}, [100.0, 100.0], "baseline"), _hand_trial(2, 1, {}, [100.0, 100.0]),
+              _hand_trial(3, 1, {}, [100.0, 100.3]), _hand_trial(4, 1, {"fast_a": True}, [80.0, 80.0])):
         run.append_trial(t)
+
+
+def test_summary_says_why_there_is_no_floor_when_baseline_repeats_are_bit_identical(run):
+    _bit_identical_baseline(run)
     summary = rounds.write_summary(run, 1).read_text()
-    assert ("## Noise floor\n\nNot known: every complete baseline trial with two or more dev repeats (trials 1) "
-            "returned the same metric bit for bit, so they measured no noise.\n") in summary
+    assert ("## Noise floor\n\nNot known: 2 of the 3 complete baseline trials with two or more dev repeats (trials "
+            "1, 2, 3) returned the same metric bit for bit, so their median spread is 0 and measures no noise.\n") in summary
+
+
+def test_report_says_why_there_is_no_floor_when_baseline_repeats_are_bit_identical(run):
+    _bit_identical_baseline(run)
+    report = finalize.write_report(run).read_text()
+    assert "- Noise floor: not known (2 of 3 baseline dev trials repeated bit for bit); holdout spread" in report
 
 
 def test_an_incumbent_that_breaks_a_guard_on_re_measurement_is_flagged_and_dethroned(run):

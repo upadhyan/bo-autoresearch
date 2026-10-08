@@ -56,8 +56,8 @@ Where the implementation deliberately differs from [design.md](../design.md), an
    gets `BOAR_REPEAT` (new), the repeat index, and the eval derives its seeds from it and `BOAR_SPLIT`, so a
    metric with no timing in it still spreads. An index rather than a random seed keeps a re-measurement
    reproducible and comparisons paired; the baseline and incumbent runs of one holdout pair share one.
-   The floor is also "not known" while every trial it is measured on has bit-identical repeats: a floor
-   of 0 would make the drift check a strict-equality test.
+   The floor is also "not known" while at least half the trials it is measured on have bit-identical
+   repeats: their median spread is 0, and a floor of 0 would make the drift check a strict-equality test.
    `eval check` warns when the baseline's repeats are bit-identical, and still passes: `config.json` is
    frozen at init, so a truly deterministic workload has no other way through.
 9. **The eval freeze is a hash, a manifest and a copy.** `eval check` records the hash it checked, and

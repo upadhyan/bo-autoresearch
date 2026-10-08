@@ -101,9 +101,10 @@ def test_noise_floor_is_median_within_trial_spread_of_baseline_trials():
     assert stats.noise_floor([trial(1, {}, [10, 12], state="infeasible")], DEFAULTS) is None
 
 
-def test_noise_floor_is_unknown_when_every_baseline_spread_is_zero():
+def test_noise_floor_is_unknown_when_the_median_spread_is_zero():
     """Bit-identical repeats measured no noise; a floor of 0 would make every difference an effect."""
     assert stats.noise_floor([trial(1, {}, [10, 10]), trial(2, {}, [11, 11, 11])], DEFAULTS) is None
+    assert stats.noise_floor([trial(1, {}, [10, 10]), trial(2, {}, [11, 11]), trial(3, {}, [12, 12.3])], DEFAULTS) is None
     assert stats.noise_floor([trial(1, {}, [10, 10]), trial(2, {}, [11, 11.5])], DEFAULTS) == 0.25
 
 

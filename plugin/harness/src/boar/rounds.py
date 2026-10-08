@@ -524,8 +524,9 @@ def write_summary(run: Run, r: int, facts: dict | None = None) -> Path:
     noise = f["noise_trials"]
     if f["noise_floor"] is None and noise:
         out.append(
-            f"Not known: every complete baseline trial with two or more dev repeats (trials "
-            f"{id_list([t['trial'] for t in noise])}) returned the same metric bit for bit, so they measured no noise."
+            f"Not known: {sum(stats.spread(t['repeats']) == 0 for t in noise)} of the {len(noise)} complete baseline "
+            f"trials with two or more dev repeats (trials {id_list([t['trial'] for t in noise])}) returned the same "
+            "metric bit for bit, so their median spread is 0 and measures no noise."
         )
     elif f["noise_floor"] is None:
         out.append("Not known yet: no complete baseline trial has two or more dev repeats.")

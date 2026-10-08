@@ -287,9 +287,14 @@ def write_report(run: Run) -> Path:
 
     out += ["## 5. Caveats", "", "Generated hints:", ""]
     out.append(f"- Incumbent vs baseline: {change['dev']} on dev, {change['holdout']} on holdout.")
+    noise = stats.noise_trials(trials, defaults)
+    floor_hint = (
+        f"not known ({sum(stats.spread(t['repeats']) == 0 for t in noise)} of {len(noise)} baseline dev trials "
+        "repeated bit for bit)" if floor is None and noise
+        else f"{fmt(floor)} (median within-trial repeat spread of {len(noise)} baseline dev trials)"
+    )
     out.append(
-        f"- Noise floor: {fmt(floor)} (median within-trial repeat spread of "
-        f"{len(stats.noise_trials(trials, defaults))} baseline dev trials); holdout spread "
+        f"- Noise floor: {floor_hint}; holdout spread "
         f"baseline {fmt(stats.spread(samples['holdout']['baseline']))}, incumbent {fmt(stats.spread(samples['holdout']['incumbent']))}."
     )
     drift = [r for r, rec in sorted(state.get("rounds", {}).items(), key=lambda kv: int(kv[0])) if rec.get("drift") == "yes"]
