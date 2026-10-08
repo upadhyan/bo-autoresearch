@@ -122,9 +122,10 @@ def noise_floor(trials: Iterable[dict], defaults: dict[str, Any]) -> float | Non
     """Median over baseline trials of each one's own repeat spread; None until one trial has two repeats.
 
     Within a trial, not across trials: pooling repeats from different rounds would fold machine drift
-    into the floor, and the drift check could then never fire.
+    into the floor, and the drift check could then never fire. Also None while the median spread is 0: at
+    least half those trials repeated bit for bit, and a floor of 0 would count every difference as an effect.
     """
-    return median(spread(t["repeats"]) for t in noise_trials(trials, defaults))
+    return median(spread(t["repeats"]) for t in noise_trials(trials, defaults)) or None
 
 
 def noise_base(trials: Iterable[dict], defaults: dict[str, Any]) -> float | None:

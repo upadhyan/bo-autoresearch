@@ -512,8 +512,12 @@ def _keep_diag(tmp: Path, dest: Path, k: int) -> tuple[dict | None, str | None]:
     return values, "; ".join(problems + ([why] if why else [])) or None
 
 
-def run_trial(run: Run, config: dict, split: str, repeats: int, out_dir: Path, budget_s: float) -> dict:
+def run_trial(
+    run: Run, config: dict, split: str, repeats: int, out_dir: Path, budget_s: float, first_repeat: int = 1
+) -> dict:
     """Evaluate one config `repeats` times within a shared wall-clock budget.
+
+    Repeat k (from 1) runs with BOAR_REPEAT = first_repeat + k - 1, the index the eval derives its seeds from.
 
     Returns {"state", "metric", "repeats", "metrics", "duration_s", "error"}. A guard failure stops
     the repeats (infeasible); a crash, non-zero exit, hang or contract violation stops them (failed).
@@ -549,8 +553,9 @@ def run_trial(run: Run, config: dict, split: str, repeats: int, out_dir: Path, b
             else:
                 tmp = Path(tempfile.mkdtemp(prefix="boar-diag-"))
                 try:
+                    repeat_env = {"BOAR_REPEAT": str(first_repeat + k - 1), "BOAR_DIAG_DIR": str(tmp)}
                     outcome, problem = _invoke(
-                        exe, run.root, {**env, "BOAR_DIAG_DIR": str(tmp)}, out_dir, k, remaining, run.eval_group_path
+                        exe, run.root, {**env, **repeat_env}, out_dir, k, remaining, run.eval_group_path
                     )
                     diag_values, diag_problem = _keep_diag(tmp, out_dir / f"diag-{k}", k)
                 finally:
@@ -667,6 +672,12 @@ def eval_check(run: Run) -> dict:
         warnings.append(
             f"tracked files with uncommitted changes (edited or deleted) that round 1's commit will record on the run "
             f"branch: {_names(tracked)}; restore any that an eval run changed (`git checkout -- <path>`)"
+        )
+    reps = trial["repeats"]
+    if len(reps) > 1 and stats.spread(reps) == 0:
+        warnings.append(
+            f"the baseline's {len(reps)} repeats returned the same metric bit for bit, so the noise floor stays "
+            "unknown; unless the workload is truly deterministic, derive its seeds from BOAR_SPLIT and BOAR_REPEAT"
         )
     result = {
         "ok": not problems, "hash": before, "manifest": before_manifest, "problems": problems, "warnings": warnings,

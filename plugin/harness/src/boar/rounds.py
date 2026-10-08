@@ -495,7 +495,10 @@ def write_summary(run: Run, r: int, facts: dict | None = None) -> Path:
         )
     out += ["", "## Noise floor", ""]
     if f["noise_floor"] is None:
-        out.append("Not known yet: no complete baseline trial has two or more dev repeats.")
+        out.append(
+            "Not known yet: no complete baseline trial has two or more dev repeats, or at least half of them "
+            "repeated bit for bit."
+        )
     else:
         noise = f["noise_trials"]
         out.append(
