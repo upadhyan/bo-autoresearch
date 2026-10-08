@@ -42,6 +42,13 @@ class Baseline(bench.Harness):
         return Fixed({name: lever["default"] for name, lever in space.items()})
 
 
+class Best(bench.Harness):
+    """Measures the best config at the first commit in every trial."""
+
+    def backend(self, space, seed, n_startup):
+        return Fixed({name: value for name, value in bench.best_config(bench.WORLD).items() if name in space})
+
+
 def test_the_scenarios_proposals_pass_the_harness_schema():
     assert schema.validate(list(bench.PROPOSALS.values()), set(), set(), allow_supersedes=False) == []
 
@@ -90,6 +97,20 @@ def test_each_round_warm_starts_from_the_trials_the_harness_rules_keep():
         assert set(warm) <= set(earlier) and len(warm) == len(earlier) - sum(rec["excluded"].values())
 
 
+class Cold(KeepsStudies):
+    """README.md's variant: no warm start."""
+
+    def warm(self, trials, hyps, r):
+        valid, excluded, incumbent = super().warm(trials, hyps, r)
+        return [], excluded, incumbent
+
+
+def test_a_variant_turns_off_the_warm_start_by_overriding_warm():
+    variant = Cold()
+    run(variant=variant)
+    assert not any(t.user_attrs.get("warm") for study in variant.studies for t in study.trials)
+
+
 def test_the_incumbent_is_measured_again_only_on_a_new_commit():
     rounds = run()
     r4, r5 = rounds[3], rounds[4]
@@ -125,6 +146,10 @@ def test_regret_and_cost_of_a_run_that_only_measures_the_baseline():
         [10.1, 11.7, *[1.1 * (11.7 + gc)] * 3, 1.1 * (11.8 + gc)], rel=1e-6)
     assert [rec["runs"] for rec in rounds] == [8] * 6  # 4 trials of 2 repeats
     assert [rec["remeasured"] for rec in rounds] == [3, 4, 4, 4, 4, 4]
+
+
+def test_regret_scores_the_incumbent_after_the_round():
+    assert run(variant=Best())[0]["regret"] == 0  # the incumbent before round 1, the baseline, loses 10.1
 
 
 def test_a_crash_or_a_broken_guard_stops_the_repeats():
