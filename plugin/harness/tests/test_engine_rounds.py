@@ -288,6 +288,22 @@ def test_the_incumbent_is_measured_again_only_on_a_new_commit(run):
     assert "Re-measured this round (incumbent)" in run.summary_path(3).read_text()
 
 
+def test_a_config_that_failed_on_the_rounds_commit_runs_again(run):
+    write_eval(run, crash="not cfg['fast_a'] and cfg['fast_b'] == 1")  # the baseline fails
+    accept_eval(run)
+    rounds.start_round(run, foreground=True)
+    base = run.trials()[0]
+    assert base["queued"] == "baseline" and base["state"] == "failed"
+    close_round(run, 1, {"H1": "investigate", "H2": "keep"})
+    hyps = run.hypotheses()
+    hyps[0]["decisions"]["1"].update(cause="c", measure=[], queue=[{"fast_a": False, "fast_b": 1}])
+    run.save_hypotheses(hyps)
+    rounds.start_round(run, foreground=True)  # the same commit
+    reran = [t for t in run.trials() if t["round"] == 2 and t["queued"] and t["config"] == base["config"]]
+    assert len(reran) == 1 and reran[0]["state"] == "failed" and reran[0]["commit"] == base["commit"]
+    assert base["trial"] not in run.state()["rounds"]["2"]["warm"]["same_as"].values()
+
+
 def _interrupt_after(monkeypatch, n_ok: int):
     """Make the (n_ok+1)-th eval trial raise Interrupted; returns a function that restores run_trial."""
     real = evalrun.run_trial
