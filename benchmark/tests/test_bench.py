@@ -346,3 +346,32 @@ def test_first_round_prints_a_table_per_variant_with_what_the_new_levers_can_sav
     first_round.main(["--seeds", "1", "--trials", "1", "--repeats", "1", "--scenario", "staggered",
                       "--variant", "best"])
     assert "| 6 | H6 | 5 | 1.2 | 0 [0, 0] | 0 [0, 0] |" in capsys.readouterr().out
+
+
+class Queued(Fixed):
+    """Fixed, after the configs queued, which it asks for first and labels as OptunaBackend does."""
+
+    def __init__(self, params: dict) -> None:
+        super().__init__(params)
+        self.queue = []
+
+    def enqueue(self, label, params):
+        self.queue.append((params, label))
+
+    def ask(self, n):
+        return self.queue.pop(0) if self.queue else super().ask(n)
+
+
+class BestAfterQueue(bench.Harness):
+    """Best, after the incumbent (or the baseline) the round queues."""
+
+    def backend(self, space, seed, n_startup):
+        return Queued({name: value for name, value in bench.best_config(bench.WORLD).items() if name in space})
+
+
+def test_first_rounds_count_only_the_trials_copied_in_and_score_only_the_sampled_ones():
+    rows = first_round.first_rounds(BestAfterQueue(), 0, SMALL, bench.SCENARIO)
+    # H4's fix leaves out round 2's 3 sampled trials (batch 16) from round 3 on; its queued incumbent (batch 1) stays.
+    assert [(row["round"], row["copied"]) for row in rows] == [(1, 0), (2, 4), (3, 5), (4, 9)]
+    # The queued incumbent has the new levers at default; the sampled trials have them at best.
+    assert [row["sampled"] for row in rows] == [[0, 0, 0]] * 4
