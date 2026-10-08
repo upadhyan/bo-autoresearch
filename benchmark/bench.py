@@ -183,9 +183,9 @@ class ExtraSampled(Seeded):
         return _SamplesSeeds.create(None, "round", DIRECTION, space, seed, n_startup)
 
 
-for first, suffix in ((2, ""), (1, "-r1")):
-    VARIANTS.update({f"seed-{kind}{suffix}": Seeded(SEEDS[kind], first) for kind in SEEDS})
-    VARIANTS[f"extra-sampled{suffix}"] = ExtraSampled(SEEDS["mixed"], first)
+VARIANTS.update({f"seed-{kind}": Seeded(SEEDS[kind]) for kind in SEEDS})
+VARIANTS.update({"seed-mixed-r1": Seeded(SEEDS["mixed"], 1), "extra-sampled": ExtraSampled(SEEDS["mixed"]),
+                 "extra-sampled-r1": ExtraSampled(SEEDS["mixed"], 1)})
 
 # --- a simulated run -------------------------------------------------------------------------------------------
 

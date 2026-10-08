@@ -24,7 +24,7 @@ Variants (`bench.VARIANTS`):
 |---|---|
 | `harness` | the incumbent (round 1: the baseline), then `rounds.extra_queue`'s configs |
 | `seed-good`, `seed-bad`, `seed-mixed` | also one trial per hypothesis activated this round, from round 2 on: its levers at the seed, the rest at the incumbent |
-| `seed-*-r1` | the same, from round 1 on |
+| `seed-mixed-r1` | the same, from round 1 on |
 | `extra-sampled`, `extra-sampled-r1` | the control: as many trials as `seed-mixed(-r1)`, the seeds' slots sampled by TPE |
 
 A seed is the proposal's setting of each lever it names; a bool lever it doesn't name is seeded at its non-default

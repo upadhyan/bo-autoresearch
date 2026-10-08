@@ -281,8 +281,8 @@ def test_bad_seeds_crash_break_the_guard_or_lose_to_the_default_where_good_ones_
         "H1": "better", "H2": "better", "H3": "same", "H4": "failed", "H5": "better", "H6": "infeasible"}
 
 
-def test_each_seed_set_is_a_variant_seeding_from_round_2_and_one_seeding_round_1_too():
-    assert {"seed-good", "seed-bad", "seed-mixed", "seed-good-r1", "seed-bad-r1", "seed-mixed-r1"} <= set(bench.VARIANTS)
+def test_each_seed_set_is_a_variant_seeding_from_round_2_and_the_mixed_one_seeds_round_1_too():
+    assert {"seed-good", "seed-bad", "seed-mixed", "seed-mixed-r1"} <= set(bench.VARIANTS)
     round1 = run(variant=bench.VARIANTS["seed-mixed-r1"])[0]["trials"]
     assert [t["queued"] for t in round1] == ["baseline", "seed H1", "seed H2", "seed H3", None, None, None]
     assert round1[2]["config"] == {"dedup_set": False, "route_table": "per_file", "buffer_kb": 8}  # from the baseline
