@@ -2,7 +2,8 @@
 
 Needs Ax, so it runs in benchmark/'s own environment (docs/experiments/47-ax-gp.md):
 
-    uv run --frozen --project benchmark python benchmark/ax_gp.py [--seeds 30] [--trials 12] [--repeats 2]
+    uv run --frozen --project benchmark python benchmark/ax_gp.py [--seeds 30] [--trials 12] [--repeats 2] \
+        [--variant harness --variant ax …]
 """
 
 from __future__ import annotations
@@ -114,6 +115,17 @@ class AxBackend:
             self._client.complete_trial(self._trial, {"metric": metric, "guards": float(state == "infeasible")})
 
 
+class CrashAsGuard(AxBackend):
+    """Post hoc: a crash reaches Ax as a broken guard with no metric. Ax drops a failed trial's data and may suggest
+    its config again, and with the GP unchanged it does, crash after crash."""
+
+    def tell(self, state: str, metric: float | None) -> None:
+        if state == "failed":
+            self._client.complete_trial(self._trial, {"guards": 1.0})
+        else:
+            super().tell(state, metric)
+
+
 class _Recorded:
     """`backend`'s methods, recording each ask the queue didn't answer: its seconds, and `backend.fit` if any."""
 
@@ -154,7 +166,7 @@ def suggestions(records: dict[str, list[dict]]) -> str:
     return rounds.md_table(["variant", "suggestions", "seconds each", "GP fits", "fell back"], rows)
 
 
-VARIANTS = {"harness": None, "ax": AxBackend}  # the harness on TPE, then on Ax
+VARIANTS = {"harness": None, "ax": AxBackend, "ax-crash": CrashAsGuard}  # the harness on TPE or on Ax
 
 
 def _run(name: str, seed: int, cfg: dict) -> tuple[list[dict], list[dict]]:
@@ -171,19 +183,23 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--trials", type=int, default=12, help="trials per round (default 12)")
     ap.add_argument("--repeats", type=int, default=2, help="eval runs per trial (default 2)")
     ap.add_argument("--jobs", type=int, default=8, help="processes, one thread each (default 8)")
+    ap.add_argument("--variant", action="append", choices=list(VARIANTS),
+                    help="repeat to compare with the first (default harness, ax)")
     args = ap.parse_args(argv)
+    names = args.variant or ["harness", "ax"]
     cfg = {"rounds": args.rounds, "trials_per_round": args.trials, "repeats": args.repeats}
     os.environ.update(OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1")  # read by torch and numpy in each process
     runs, records = {}, {}
     with ProcessPoolExecutor(args.jobs, mp_context=multiprocessing.get_context("spawn")) as pool:
-        for name in VARIANTS:
+        for name in names:
             start = time.monotonic()
             out = list(pool.map(_run, [name] * args.seeds, range(args.seeds), [cfg] * args.seeds))
             runs[name], records[name] = [run for run, _ in out], [rec for _, recs in out for rec in recs]
             print(f"{name}: {args.seeds} seeds in {time.monotonic() - start:.0f} s on {args.jobs} processes; "
                   "median [IQR] over seeds\n")
             print(bench.report(runs[name]) + "\n")
-    print(f"ax − harness, per seed:\n\n{bench.compare(runs['harness'], runs['ax'])}\n")
+    for name in names[1:]:
+        print(f"{name} − {names[0]}, per seed:\n\n{bench.compare(runs[names[0]], runs[name])}\n")
     print(f"Suggestions (asks the queue didn't answer), over all seeds:\n\n{suggestions(records)}")
 
 

@@ -96,10 +96,29 @@ def test_the_suggestion_table_gives_the_time_per_suggestion_and_how_many_gp_fits
                     ["ax", "4", "2.5 [1.75, 3.25]", "3", "1 (33%)"]]
 
 
-def test_the_command_runs_both_variants_on_the_same_seeds_and_compares_ax_with_the_harness(capsys):
-    ax_gp.main(["--seeds", "2", "--rounds", "1", "--trials", "2", "--repeats", "1", "--jobs", "2"])
+def _crash_then_ask(backend_class) -> tuple[dict, dict]:
+    """The config a backend suggests and sees crash, then its next suggestion."""
+    backend = backend_class({"batch": SPACE["batch"]}, 0, 2)
+    backend.add_warm([{"trial": n, "config": {"batch": n}, "state": "complete", "metric": 6.0 - n} for n in (1, 2)],
+                     bench.DEFAULTS)
+    crashed, _ = backend.ask(3)
+    backend.tell("failed", None)
+    return crashed, backend.ask(4)[0]
+
+
+def test_ax_suggests_a_crashed_config_again_unless_told_the_crash_as_a_broken_guard():
+    crashed, again = _crash_then_ask(ax_gp.AxBackend)  # a failed trial gives the GP no data
+    assert again == crashed
+    crashed, after = _crash_then_ask(ax_gp.CrashAsGuard)
+    assert after != crashed
+
+
+
+def test_the_command_runs_each_variant_on_the_same_seeds_and_compares_it_with_the_first(capsys):
+    ax_gp.main(["--seeds", "2", "--rounds", "1", "--trials", "2", "--repeats", "1", "--jobs", "2",
+                "--variant", "harness", "--variant", "ax-crash"])
     out = capsys.readouterr().out
-    assert "harness: 2 seeds" in out and "ax: 2 seeds" in out and "ax − harness, per seed:" in out
+    assert "harness: 2 seeds" in out and "ax-crash: 2 seeds" in out and "ax-crash − harness, per seed:" in out
     # Each seed's round 1: the baseline, then one startup draw.
     assert [line.split(" | ")[:2] for line in out.splitlines() if line.startswith(("| harness", "| ax"))] == [
-        ["| harness", "2"], ["| ax", "2"]]
+        ["| harness", "2"], ["| ax-crash", "2"]]
