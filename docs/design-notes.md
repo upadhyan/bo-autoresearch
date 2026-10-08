@@ -42,7 +42,8 @@ Where the implementation deliberately differs from [design.md](../design.md), an
    `init` refuses a spec without one.
 8. **Noise floor** is the median, over complete baseline-config trials with at least 2 repeats, of each
    trial's own max − min. It is measured within trials so that drift between rounds doesn't widen it. It
-   stays "not known yet" until one such trial exists; until then the drift flag is `n/a`. Round r's drift is
+   stays "not known yet" until one such trial exists, and while their median spread is 0 (bit-identical
+   repeats); meanwhile the drift flag is `n/a`. Round r's drift is
    judged against the floor from trials of earlier rounds. It is `yes` when the incumbent's re-measurement
    didn't complete (it failed or broke a guard) and the config was measured before; with no earlier
    measurement (round 1's baseline, say) it is `n/a` whatever the trial's state. The floor is measured at
@@ -53,13 +54,8 @@ Where the implementation deliberately differs from [design.md](../design.md), an
    scaled to the incumbent's metric and the incumbent's own repeat spread. The report's "within noise"
    verdict on incumbent vs baseline keeps the absolute floor, since one side of it is at baseline scale.
    The floor measures whatever the eval varies across repeats, not machine noise as such: each invocation
-   gets `BOAR_REPEAT` (new), the repeat index, and the eval derives its seeds from it and `BOAR_SPLIT`, so a
-   metric with no timing in it still spreads. An index rather than a random seed keeps a re-measurement
-   reproducible and comparisons paired; the baseline and incumbent runs of one holdout pair share one.
-   The floor is also "not known" while at least half the trials it is measured on have bit-identical
-   repeats: their median spread is 0, and a floor of 0 would make the drift check a strict-equality test.
-   `eval check` warns when the baseline's repeats are bit-identical, and still passes: `config.json` is
-   frozen at init, so a truly deterministic workload has no other way through.
+   gets its repeat index as `BOAR_REPEAT` (a holdout pair shares one) and the eval derives its seeds from it
+   and `BOAR_SPLIT`. An index, unlike a random seed, keeps a re-measurement reproducible and paired.
 9. **The eval freeze is a hash, a manifest and a copy.** `eval check` records the hash it checked, and
    `review record eval accept` refuses unless the current `eval/` hash equals the last *passing* check's
    hash. The hash is sha256 over sorted (path, bytes) pairs, skipping `__pycache__/` and `*.pyc`; a symlink

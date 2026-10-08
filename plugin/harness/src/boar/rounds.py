@@ -521,16 +521,13 @@ def write_summary(run: Run, r: int, facts: dict | None = None) -> Path:
             f"{len(inc['repeats'])} repeats (trials {id_list(inc['trials'])}; best single trial {f['incumbent_trial']})."
         )
     out += ["", "## Noise floor", ""]
-    noise = f["noise_trials"]
-    if f["noise_floor"] is None and noise:
+    if f["noise_floor"] is None:
         out.append(
-            f"Not known: {sum(stats.spread(t['repeats']) == 0 for t in noise)} of the {len(noise)} complete baseline "
-            f"trials with two or more dev repeats (trials {id_list([t['trial'] for t in noise])}) returned the same "
-            "metric bit for bit, so their median spread is 0 and measures no noise."
+            "Not known yet: no complete baseline trial has two or more dev repeats, or at least half of them "
+            "repeated bit for bit."
         )
-    elif f["noise_floor"] is None:
-        out.append("Not known yet: no complete baseline trial has two or more dev repeats.")
     else:
+        noise = f["noise_trials"]
         out.append(
             f"{fmt(f['noise_floor'])}: the median, over {len(noise)} complete baseline trials (trials "
             f"{id_list([t['trial'] for t in noise])}), of the spread (max − min) of each trial's own dev repeats. "

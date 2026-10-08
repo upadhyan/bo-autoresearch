@@ -64,7 +64,7 @@ def trial(run: Run, config=None, repeats=3, budget=5.0, split="dev"):
 
 
 def test_complete_trial_records_repeats_files_and_environment(run):
-    write_eval(run, COUNT + 'pwd > "$BOAR_RUN_DIR/cwd"\ncp "$BOAR_CONFIG" "$BOAR_RUN_DIR/seen.json"\n'
+    write_eval(run, 'n=$BOAR_REPEAT\npwd > "$BOAR_RUN_DIR/cwd"\ncp "$BOAR_CONFIG" "$BOAR_RUN_DIR/seen.json"\n'
                'echo "progress: not the result"\necho "warming up" >&2\n'
                'echo "{\\"metric\\": $n, \\"guards_ok\\": true, \\"metrics\\": {\\"rss\\": $((n*10)), \\"split\\": \\"$BOAR_SPLIT\\"}}"\n')
     res = trial(run, {"x": 4, "flag": True}, split="holdout")
@@ -77,12 +77,6 @@ def test_complete_trial_records_repeats_files_and_environment(run):
     assert json.loads((out / "config.json").read_text()) == {"x": 4, "flag": True}
     assert (out / "repeat-3.stdout").read_text().startswith("progress")
     assert (out / "repeat-1.stderr").read_text() == "warming up\n"
-
-
-def test_each_repeat_gets_its_index_as_boar_repeat(run):
-    write_eval(run, f'echo "$BOAR_REPEAT" >> "$BOAR_RUN_DIR/indices"\necho \'{OK_LINE}\'\n')
-    trial(run)
-    assert run.path("indices").read_text() == "1\n2\n3\n"
 
 
 def test_infeasible_stops_at_first_guard_failure(run):

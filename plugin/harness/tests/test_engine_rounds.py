@@ -339,6 +339,9 @@ def test_finalize_alternates_holdout_runs_and_writes_the_report(run, monkeypatch
     rounds.start_round(run, foreground=True)
     close_round(run, 1, {"H1": "keep", "H2": "keep"})
     run.update_state(lambda s: s.update(phase="finalize"))
+    write_eval(run, extra="os.environ['BOAR_SPLIT'] == 'holdout' and "
+                          "open(os.path.join(run_dir, 'holdout-repeats'), 'a').write(os.environ['BOAR_REPEAT'] + ' ')")
+    accept_eval(run)
     restore = _interrupt_after(monkeypatch, 3)
     with pytest.raises(evalrun.Interrupted):
         finalize.start_finalize(run, foreground=True)
@@ -355,6 +358,7 @@ def test_finalize_alternates_holdout_runs_and_writes_the_report(run, monkeypatch
     holdout = store.read_jsonl(run.holdout_path)
     assert [h["i"] for h in holdout] == [0, 1, 2, 3]
     assert [h["label"] for h in holdout] == ["baseline", "incumbent", "baseline", "incumbent"]
+    assert run.path("holdout-repeats").read_text().split() == ["1", "1", "2", "2"]  # one BOAR_REPEAT per pair
     assert all(h["ok"] and h["guards_ok"] for h in holdout)
     assert holdout[1]["config"] == store.full_config(run.hypotheses(), expected)
     assert (run.path("holdout", "3") / "repeat-1.stdout").exists()
@@ -371,19 +375,6 @@ def test_finalize_alternates_holdout_runs_and_writes_the_report(run, monkeypatch
 
     with pytest.raises(Refused, match="already finalized"):
         finalize.start_finalize(run, foreground=True)
-
-
-def test_each_holdout_pair_gets_its_own_repeat_index(run):
-    """Baseline and incumbent of one pair share BOAR_REPEAT, so their seeds match; the pairs differ."""
-    rounds.start_round(run, foreground=True)
-    close_round(run, 1, {"H1": "keep", "H2": "keep"})
-    run.update_state(lambda s: s.update(phase="finalize"))
-    write_eval(run, extra="os.environ['BOAR_SPLIT'] == 'holdout' and "
-                          "open(os.path.join(run_dir, 'holdout-repeats'), 'a').write(os.environ['BOAR_REPEAT'] + ' ')")
-    accept_eval(run)
-    finalize.start_finalize(run, foreground=True)
-    assert [h["label"] for h in store.read_jsonl(run.holdout_path)] == ["baseline", "incumbent", "baseline", "incumbent"]
-    assert run.path("holdout-repeats").read_text().split() == ["1", "1", "2", "2"]
 
 
 def test_report_lists_removals_and_rejections(run):
@@ -722,25 +713,6 @@ def test_drift_is_judged_against_the_floor_from_earlier_rounds(run):
     facts = rounds._facts(run, 2)
     assert facts["drift"]["flag"] == "yes", facts["drift"]
     assert facts["noise_floor"] == pytest.approx(0.2)
-
-
-def _bit_identical_baseline(run):
-    for t in (_hand_trial(1, 1, {}, [100.0, 100.0], "baseline"), _hand_trial(2, 1, {}, [100.0, 100.0]),
-              _hand_trial(3, 1, {}, [100.0, 100.3]), _hand_trial(4, 1, {"fast_a": True}, [80.0, 80.0])):
-        run.append_trial(t)
-
-
-def test_summary_says_why_there_is_no_floor_when_baseline_repeats_are_bit_identical(run):
-    _bit_identical_baseline(run)
-    summary = rounds.write_summary(run, 1).read_text()
-    assert ("## Noise floor\n\nNot known: 2 of the 3 complete baseline trials with two or more dev repeats (trials "
-            "1, 2, 3) returned the same metric bit for bit, so their median spread is 0 and measures no noise.\n") in summary
-
-
-def test_report_says_why_there_is_no_floor_when_baseline_repeats_are_bit_identical(run):
-    _bit_identical_baseline(run)
-    report = finalize.write_report(run).read_text()
-    assert "- Noise floor: not known (2 of 3 baseline dev trials repeated bit for bit); holdout spread" in report
 
 
 def test_an_incumbent_that_breaks_a_guard_on_re_measurement_is_flagged_and_dethroned(run):

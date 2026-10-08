@@ -675,7 +675,6 @@ def eval_check(run: Run) -> dict:
         )
     reps = trial["repeats"]
     if len(reps) > 1 and stats.spread(reps) == 0:
-        # A warning, not a problem: config.json is frozen, so a truly deterministic workload has no way out.
         warnings.append(
             f"the baseline's {len(reps)} repeats returned the same metric bit for bit, so the noise floor stays "
             "unknown; unless the workload is truly deterministic, derive its seeds from BOAR_SPLIT and BOAR_REPEAT"
