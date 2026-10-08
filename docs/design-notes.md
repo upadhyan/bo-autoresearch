@@ -83,8 +83,8 @@ Where the implementation deliberately differs from [design.md](../design.md), an
     distribution" check runs in `warmstart.select` and is counted under rule 2. A warm trial with no finite
     metric counts under rule 1.
 14. **Resuming a round.** If the warm start was never recorded, the round's study is rebuilt from
-    scratch. Otherwise RUNNING Optuna trials are marked FAIL, the incumbent (or the baseline) is queued
-    again if its trial never made it into `trials.jsonl`, and the sampler is reseeded with
+    scratch. Otherwise RUNNING Optuna trials are marked FAIL, each queued config (not one item 29 leaves
+    out) is queued again if its trial never made it into `trials.jsonl`, and the sampler is reseeded with
     `seed + r + 1000003 × (trials in the study)` so a resume doesn't replay the draws the interrupted
     worker already made. An interrupted trial is never recorded.
 15. **Holdout runs** are single invocations, each with a timeout of 3 × `trial_target_s` / `repeats`.
