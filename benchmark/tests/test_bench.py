@@ -379,3 +379,38 @@ def test_first_rounds_count_only_the_trials_copied_in_and_score_only_the_sampled
     # round 3 also batch 1's (16 is best until round 4, then 4) and everything is 1.1x slower.
     gc = 0.15 * 1.921812
     assert [row["before"] for row in rows] == pytest.approx([10.1, 1.6, 1.1 * (1.6 + gc), 1.1 * (0.4 + 1.2)])
+
+
+def test_replay_splits_each_rounds_regret_into_the_active_hypotheses_own_regrets():
+    rows = first_round.replay(bench.Harness(), 0, SMALL, bench.SCENARIO)
+    assert [sorted(row["own"]) for row in rows] == [
+        ["H1", "H2", "H3"], ["H1", "H2", "H3", "H4"], ["H1", "H2", "H3", "H4", "H5"],
+        *[["H1", "H2", "H4", "H5", "H6"]] * 3]  # H3 is removed before round 4
+    assert [sum(row["own"].values()) for row in rows] == pytest.approx([rec["regret"] for rec in run()])
+    assert [row["round"] for row in first_round.first_rounds(bench.Harness(), 0, SMALL, bench.SCENARIO)] == [
+        1, 2, 3, 4]
+
+
+def test_own_compares_the_named_hypotheses_own_regret_per_seed_over_the_run_and_per_round(capsys, monkeypatch):
+    monkeypatch.setitem(bench.VARIANTS, "baseline", Baseline())
+    monkeypatch.setitem(bench.VARIANTS, "best", Best())
+    first_round.main(["--seeds", "1", "--trials", "1", "--repeats", "1", "--scenario", "staggered",
+                      "--variant", "baseline", "--variant", "best", "--own", "H1", "--own", "H3,H4"])
+    h1, h34 = capsys.readouterr().out.split("best − baseline, per seed: the own regret of ")[1:]
+    # The baseline leaves H1's 5.9 s from round 2 on, H4's 1.6 from round 4 on; H3's lever has no effect.
+    assert h1.startswith("H1\n")
+    assert "| all | -4.92 | [-4.92, -4.92] | 1 / 0 / 0 |\n| 1 | 0 | [0, 0] | 0 / 1 / 0 |\n" in h1
+    assert "| 2 | -5.9 | [-5.9, -5.9] | 1 / 0 / 0 |" in h1
+    assert h34.startswith("H3, H4\n")
+    assert "| all | -0.8 | [-0.8, -0.8] | 1 / 0 / 0 |" in h34 and "| 3 | 0 | [0, 0] | 0 / 1 / 0 |" in h34
+
+
+def test_seed_good_startup_samples_as_many_trials_at_random_as_the_harness():
+    # Round 4 copies in one earlier trial (H3's removal), so the harness samples its trials 2 and 3 at random, from
+    # the round's sampler seed; seed-good's seed takes one of those draws, unless n_startup_trials counts it out.
+    runs = [run(variant=bench.VARIANTS[name]) for name in ("harness", "seed-good", "seed-good-startup")]
+    assert [sum(len(rec["trials"]) for rec in r[:3]) - sum(r[3]["excluded"].values()) for r in runs] == [1, 1, 1]
+    harness, seeded, startup = (r[3] for r in runs)
+    assert [t["queued"] for t in startup["trials"]] == ["incumbent", "seed H6", None, None, None]
+    assert [t["config"] for t in startup["trials"][2:4]] == [t["config"] for t in harness["trials"][1:3]]
+    assert seeded["trials"][3]["config"] != harness["trials"][2]["config"]

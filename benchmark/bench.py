@@ -184,9 +184,22 @@ class ExtraSampled(Seeded):
         return _SamplesSeeds.create(None, "round", DIRECTION, space, seed, n_startup)
 
 
+class KeepsStartup(Seeded):
+    """Seeded, with n_startup_trials raised by the seeds queued: a seed takes none of the round's random draws."""
+
+    def backend(self, space: dict, seed: int, n_startup: int):
+        self.study = super().backend(space, seed, n_startup)
+        return self.study
+
+    def queue(self, hyps: list[dict], r: int, incumbent: dict | None) -> dict:
+        warm = super().queue(hyps, r, incumbent)
+        self.study._study.sampler._n_startup_trials += sum(q["label"].startswith("seed ") for q in warm["queue"])
+        return warm
+
+
 VARIANTS.update({f"seed-{kind}": Seeded(SEEDS[kind]) for kind in SEEDS})
 VARIANTS.update({"seed-mixed-r1": Seeded(SEEDS["mixed"], 1), "extra-sampled": ExtraSampled(SEEDS["mixed"]),
-                 "extra-sampled-r1": ExtraSampled(SEEDS["mixed"], 1)})
+                 "extra-sampled-r1": ExtraSampled(SEEDS["mixed"], 1), "seed-good-startup": KeepsStartup(SEEDS["good"])})
 
 # --- a simulated run -------------------------------------------------------------------------------------------
 
