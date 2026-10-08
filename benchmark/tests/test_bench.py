@@ -282,10 +282,12 @@ def test_bad_seeds_crash_break_the_guard_or_lose_to_the_default_where_good_ones_
         "H1": "better", "H2": "better", "H3": "same", "H4": "failed", "H5": "worse", "H6": "infeasible"}
     assert seed_outcomes(bench.SEEDS["mixed"]) == {  # odd-numbered hypotheses good, even ones bad
         "H1": "better", "H2": "better", "H3": "same", "H4": "failed", "H5": "better", "H6": "infeasible"}
+    assert seed_outcomes(bench.SEEDS["flipped"]) == {  # the other way round
+        "H1": "better", "H2": "better", "H3": "same", "H4": "better", "H5": "worse", "H6": "better"}
 
 
 def test_each_seed_set_is_a_variant_seeding_from_round_2_and_the_mixed_one_seeds_round_1_too():
-    assert {"seed-good", "seed-bad", "seed-mixed", "seed-mixed-r1"} <= set(bench.VARIANTS)
+    assert {"seed-good", "seed-bad", "seed-mixed", "seed-flipped", "seed-mixed-r1"} <= set(bench.VARIANTS)
     round1 = run(variant=bench.VARIANTS["seed-mixed-r1"])[0]["trials"]
     assert [t["queued"] for t in round1] == ["baseline", "seed H1", "seed H2", "seed H3", None, None, None]
     assert round1[2]["config"] == {"dedup_set": False, "route_table": "per_file", "buffer_kb": 8}  # from the baseline
@@ -298,6 +300,9 @@ def test_the_budget_matched_control_samples_the_trials_seeding_would_queue():
         assert [len(rec["trials"]) for rec in sampled] == [len(rec["trials"]) for rec in seeded]
         assert not any((t["queued"] or "").startswith("seed") for rec in sampled for t in rec["trials"])
     assert [len(rec["trials"]) for rec in sampled] == [7, 5, 5, 5, 4, 4]
+    # Every seed set seeds every hypothesis, so extra-sampled is the control for each.
+    control = run(variant=bench.VARIANTS["extra-sampled"])
+    assert all(run(variant=bench.ExtraSampled(seeds)) == control for seeds in bench.SEEDS.values())
 
 
 def test_the_staggered_scenario_activates_one_hypothesis_a_round_in_an_unchanging_world():

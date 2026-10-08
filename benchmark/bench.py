@@ -141,6 +141,7 @@ SEEDS = {
             "H5": {"gc_scale": 0.05}, "H6": {"prefetch": 1.0}},
 }
 SEEDS["mixed"] = {hid: SEEDS["good" if int(hid[1]) % 2 else "bad"][hid] for hid in SEEDS["good"]}  # odd ones good
+SEEDS["flipped"] = {hid: SEEDS["bad" if int(hid[1]) % 2 else "good"][hid] for hid in SEEDS["good"]}  # even ones good
 
 # All but H3 start after round 1, each in a round of its own; the world never changes.
 SCENARIOS = {"default": SCENARIO, "staggered": [{"add": [hid]} for hid in ("H3", "H1", "H2", "H4", "H5", "H6")]}
