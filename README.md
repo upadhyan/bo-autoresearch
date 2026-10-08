@@ -89,4 +89,5 @@ Or turn on auto-update for the `bo-autoresearch` marketplace in `/plugin`. To re
   where the code deliberately differs from it.
 - [`plugin/harness/README.md`](plugin/harness/README.md): the `boar` command reference, the run
   directory layout, and development setup.
+- [`benchmark/`](benchmark): simulated BOAR runs, for comparing optimizer ideas with the harness offline.
 - The previous attempt lives on the `archive/v1` branch.
