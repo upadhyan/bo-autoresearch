@@ -184,4 +184,15 @@ Where the implementation deliberately differs from [design.md](../design.md), an
     none; it reseeds, see 14, and fails the trial left in flight), `add_warm`, `enqueue(label, params)`
     (asked for first, in order), `waiting()`, `ask(n)` (params and label, None when sampled) and
     `tell(state, metric)`.
+29. **A queued config runs once per commit.** design.md queues the incumbent every round and makes the
+    off-state part of an investigation's `--queue`. R2 instead fills each queued config, then leaves it
+    out when the same config (`store.config_key`) was measured on the round's commit by a trial that
+    completed or broke a guard (a failed one has no measurement, so it runs again), or was queued
+    earlier in the round. The eval reproduces a (commit, config), its seeds coming from `BOAR_REPEAT`
+    (see 8), so a repeat adds nothing. The incumbent is therefore measured again only on a new commit,
+    which is all the drift check needs. The harness queues each investigated hypothesis's off-state
+    itself, ahead of its `--queue` configs, and it drops out like any other when it equals the
+    incumbent. `warm.same_as` maps each left-out label to the trial that holds it (or the label queued
+    before it), so a resume, the round's N and `summary.md` (`same as trial N`, the trial to cite) agree
+    with what ran; a round recorded without it runs every queued config.
 
