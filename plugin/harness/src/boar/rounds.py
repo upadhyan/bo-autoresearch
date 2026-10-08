@@ -206,14 +206,19 @@ def start_round(run: Run, foreground: bool) -> str:
 
 
 def extra_queue(hyps: list[dict], r: int) -> list[dict]:
-    """The configs round `r` runs on top of its N trials: what last round's investigations queued, and the joint
-    trial of each enabler that activates this round.
+    """The configs round `r` runs on top of its N trials: the off-state of each hypothesis last round investigated
+    and what the investigation queued, and the joint trial of each enabler that activates this round.
 
     Each is {"label", "config"}, `config` a partial config that is filled from the incumbent when queued.
     """
     out = []
     for h in store.active_hypotheses(hyps):
-        queue = (control.investigation(h, r - 1) or {}).get("queue") or []
+        inv = control.investigation(h, r - 1)
+        if inv is None:
+            continue
+        queue = inv.get("queue") or []
+        off = {lever["name"]: lever["default"] for lever in h["levers"]}
+        out.append({"label": f"investigate {h['id']} (off-state)", "config": off})
         out += [{"label": f"investigate {h['id']} ({i}/{len(queue)})", "config": c} for i, c in enumerate(queue, 1)]
     for h in store.active_hypotheses(hyps):
         if h.get("enables") and h.get("activated_round") == r:

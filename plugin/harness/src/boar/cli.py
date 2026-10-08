@@ -195,7 +195,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.add_argument("--cause", help="investigate: the suspected cause the next round measures")
     s.add_argument("--measure", nargs="+", default=[], help="investigate: diagnostic keys R1 adds, comma-separated")
-    s.add_argument("--queue", help="investigate: JSON list of at most 2 partial configs, one the hypothesis's off-state")
+    s.add_argument("--queue", help="investigate: JSON list of at most 2 partial configs; the harness adds the off-state")
     s.set_defaults(func=_decide)
 
     s = sub.add_parser("diag", help="`diag prune` (R6): delete all but diag.json from unprotected diagnostics dirs")

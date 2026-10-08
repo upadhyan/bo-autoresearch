@@ -266,7 +266,8 @@ def _round_step(run: Run, state: dict, hyps: list[dict], config: dict) -> Step:
         if "investigate" in choices:
             diag.append(
                 "investigate: the metric alone can't say why; --cause \"…\" --measure k1,k2 [--queue <json list of at "
-                "most 2 partial configs, one the off-state>] keeps it active one more round (once per hypothesis)."
+                "most 2 partial configs; the harness adds the off-state>] keeps it active one more round (once per "
+                "hypothesis)."
             )
         return Step(
             "R3",

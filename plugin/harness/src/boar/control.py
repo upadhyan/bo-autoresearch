@@ -750,7 +750,7 @@ def parse_names(tokens: list[str] | None) -> list[str]:
     return out
 
 
-def _queue(path: str, h: dict, hyps: list[dict]) -> list[dict]:
+def _queue(path: str, hyps: list[dict]) -> list[dict]:
     """The --queue file's partial configs, checked against the current search space; refuses on any problem."""
     from boar import warmstart
 
@@ -774,10 +774,6 @@ def _queue(path: str, h: dict, hyps: list[dict]) -> list[dict]:
                 problems.append(f"config[{i}]: {json.dumps(value)} is not a valid value of {name!r}")
     if problems:
         raise Refused(f"{path} has {len(problems)} problem(s):\n" + "\n".join(f"  - {p}" for p in problems))
-    own = {lever["name"]: lever["default"] for lever in h["levers"]}
-    if not any(all(n in c and schema._same(c[n], v) for n, v in own.items()) for c in data):
-        listed = json.dumps(own, sort_keys=True)
-        raise Refused(f"{path} needs the off-state among its configs: one that sets {h['id']}'s levers to their defaults, {listed}")
     return data
 
 
@@ -910,7 +906,7 @@ def decide(
             )
         record = {"decision": decision, "reason": reason, "trials": trials, "at": store.now_iso()}
         if decision == "investigate":
-            record.update(cause=cause, measure=measured_now, queue=_queue(queue, h, hyps) if queue else [])
+            record.update(cause=cause, measure=measured_now, queue=_queue(queue, hyps) if queue else [])
         h["decisions"][str(r)] = record
         if observable_key is not None:
             h["observable_key"] = observable_key
