@@ -207,20 +207,45 @@ def report(runs: list[list[dict]]) -> str:
     return rounds.md_table(["round", "regret (s)", "eval runs", "re-measured"], rows)
 
 
+def _per_run(run: list[dict]) -> dict:
+    """A run's `all` row: its mean regret over rounds and its total eval runs."""
+    return {"regret (s)": np.mean([rec["regret"] for rec in run]), "eval runs": sum(rec["runs"] for rec in run)}
+
+
+def compare(base: list[list[dict]], runs: list[list[dict]]) -> str:
+    """A table of each seed's difference from the base variant's run on the same seed (runs minus base) in mean regret
+    and in eval runs: the mean, its 95% bootstrap CI, and how many seeds came out lower, tied and higher."""
+    rng = np.random.default_rng(0)
+    rows = []
+    for k, fmt in (("regret (s)", ".3g"), ("eval runs", ".1f")):
+        d = np.array([_per_run(run)[k] - _per_run(b)[k] for b, run in zip(base, runs)])
+        lo, hi = np.percentile(rng.choice(d, (2000, len(d))).mean(axis=1), [2.5, 97.5])
+        rows.append([k, f"{d.mean():{fmt}}", f"[{lo:{fmt}}, {hi:{fmt}}]",
+                     " / ".join(str(int(n)) for n in ((d < 0).sum(), (d == 0).sum(), (d > 0).sum()))])
+    return rounds.md_table(["", "mean", "95% CI", "seeds lower / tied / higher"], rows)
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description="Simulated multi-round BOAR runs on a synthetic objective.")
     ap.add_argument("--seeds", type=int, default=100, help="runs per variant, seeded 0, 1, … (default 100)")
     ap.add_argument("--rounds", type=int, default=len(SCENARIO), help=f"default {len(SCENARIO)}, the scenario's")
     ap.add_argument("--trials", type=int, default=6, help="trials per round (default 6)")
     ap.add_argument("--repeats", type=int, default=3, help="eval runs per trial (default 3)")
-    ap.add_argument("--variant", action="append", choices=sorted(VARIANTS), help="repeat to compare (default harness)")
+    ap.add_argument("--variant", action="append", choices=sorted(VARIANTS),
+                    help="repeat to compare with the first (default harness)")
     args = ap.parse_args(argv)
     cfg = {"rounds": args.rounds, "trials_per_round": args.trials, "repeats": args.repeats}
-    for name in args.variant or ["harness"]:
+    names = args.variant or ["harness"]
+    base = None
+    for name in names:
         start = time.monotonic()
         runs = [simulate(VARIANTS[name], seed, cfg) for seed in range(args.seeds)]
         print(f"{name}: {args.seeds} seeds in {time.monotonic() - start:.0f} s; median [IQR] over seeds\n")
         print(report(runs) + "\n")
+        if base is None:
+            base = runs
+        else:
+            print(f"{name} − {names[0]}, per seed:\n\n{compare(base, runs)}\n")
 
 
 if __name__ == "__main__":

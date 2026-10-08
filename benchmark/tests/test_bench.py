@@ -219,3 +219,23 @@ def test_seeds_rounds_and_trials_come_from_the_command_line(capsys):
     assert [line.split(" | ")[0].strip("| ") for line in out.splitlines() if line.startswith("| ")] == [
         "round", "1", "2", "all"]
     assert "| 3 [3, 3] |" in out  # round 1: 3 trials of 1 repeat
+
+
+def test_a_comparison_gives_each_seeds_difference_from_the_first_variant():
+    def seeds(regrets: list[float], runs: int) -> list[list[dict]]:
+        return [[{"round": 1, "regret": x, "runs": runs, "remeasured": 0}] for x in regrets]
+
+    base = seeds([1, 2, 3, 4], 8)
+    rows = [line.strip("| ").split(" | ") for line in bench.compare(base, seeds([2, 2, 4, 5], 8)).splitlines()[2:]]
+    assert rows == [
+        ["regret (s)", "0.75", "[0.25, 1]", "0 / 1 / 3"],  # mean, 95% bootstrap CI, seeds lower / tied / higher
+        ["eval runs", "0.0", "[0.0, 0.0]", "0 / 4 / 0"],
+    ]
+
+
+def test_a_second_variant_is_compared_with_the_first_on_the_same_seeds(capsys):
+    bench.main(["--seeds", "2", "--rounds", "1", "--trials", "2", "--repeats", "1", "--variant", "harness",
+                "--variant", "harness"])
+    out = capsys.readouterr().out
+    assert "harness − harness, per seed:" in out
+    assert "| regret (s) | 0 | [0, 0] | 0 / 2 / 0 |" in out
