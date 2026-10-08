@@ -87,15 +87,17 @@ def test_an_off_state_equal_to_the_incumbent_is_not_run_and_cites_the_incumbents
     # A guard fails whenever fast_b moves, so the incumbent keeps it at default: fast_b's off-state is the incumbent.
     d = driver.start("round1_run", guard_fail="config.get('fast_b', 1) != 1", **FOUR)
     hb = d.hid("fast_b")
-    d.ok(*investigate(d, hb))
+    q = d.tmp / "q.json"
+    q.write_text(json.dumps([{"fast_b": 2}]))
+    d.ok(*investigate(d, hb, "--queue", q))
     finish_round_1(d, hb, d.hid("fast_a"), d.hid("noop"))
     new_commit(d)
     d.round_run()
     round2 = d.trials(2)
     [inc] = [t for t in round2 if t["queued"] == "incumbent"]
-    assert len(round2) == 2 and inc["config"]["fast_b"] == 1
+    assert len(round2) == 3 and inc["config"]["fast_b"] == 1
     summary = (d.run_dir / "rounds" / "2" / "summary.md").read_text()
-    assert f"investigate {hb} (off-state): same as trial {inc['trial']}" in summary and "(2 of 2)" in summary
+    assert f"investigate {hb} (off-state): same as trial {inc['trial']}" in summary and "(3 of 3)" in summary
     d.ok("decide", hb, "remove", "--reason", "passes flat, metric flat", "--trials", inc["trial"])
     assert json.dumps(inc) in d.ok("review", "show", f"rm-{hb}-r2")
 
@@ -133,6 +135,7 @@ def test_investigate_refusals(driver):
     d.ok(*investigate(d, ha))
     finish_round_1(d, ha, hb, d.hid("noop"))
     d.round_run()
+    assert d.state()["rounds"]["2"]["warm"]["queue"] == []  # no --queue, so no off-state either
     assert "one investigation" in d.refused(*investigate(d, ha))
 
 

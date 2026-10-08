@@ -189,8 +189,8 @@ Where the implementation deliberately differs from [design.md](../design.md), an
     out when the same config (`store.config_key`) was measured on the round's commit by a trial that
     completed or broke a guard, or was queued earlier in the round. The eval reproduces a (commit,
     config), its seeds coming from `BOAR_REPEAT` (see 8), so a repeat adds nothing. The incumbent is
-    therefore measured again only on a new commit, which is all the drift check needs. The harness queues
-    each investigated hypothesis's off-state itself, ahead of its `--queue` configs, and it drops out
-    like any other when it equals the incumbent. `summary.md` lists each left-out config as
+    therefore measured again only on a new commit, which is all the drift check needs. When an
+    investigation queues configs, the harness queues the hypothesis's off-state ahead of them, and it
+    drops out like any other when it equals the incumbent. `summary.md` lists each left-out config as
     `same as trial N`, the trial to cite.
 
