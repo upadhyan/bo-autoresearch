@@ -12,15 +12,11 @@ import json
 from pathlib import Path
 from typing import Any
 
-import optuna
-from optuna.trial import TrialState
-
-from boar import control, evalrun, gitops, stats, store, warmstart, worker
+from boar import control, evalrun, gitops, optimizer, stats, store, warmstart, worker
 from boar.errors import Refused
 from boar.store import Run
 
 NOT_STARTED, RUNNING, DONE = "not_started", "running", "done"
-_DIRECTION = {"min": "minimize", "max": "maximize"}
 
 
 def log(msg: str) -> None:
@@ -230,7 +226,7 @@ def _labels(warm: dict) -> list[str]:
     return [first, *(q["label"] for q in warm.get("queue") or [])]
 
 
-def _enqueue(study: optuna.Study, space: dict, defaults: dict, warm: dict, skip: set[str] = frozenset()) -> None:
+def _enqueue(study: optimizer.OptunaBackend, space: dict, defaults: dict, warm: dict, skip: set[str] = frozenset()) -> None:
     """Queue the incumbent (or the baseline), so it is measured again on this round's commit, then the extra configs.
 
     Each extra config is filled from the incumbent; a lever it names that is pinned now stays at its default.
@@ -241,30 +237,21 @@ def _enqueue(study: optuna.Study, space: dict, defaults: dict, warm: dict, skip:
         if label in skip:
             continue
         params = {name: partial.get(name, base.get(name, defaults[name])) for name in space}
-        study.enqueue_trial(params, user_attrs={"queued": label})
+        study.enqueue(label, params)
 
 
-def _sampler(cfg: dict, seed: int) -> optuna.samplers.TPESampler:
-    # numpy takes seeds in 0 .. 2**32 - 1 only; `seed` may be any integer.
-    return optuna.samplers.TPESampler(multivariate=True, n_startup_trials=cfg["trials_per_round"], seed=seed % 2**32)
-
-
-def _open_study(run: Run, r: int, cfg: dict, hyps: list[dict]) -> optuna.Study:
+def _open_study(run: Run, r: int, cfg: dict, hyps: list[dict]) -> optimizer.OptunaBackend:
     space = store.search_space(hyps)
     defaults = store.lever_defaults(hyps)
     name = f"round-{r}"
-    sampler = _sampler(cfg, cfg["seed"] + r)
+    seed, n_startup = cfg["seed"] + r, cfg["trials_per_round"]
     warm = run.state()["rounds"][str(r)].get("warm")
     if warm is None:
         # Nothing ran yet, so a half-built study from an interrupted start is discarded.
-        with contextlib.suppress(KeyError):
-            optuna.delete_study(study_name=name, storage=run.storage_url)
-        study = optuna.create_study(
-            study_name=name, storage=run.storage_url, sampler=sampler, direction=_DIRECTION[cfg["direction"]]
-        )
+        study = optimizer.OptunaBackend.create(run.storage_url, name, cfg["direction"], space, seed, n_startup)
         trials = run.trials()
         valid, excluded = warmstart.select(trials, hyps, r)
-        study.add_trials(warmstart.build_frozen_trials(valid, space, defaults))
+        study.add_warm(valid, defaults)
         inc = warmstart.incumbent(trials, hyps, r, cfg["direction"]) if r > 1 else None
         warm = {
             "copied": len(valid), "excluded": excluded, "incumbent_config": inc["config"] if inc else None,
@@ -275,29 +262,21 @@ def _open_study(run: Run, r: int, cfg: dict, hyps: list[dict]) -> optuna.Study:
         log(f"round {r}: copied {len(valid)} warm trials, left out {excluded}; queued {config_text(warm['incumbent_config'] or {})}")
         return study
     try:
-        study = optuna.load_study(study_name=name, storage=run.storage_url, sampler=sampler)
+        study = optimizer.OptunaBackend.resume(run.storage_url, name, space, seed, n_startup)
     except KeyError:
         raise Refused(f"study {name} is missing from {run.study_db}; the round can't be resumed") from None
-    # Re-seeded from progress: the same seed would replay the random startup draws the round already ran.
-    # Every attempt adds trials (an interrupted one stays as FAIL), so each resume gets a new seed.
-    study.sampler = _sampler(cfg, cfg["seed"] + r + 1_000_003 * len(study.trials))
-    for t in study.get_trials(deepcopy=False, states=(TrialState.RUNNING,)):
-        study.tell(t.number, state=TrialState.FAIL)
     done = {t.get("queued") for t in run.trials() if t["round"] == r}
-    waiting = {t.user_attrs.get("queued") for t in study.get_trials(deepcopy=False, states=(TrialState.WAITING,))}
-    _enqueue(study, space, defaults, warm, skip=done | waiting)
+    _enqueue(study, space, defaults, warm, skip=done | study.waiting())
     log(f"round {r}: resuming")
     return study
 
 
 def run_round_worker(run: Run) -> None:
     """R2 steps 3-6 (and 1-2 again, harmlessly): warm start, queue, N trials, summary."""
-    warmstart.quiet_optuna()
     r = run.state()["round"]
     commit = _prepare(run, r)
     cfg = run.config()
     hyps = run.hypotheses()
-    dists = warmstart.distributions(store.search_space(hyps))
     defaults = store.lever_defaults(hyps)
     study = _open_study(run, r, cfg, hyps)
     n_target = control.round_size(cfg, run.state()["rounds"][str(r)])
@@ -310,10 +289,8 @@ def run_round_worker(run: Run) -> None:
         check_unchanged(run, commit, step, command)
         dirs = gitops.untracked_dirs(run.root)
         n = 1 + max((t["trial"] for t in trials), default=0)
-        trial = study.ask(dists)
-        trial.set_user_attr("boar_trial", n)
-        queued = trial.user_attrs.get("queued")
-        config = store.full_config(hyps, trial.params)
+        params, queued = study.ask(n)
+        config = store.full_config(hyps, params)
         log(f"trial {n} ({len(done) + 1}/{n_target}{', ' + queued if queued else ''}): {config_text(store.non_default(config, defaults))}")
         try:
             result = evalrun.run_trial(
@@ -322,17 +299,13 @@ def run_round_worker(run: Run) -> None:
             wrote, stuck = undo_trial_writes(run, commit, dirs, run.trial_dir(n), step, command)
         except BaseException:
             with contextlib.suppress(Exception):
-                study.tell(trial, state=TrialState.FAIL)
+                study.tell(evalrun.FAILED, None)
             raise
         if wrote:
             # Recorded, not discarded: the agent sees why in the summary and can mark the lever `fix`.
             result = {**result, "state": evalrun.FAILED, "error": "; ".join(e for e in (wrote, result["error"]) if e)}
         run.append_trial({"trial": n, "round": r, "commit": commit, "config": config, **result, "queued": queued})
-        if result["state"] == evalrun.FAILED:
-            study.tell(trial, state=TrialState.FAIL)
-        else:
-            trial.set_constraint(warmstart.GUARDS, 0.0 if result["state"] == evalrun.COMPLETE else 1.0)
-            study.tell(trial, result["metric"])
+        study.tell(result["state"], result["metric"])
         ids = [*done, n]
         run.update_state(lambda s: s["rounds"][str(r)].__setitem__("new_trials", ids))
         log(f"trial {n}: {result['state']} metric {fmt(result['metric'])} in {result['duration_s']:.1f}s"

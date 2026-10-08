@@ -1,4 +1,4 @@
-"""Which earlier trials carry into a round's study, and how they enter it.
+"""Which earlier trials carry into a round's study (`optimizer` copies them in).
 
 A trial joins round r's warm-start set only if its measurement still means the same thing in
 round r's search space; the first rule it fails is the one it is counted under.
@@ -6,46 +6,13 @@ round r's search space; the first rule it fails is the one it is counted under.
 
 from __future__ import annotations
 
-import logging
 import math
-import warnings
 from typing import Any
 
-import optuna
-from optuna.distributions import BaseDistribution, CategoricalDistribution, FloatDistribution, IntDistribution
-from optuna.trial import FrozenTrial, TrialState
-
 from boar import stats, store
+from boar.optimizer import build_frozen_trials, distributions, quiet_optuna  # noqa: F401 - moved there, still importable here
 
 RULE1, RULE2, RULE3 = "rule1_state", "rule2_outside_space", "rule3_fixed"
-
-# The single constraint every trial carries: 0 feasible, 1 a guard failed. TPE reads it from
-# system_attrs ("constraints:guards"), which is where create_trial and Trial.set_constraint put it.
-GUARDS = "guards"
-
-
-def quiet_optuna() -> None:
-    """Optuna's per-trial INFO lines and API-churn warnings would drown the worker log."""
-    optuna.logging.set_verbosity(logging.WARNING)
-    warnings.filterwarnings("ignore", category=optuna.exceptions.ExperimentalWarning)
-    warnings.filterwarnings("ignore", category=FutureWarning, module=r"optuna(\.|$)")
-
-
-def distributions(space: dict[str, dict]) -> dict[str, BaseDistribution]:
-    out: dict[str, BaseDistribution] = {}
-    for name, lever in space.items():
-        kind = lever["type"]
-        if kind == "bool":
-            out[name] = CategoricalDistribution([False, True])
-        elif kind == "int":
-            out[name] = IntDistribution(int(lever["low"]), int(lever["high"]), log=bool(lever.get("log", False)))
-        elif kind == "float":
-            out[name] = FloatDistribution(float(lever["low"]), float(lever["high"]), log=bool(lever.get("log", False)))
-        elif kind == "categorical":
-            out[name] = CategoricalDistribution(list(lever["choices"]))
-        else:
-            raise ValueError(f"lever {name!r} has unknown type {kind!r}")
-    return out
 
 
 def allowed(lever: dict, value: Any) -> bool:
@@ -121,20 +88,3 @@ def incumbent(trials: list[dict], hyps: list[dict], round_r: int, direction: str
     valid, _ = select(trials, hyps, round_r)
     history = [t for t in trials if t["round"] < round_r and not _space_rule(t, hyps, space, defaults)]
     return stats.incumbent(valid, defaults, direction, history)
-
-
-def build_frozen_trials(valid: list[dict], space: dict[str, dict], defaults: dict[str, Any]) -> list[FrozenTrial]:
-    """Warm trials for `study.add_trials`. Levers new to the space are filled in at their default,
-    which is exact: their code didn't exist when the trial ran."""
-    dists = distributions(space)
-    return [
-        optuna.trial.create_trial(
-            state=TrialState.COMPLETE,
-            value=float(t["metric"]),
-            params={name: t["config"].get(name, defaults[name]) for name in space},
-            distributions=dists,
-            constraints={GUARDS: 0.0 if t["state"] == "complete" else 1.0},
-            user_attrs={"boar_trial": t["trial"], "warm": True},
-        )
-        for t in valid
-    ]
