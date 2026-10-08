@@ -74,7 +74,7 @@ Where the implementation deliberately differs from [design.md](../design.md), an
     `supersedes` must be null in setup and must name an active hypothesis in R4. An empty list is refused:
     use `propose --none`. Categorical choices must be distinct and the default must match a choice in
     type as well as value. Float bounds and defaults are stored as floats, and `log` is made explicit.
-13. **Warm-start internals.** `warmstart.build_frozen_trials(valid, space, defaults)` takes three
+13. **Warm-start internals.** `optimizer.build_frozen_trials(valid, space, defaults)` takes three
     arguments; the plan's `direction` argument was unused. The defensive "value outside the lever's
     distribution" check runs in `warmstart.select` and is counted under rule 2. A warm trial with no finite
     metric counts under rule 1.
@@ -173,4 +173,11 @@ Where the implementation deliberately differs from [design.md](../design.md), an
     from the trial's eval. Finding one kills the trial's eval and raises a refusal: the trial is not recorded,
     the worker stops, and `boar wait` names the process and says how to resume. It needs `/proc`, so on
     other systems it finds nothing.
+28. **Optimizer backend.** Only `optimizer` imports Optuna, behind `OptunaBackend`; another optimizer is
+    one more class with the same methods. The round keeps every decision: the warm-start set, the
+    incumbent, which full configs are queued with which labels in which order, and what a resume skips.
+    A backend provides `create` (replacing any study of that name), `resume` (`KeyError` if there is
+    none; it reseeds, see 14, and fails the trial left in flight), `add_warm`, `enqueue(label, params)`
+    (asked for first, in order), `waiting()`, `ask(n)` (params and label, None when sampled) and
+    `tell(state, metric)`.
 
