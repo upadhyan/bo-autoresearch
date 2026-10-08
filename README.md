@@ -1,3 +1,11 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/boar-logo-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/boar-logo-light.svg">
+    <img alt="BOAR logo" src="assets/boar-logo-light.svg" width="400">
+  </picture>
+</p>
+
 # BOAR: Bayesian Optimization AutoResearch
 
 BOAR is a Claude Code plugin that runs an unattended research loop for measurable improvement tasks:
