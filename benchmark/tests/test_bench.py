@@ -93,6 +93,19 @@ def test_each_round_warm_starts_from_the_trials_the_harness_rules_keep():
         assert set(warm) <= set(earlier) and len(warm) == len(earlier) - sum(rec["excluded"].values())
 
 
+def test_each_round_tells_its_study_every_result_with_its_guard():
+    variant = KeepsStudies()
+    for rec, study in zip(run(variant=variant), variant.studies):
+        told = {t.user_attrs["boar_trial"]: t for t in study.trials if not t.user_attrs.get("warm")}
+        assert sorted(told) == [t["trial"] for t in rec["trials"]]
+        for t in rec["trials"]:
+            if t["state"] == "failed":
+                assert told[t["trial"]].state.name == "FAIL"
+            else:
+                assert told[t["trial"]].value == t["metric"]
+                assert told[t["trial"]].constraints == {"guards": 1.0 if t["state"] == "infeasible" else 0.0}
+
+
 class Cold(KeepsStudies):
     """README.md's variant: no warm start."""
 
