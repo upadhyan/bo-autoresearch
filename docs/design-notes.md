@@ -56,6 +56,8 @@ Where the implementation deliberately differs from [design.md](../design.md), an
    gets `BOAR_REPEAT` (new), the repeat index, and the eval derives its seeds from it and `BOAR_SPLIT`, so a
    metric with no timing in it still spreads. An index rather than a random seed keeps a re-measurement
    reproducible and comparisons paired; the baseline and incumbent runs of one holdout pair share one.
+   The floor is also "not known" while every trial it is measured on has bit-identical repeats: a floor
+   of 0 would make the drift check a strict-equality test.
 9. **The eval freeze is a hash, a manifest and a copy.** `eval check` records the hash it checked, and
    `review record eval accept` refuses unless the current `eval/` hash equals the last *passing* check's
    hash. The hash is sha256 over sorted (path, bytes) pairs, skipping `__pycache__/` and `*.pyc`; a symlink

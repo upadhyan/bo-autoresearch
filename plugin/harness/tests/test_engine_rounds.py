@@ -724,6 +724,14 @@ def test_drift_is_judged_against_the_floor_from_earlier_rounds(run):
     assert facts["noise_floor"] == pytest.approx(0.2)
 
 
+def test_summary_says_why_there_is_no_floor_when_baseline_repeats_are_bit_identical(run):
+    for t in (_hand_trial(1, 1, {}, [100.0, 100.0], "baseline"), _hand_trial(2, 1, {"fast_a": True}, [80.0, 80.0])):
+        run.append_trial(t)
+    summary = rounds.write_summary(run, 1).read_text()
+    assert ("## Noise floor\n\nNot known: every complete baseline trial with two or more dev repeats (trials 1) "
+            "returned the same metric bit for bit, so they measured no noise.\n") in summary
+
+
 def test_an_incumbent_that_breaks_a_guard_on_re_measurement_is_flagged_and_dethroned(run):
     rounds.start_round(run, foreground=True)
     defaults = store.lever_defaults(run.hypotheses())
