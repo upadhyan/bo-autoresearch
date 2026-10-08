@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import random
+import statistics
 
 import pytest
 
@@ -156,6 +157,15 @@ def test_a_crash_or_a_broken_guard_stops_the_repeats():
 def test_a_config_measured_again_gets_the_same_values_on_its_commit_and_new_ones_on_the_next():
     first, again, new = (bench.measure({"batch": 4}, bench.WORLD, c, 0, 3)["repeats"] for c in ("c1", "c1", "c2"))
     assert again == first != new
+
+
+def test_configs_measured_at_the_same_seed_and_repeat_move_together_on_any_commit():
+    def relative(config: dict, commit: str) -> list[float]:
+        true = bench.true_metric(config, bench.WORLD)[0]
+        return [v / true for v in bench.measure(config, bench.WORLD, commit, 0, 200)["repeats"]]
+
+    # Half of each config's noise is shared: 0.5 expected, 0 if unpaired.
+    assert statistics.correlation(relative({}, "c1"), relative({"batch": 4}, "c2")) > 0.3
 
 
 def _draw(lever: dict, rng: random.Random):
