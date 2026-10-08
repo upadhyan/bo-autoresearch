@@ -69,6 +69,27 @@ def test_the_warm_start_leaves_out_trials_by_the_harness_rules():
     assert rounds[3]["excluded"]["rule2_outside_space"] == sum(t["config"]["buffer_kb"] != 8 for t in kept)
 
 
+class KeepsStudies(bench.Harness):
+    """The harness, keeping each round's study."""
+
+    def __init__(self) -> None:
+        self.studies = []
+
+    def backend(self, space, seed, n_startup):
+        backend = super().backend(space, seed, n_startup)
+        self.studies.append(backend._study)
+        return backend
+
+
+def test_each_round_warm_starts_from_the_trials_the_harness_rules_keep():
+    variant = KeepsStudies()
+    rounds = run(variant=variant)
+    for rec, study in zip(rounds, variant.studies):
+        earlier = [t["trial"] for prev in rounds[: rec["round"] - 1] for t in prev["trials"]]
+        warm = [t.user_attrs["boar_trial"] for t in study.trials if t.user_attrs.get("warm")]
+        assert set(warm) <= set(earlier) and len(warm) == len(earlier) - sum(rec["excluded"].values())
+
+
 def test_the_incumbent_is_measured_again_only_on_a_new_commit():
     rounds = run()
     r4, r5 = rounds[3], rounds[4]
@@ -104,6 +125,17 @@ def test_regret_and_cost_of_a_run_that_only_measures_the_baseline():
         [10.1, 11.7, *[1.1 * (11.7 + gc)] * 3, 1.1 * (11.8 + gc)], rel=1e-6)
     assert [rec["runs"] for rec in rounds] == [8] * 6  # 4 trials of 2 repeats
     assert [rec["remeasured"] for rec in rounds] == [3, 4, 4, 4, 4, 4]
+
+
+def test_a_crash_or_a_broken_guard_stops_the_repeats():
+    world = {**bench.WORLD, "crash_above": 16}
+    trials = [bench.measure(config, world, "c1", 0, 3) for config in ({"batch": 32}, {"prefetch": 0.9}, {})]
+    assert [(t["state"], t["runs"]) for t in trials] == [("failed", 1), ("infeasible", 1), ("complete", 3)]
+
+
+def test_a_config_measured_again_gets_the_same_values_on_its_commit_and_new_ones_on_the_next():
+    first, again, new = (bench.measure({"batch": 4}, bench.WORLD, c, 0, 3)["repeats"] for c in ("c1", "c1", "c2"))
+    assert again == first != new
 
 
 def _draw(lever: dict, rng: random.Random):
@@ -144,3 +176,9 @@ def test_seeds_rounds_and_trials_come_from_the_command_line(capsys):
     assert [line.split(" | ")[0].strip("| ") for line in out.splitlines() if line.startswith("| ")] == [
         "round", "1", "2", "all"]
     assert "| 3 [3, 3] |" in out  # round 1: 3 trials of 1 repeat
+
+
+@pytest.mark.parametrize("flag", ["--seeds", "--rounds", "--trials", "--repeats"])
+def test_the_command_line_refuses_a_count_below_one(flag):
+    with pytest.raises(SystemExit):
+        bench.main([flag, "0"])

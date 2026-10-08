@@ -214,6 +214,8 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--repeats", type=int, default=3, help="eval runs per trial (default 3)")
     ap.add_argument("--variant", action="append", choices=sorted(VARIANTS), help="repeat to compare (default harness)")
     args = ap.parse_args(argv)
+    if min(args.seeds, args.rounds, args.trials, args.repeats) < 1:
+        ap.error("--seeds, --rounds, --trials and --repeats must be at least 1")
     cfg = {"rounds": args.rounds, "trials_per_round": args.trials, "repeats": args.repeats}
     for name in args.variant or ["harness"]:
         start = time.monotonic()
