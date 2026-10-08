@@ -35,6 +35,9 @@ measured with noise seeded like an eval that reads `BOAR_SPLIT` and `BOAR_REPEAT
 shifts, some of which reorder configs. The round itself is the harness's `warmstart`, `OptunaBackend`, `rounds` and
 `control` code.
 
+`--scenario staggered` runs `SCENARIOS`' other scenario instead: every hypothesis but H3 starts after round 1, one per
+round, and the world never changes.
+
 ## Adding a variant
 
 A variant is a subclass of `Harness` that overrides one or more of its three methods:
@@ -62,3 +65,5 @@ VARIANTS = {"harness": Harness(), "cold": Cold()}
 ```sh
 uv run --frozen --project plugin/harness python benchmark/bench.py --variant harness --variant cold
 ```
+
+Experiments' variants stay in `VARIANTS`: `seed-*` and `extra-sampled*` are [#44's](../docs/experiments/44-seeding.md).
