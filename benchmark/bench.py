@@ -1,6 +1,6 @@
 """Offline BO benchmark: simulated multi-round BOAR runs on a synthetic objective, scored by regret.
 
-Run from the repo root (README.md says what is simulated and how to add a variant):
+Run from the repo root (README.md says how to add a variant):
 
     uv run --frozen --project plugin/harness python benchmark/bench.py [--seeds 100] [--variant harness …]
 """
@@ -50,7 +50,7 @@ WORLD = {"scale": 1.0, "route": {"per_request": 4.5, "per_file": 0.9, "once": 0.
          "gc_opt": 4.0, "crash_above": None}
 
 # What happens before each round: hypotheses activated (`add`) or removed, levers repaired after a `fix`
-# decision, and `world` changes. Anything but a removal changes the code, so the round gets a new commit.
+# decision, and `world` changes. A non-empty step changes the code, so the round gets a new commit.
 SCENARIO = [
     {"add": ["H1", "H2", "H3"]},
     {"add": ["H4"], "world": {"crash_above": 16}},  # H4's first version crashes on batches over 16
@@ -156,7 +156,7 @@ def simulate(variant: Harness, seed: int, cfg: dict) -> list[dict]:
         step = SCENARIO[r - 1] if r <= len(SCENARIO) else {}
         _change(hyps, step, r)
         world.update(step.get("world", {}))
-        if not commit or set(step) - {"remove"}:
+        if not commit or step:
             commit = f"c{r}"
         space, defaults = store.search_space(hyps), store.lever_defaults(hyps)
         backend = variant.backend(space, seed + r, cfg["trials_per_round"])
@@ -214,8 +214,6 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--repeats", type=int, default=3, help="eval runs per trial (default 3)")
     ap.add_argument("--variant", action="append", choices=sorted(VARIANTS), help="repeat to compare (default harness)")
     args = ap.parse_args(argv)
-    if min(args.seeds, args.rounds, args.trials, args.repeats) < 1:
-        ap.error("--seeds, --rounds, --trials and --repeats must be at least 1")
     cfg = {"rounds": args.rounds, "trials_per_round": args.trials, "repeats": args.repeats}
     for name in args.variant or ["harness"]:
         start = time.monotonic()

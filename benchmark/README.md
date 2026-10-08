@@ -2,7 +2,7 @@
 
 `bench.py` simulates multi-round BOAR runs on a cheap synthetic objective, so an idea about the optimizer can be
 compared with the harness in seconds instead of overnight runs. It is dev tooling: it imports the harness and
-doesn't ship with the plugin. Experiment write-ups go in `docs/experiments/`.
+doesn't ship with the plugin.
 
 ## Running it
 
@@ -26,30 +26,11 @@ last commit. For each variant it prints a table of median [IQR] over seeds:
 
 ## What is simulated
 
-A target like [`examples/toy`](../examples/toy): the seconds a log summariser takes, with one hypothesis per cost.
-The levers cover every type: a bool (`dedup_set`), a categorical (`route_table`), log-scale ints (`buffer_kb`, which
-does nothing, and `batch`), a log-scale float (`gc_scale`) and a linear float with a bool (`prefetch`,
-`prefetch_async`). The guard fails when `prefetch` is above 0.8, where the metric is lowest.
-
-`SCENARIO` sets what happens before each round:
-
-| Round | Change | Commit |
-|---|---|---|
-| 1 | H1 dedup, H2 route table and H3 buffer active | new |
-| 2 | H4 batch added; its first version crashes on batches over 16 | new |
-| 3 | H4 marked `fix` in round 2 and repaired; H5 GC added; everything 10% slower | new |
-| 4 | H3 removed (its lever back at default); H6 prefetch added; the best batch moves from 16 to 4 | new |
-| 5 | nothing | same as round 4 |
-| 6 | `route_table` `per_file` now beats `once` | new |
-
-Each repeat's noise has a part every config shares and a part of its own (2% each), drawn from (seed, split,
-repeat) and (seed, commit, config, split, repeat). So configs are compared paired, as in an eval that seeds from
-`BOAR_SPLIT` and `BOAR_REPEAT`, and a config measured again on the same commit gets the same values.
-
-The round itself is the harness's code, called on in-memory trial records: `warmstart.select` and
-`warmstart.incumbent` (rules 1-3), `OptunaBackend` (multivariate TPE, warm trials through `add_warm`),
-`rounds.extra_queue`, `_filled`, `_same_as` and `_enqueue` (a queued config runs once per commit), and
-`control.round_size`. Hypotheses and levers are in the harness's schema.
+A target like [`examples/toy`](../examples/toy) with levers of every type and a guard (`PROPOSALS`, `true_metric`),
+measured with noise seeded like an eval that reads `BOAR_SPLIT` and `BOAR_REPEAT`, so configs are compared paired
+(`measure`). `SCENARIO` sets what changes before each round: hypotheses added, fixed and removed, a crash, and metric
+shifts, some of which reorder configs. The round itself is the harness's `warmstart`, `OptunaBackend`, `rounds` and
+`control` code.
 
 ## Adding a variant
 

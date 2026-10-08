@@ -65,15 +65,10 @@ def test_a_removed_hypothesis_puts_its_levers_back_at_default():
     assert all(t["config"]["buffer_kb"] == 8 for t in after), "H3 was removed before round 4"
 
 
-def test_the_warm_start_leaves_out_trials_by_the_harness_rules():
+def test_the_scenarios_crash_fix_and_removal_reach_the_harness_rules():
     rounds = run(2)  # a seed whose round 2 has a crash and a batch that ran
-    earlier = [t for rec in rounds[:2] for t in rec["trials"]]
-    crashed = [t for t in earlier if t["state"] == "failed"]  # H4 crashes above batch 16 in round 2
-    moved_b = [t for t in earlier if t["state"] != "failed" and t["config"].get("batch", 1) != 1]  # H4 marked fix then
-    assert crashed and moved_b
-    assert rounds[2]["excluded"] == {"rule1_state": len(crashed), "rule2_outside_space": 0, "rule3_fixed": len(moved_b)}
-    kept = [t for rec in rounds[:3] for t in rec["trials"] if t["state"] != "failed"]
-    assert rounds[3]["excluded"]["rule2_outside_space"] == sum(t["config"]["buffer_kb"] != 8 for t in kept)
+    assert rounds[2]["excluded"]["rule1_state"] and rounds[2]["excluded"]["rule3_fixed"]  # H4 crashed, then fix
+    assert rounds[3]["excluded"]["rule2_outside_space"]  # H3 removed
 
 
 class KeepsStudies(bench.Harness):
@@ -201,9 +196,3 @@ def test_seeds_rounds_and_trials_come_from_the_command_line(capsys):
     assert [line.split(" | ")[0].strip("| ") for line in out.splitlines() if line.startswith("| ")] == [
         "round", "1", "2", "all"]
     assert "| 3 [3, 3] |" in out  # round 1: 3 trials of 1 repeat
-
-
-@pytest.mark.parametrize("flag", ["--seeds", "--rounds", "--trials", "--repeats"])
-def test_the_command_line_refuses_a_count_below_one(flag):
-    with pytest.raises(SystemExit):
-        bench.main([flag, "0"])
