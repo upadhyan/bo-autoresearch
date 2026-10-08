@@ -173,16 +173,11 @@ Where the implementation deliberately differs from [design.md](../design.md), an
     from the trial's eval. Finding one kills the trial's eval and raises a refusal: the trial is not recorded,
     the worker stops, and `boar wait` names the process and says how to resume. It needs `/proc`, so on
     other systems it finds nothing.
-28. **Optimizer backend.** Optuna sits behind `optimizer.OptunaBackend`, the only module that imports it,
-    so another optimizer (Ax, or a sampler under benchmark) is one more class with the same methods. The
-    round keeps every decision: the warm-start set, the incumbent, which full configs are queued with which
-    labels in which order, and which of them a resume skips. A backend provides `create` (a new study,
-    replacing a half-built one of that name, for direction min or max and a seed), `resume` (the stored
-    study, `KeyError` if there is none; it reseeds (see 14) and fails the trial an interrupted run left in
-    flight), `add_warm` (the warm-start set as finished trials with their guard results),
-    `enqueue(label, params)` (asked for first, in order), `waiting()` (labels queued but not asked for yet),
-    `ask(n)` (trial n's params and its label, None when sampled) and `tell(state, metric)` (failed,
-    infeasible or complete). The Optuna backend keeps `study.db` as it was (study `round-<r>`, user attrs
-    `queued`, `boar_trial` and `warm`, the `guards` constraint, see 1), so a round interrupted under older
-    code still resumes.
+28. **Optimizer backend.** Only `optimizer` imports Optuna, behind `OptunaBackend`; another optimizer is
+    one more class with the same methods. The round keeps every decision: the warm-start set, the
+    incumbent, which full configs are queued with which labels in which order, and what a resume skips.
+    A backend provides `create` (replacing any study of that name), `resume` (`KeyError` if there is
+    none; it reseeds, see 14, and fails the trial left in flight), `add_warm`, `enqueue(label, params)`
+    (asked for first, in order), `waiting()`, `ask(n)` (params and label, None when sampled) and
+    `tell(state, metric)`.
 

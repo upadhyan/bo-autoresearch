@@ -1,9 +1,4 @@
-"""The optimizer backend: a round's study, and the only module that imports Optuna.
-
-The round decides what runs (the warm-start set, which configs are queued, their labels and order);
-the backend stores the study, copies warm trials in, hands out queued configs before sampled ones and
-records each result.
-"""
+"""The optimizer backend: a round's study, and the only module that imports Optuna."""
 
 from __future__ import annotations
 
