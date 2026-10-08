@@ -345,7 +345,7 @@ def test_first_round_prints_a_table_per_variant_with_what_the_new_levers_can_sav
     monkeypatch.setitem(bench.VARIANTS, "best", Best())
     first_round.main(["--seeds", "1", "--trials", "1", "--repeats", "1", "--scenario", "staggered",
                       "--variant", "best"])
-    assert "| 6 | H6 | 5 | 1.2 | 0 [0, 0] | 0 [0, 0] |" in capsys.readouterr().out
+    assert "| 6 | H6 | 5 | 1.2 [1.2, 1.2] | 1.2 | 0 [0, 0] | 0 [0, 0] |" in capsys.readouterr().out
 
 
 class Queued(Fixed):
@@ -375,3 +375,7 @@ def test_first_rounds_count_only_the_trials_copied_in_and_score_only_the_sampled
     assert [(row["round"], row["copied"]) for row in rows] == [(1, 0), (2, 4), (3, 5), (4, 9)]
     # The queued incumbent has the new levers at default; the sampled trials have them at best.
     assert [row["sampled"] for row in rows] == [[0, 0, 0]] * 4
+    # The incumbent each round starts from, the baseline in round 1, loses all of the new levers' gain, and from
+    # round 3 also batch 1's (16 is best until round 4, then 4) and everything is 1.1x slower.
+    gc = 0.15 * 1.921812
+    assert [row["before"] for row in rows] == pytest.approx([10.1, 1.6, 1.1 * (1.6 + gc), 1.1 * (0.4 + 1.2)])
