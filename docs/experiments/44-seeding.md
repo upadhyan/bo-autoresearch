@@ -16,16 +16,18 @@ The offline benchmark ([benchmark/](../../benchmark/README.md)) on two scenarios
 - `staggered`: H3 in round 1, then H1 (bool), H2 (categorical), H4, H5 and H6, one per round; the world never changes.
   Added because in `default` the only bool or categorical lever that starts after round 1 is `prefetch_async`, which
   pays only with `prefetch` moved too, while TPE almost never samples a numeric lever exactly at its default (design
-  note 17). In the NeuralSGT run 22 of 35 accepted hypotheses started after round 1.
+  note 17). In the NeuralSGT run 22 of 35 accepted hypotheses started after round 1. `default` turned out to test
+  the premise less still: after H3's removal, round 4 copies in about one of the 18 earlier trials, so H6's first
+  round there samples at random (first-round table below).
 
 Variants (`bench.VARIANTS`):
 
 | variant | queue |
 |---|---|
 | `harness` | the incumbent (round 1: the baseline), then `rounds.extra_queue`'s configs |
-| `seed-good`, `seed-bad`, `seed-mixed` | also one trial per hypothesis activated this round, from round 2 on: its levers at the seed, the rest at the incumbent |
+| `seed-good`, `seed-bad`, `seed-mixed`, `seed-flipped` | also one trial per hypothesis activated this round, from round 2 on: its levers at the seed, the rest at the incumbent |
 | `seed-mixed-r1` | the same, from round 1 on |
-| `extra-sampled`, `extra-sampled-r1` | the control: as many trials as `seed-mixed(-r1)`, the seeds' slots sampled by TPE |
+| `extra-sampled`, `extra-sampled-r1` | the control: as many trials as `seed-*(-r1)` (every seed set seeds every hypothesis), the seeds' slots sampled by TPE |
 
 A seed is the proposal's setting of each lever it names; a bool lever it doesn't name is seeded at its non-default
 value, a numeric or categorical one not at all (a categorical lever has several non-default choices, and taking the
@@ -43,7 +45,8 @@ Each seed against the baseline, in `default`'s world in the round its hypothesis
 | H6 | `prefetch` (0.0), `prefetch_async` (false) | 0.5, true | 0.83 better | 1.0, true | guard broken |
 
 `seed-mixed` takes the good seed for odd-numbered hypotheses and the bad one for even ones: from round 2 on that is
-H4 bad, H5 good, H6 bad in `default`, and H1 good, H2 bad, H4 bad, H5 good, H6 bad in `staggered`.
+H4 bad, H5 good, H6 bad in `default`, and H1 good, H2 bad, H4 bad, H5 good, H6 bad in `staggered`. `seed-flipped`,
+added after the first results, swaps them: H4 good, H5 bad, H6 good in `default`, and only H5 bad in `staggered`.
 
 Budgets: `--trials 6 --repeats 2` (the NeuralSGT run's) and `--trials 12 --repeats 2`, 6 rounds, seeds 0-499. From
 the repo root:
@@ -58,6 +61,18 @@ for s in default staggered; do for t in 6 12; do
 done; done
 ```
 
+Added after the first results, to check the reasons given for the decision:
+
+```sh
+for s in default staggered; do for t in 6 12; do
+  b="uv run --frozen --project plugin/harness python benchmark/bench.py --seeds 500 --trials $t --repeats 2 --scenario $s"
+  $b --variant extra-sampled --variant seed-good --variant seed-flipped
+  $b --variant harness --variant seed-flipped
+  f="uv run --frozen --project plugin/harness python benchmark/first_round.py --seeds 500 --trials $t --repeats 2 --scenario $s"
+  $f --variant harness --variant seed-good --variant seed-mixed --variant seed-flipped --variant extra-sampled
+done; done
+```
+
 Regret is each run's mean over its 6 rounds; differences are paired per seed (`bench.compare`).
 
 **Decision rule**, fixed before the runs:
@@ -65,7 +80,7 @@ Regret is each run's mean over its 6 rounds; differences are paired per seed (`b
 - **Yes** only when, on both scenarios at both budgets, `seed-mixed` − `harness` and `seed-mixed` − `extra-sampled`
   both have a regret CI entirely below zero. The second is the cost test: the eval runs the seeds add must buy more
   than the same runs given to TPE. Otherwise **no**.
-- `seed-good` and `seed-bad` bound the best and worst case; they don't enter the rule.
+- `seed-good` and `seed-bad` bound the best and worst case; they don't enter the rule, nor does `seed-flipped`.
 - On yes, round 1 is seeded too when `seed-mixed-r1` − `seed-mixed` and `seed-mixed-r1` − `extra-sampled-r1` both have
   a regret CI entirely below zero at both budgets on `default` (`staggered` has only H3 in round 1).
 - A deciding CI that ends within a tenth of its width of zero is run again on 2000 seeds.
@@ -94,6 +109,17 @@ uv run --frozen --project plugin/harness python benchmark/bench.py --seeds 2000 
   --scenario default --variant extra-sampled --variant seed-mixed
 ```
 
+Added after the first results, the same way:
+
+| | default, 6 trials | default, 12 | staggered, 6 | staggered, 12 |
+|---|---|---|---|---|
+| seed-good − extra-sampled | 0.146 [0.0745, 0.217] | 0.0127 [-0.0186, 0.0451] | -0.212 [-0.227, -0.197] | -0.202 [-0.215, -0.189] |
+| seed-flipped − harness | 0.00604 [-0.0659, 0.0749] | -0.00609 [-0.0328, 0.0223] | -0.252 [-0.268, -0.235] | -0.208 [-0.223, -0.194] |
+| seed-flipped − extra-sampled | 0.154 [0.0839, 0.227] | 0.0221 [-0.00957, 0.0549] | -0.191 [-0.207, -0.175] | -0.194 [-0.208, -0.181] |
+
+In `staggered`, `seed-good` came out lower than `extra-sampled` on all 500 seeds at both budgets, `seed-flipped`
+lower than both on 483-500.
+
 Eval runs per run: the harness's median, then the mean difference.
 
 | | default, 6 trials | default, 12 | staggered, 6 | staggered, 12 |
@@ -103,17 +129,36 @@ Eval runs per run: the harness's median, then the mean difference.
 | seed-bad, seed-mixed − harness | 4.2, 4.2 | 4.0, 3.9 | 9.0, 9.0 | 9.0, 9.0 |
 | extra-sampled − harness | 5.2 | 5.0 | 10.0 | 10.0 |
 | seed-mixed-r1 − seed-mixed | 8.0 | 7.2 | 2.0 | 2.0 |
+| seed-flipped − harness | 5.8 | 4.4 | 10.0 | 10.0 |
+| seed-good, seed-flipped − extra-sampled | 0.6, 0.6 | -0.6, -0.6 | 0, 0 | 0, 0 |
 
-Regret after the round a hypothesis starts in, `staggered`, 6 trials, median [IQR] (it also counts what earlier rounds
-missed):
+The round each hypothesis starts in (`first_round.py`). A hypothesis's own regret is what its levers lose against
+their best setting; `true_metric` adds a term per hypothesis, so it is that hypothesis's share of the regret. Columns:
+the earlier trials the round copies in (mean), then the new levers' own regret at default (all they can save), in
+the round's sampled trials and in the incumbent after the round, median [IQR], seconds. The harness, 6 trials:
 
-| round: hypothesis starting | harness | seed-good | seed-mixed | extra-sampled |
+| scenario, round: hypothesis | copied | at default | sampled trials | incumbent after |
 |---|---|---|---|---|
-| 2: H1, bool | 0 [0, 0] | 0 [0, 0] | 0 [0, 0] | 0 [0, 0] |
-| 3: H2, categorical (mixed: per_file) | 0 [0, 0.6] | 0 [0, 0] | 0.6 [0, 0.6] | 0 [0, 0] |
-| 4: H4, int (mixed: bad) | 0.4 [0.2, 0.669] | 0.0689 [0.0168, 0.1] | 0.601 [0.0689, 0.657] | 0.2 [0.0689, 0.583] |
-| 5: H5, float (mixed: good) | 0.162 [0.0537, 0.625] | 0.0405 [0.0174, 0.0782] | 0.443 [0.0573, 0.641] | 0.099 [0.0312, 0.389] |
-| 6: H6, float and bool (mixed: breaks the guard) | 1.15 [1.05, 1.6] | 0.484 [0.46, 0.526] | 1.25 [1.11, 1.7] | 1.1 [1.01, 1.25] |
+| default, 2: H4, int, log | 6 | 1.6 | 0.0652 [0.0154, 0.165] | 0.0172 [0.00371, 0.0689] |
+| default, 3: H5, float, log | 7.02 | 0.317 | 0.205 [0.0553, 0.609] | 0.0636 [0.013, 0.172] |
+| default, 4: H6, float and bool | 1.15 | 1.32 | 0.644 [0.328, 0.991] | 0.7 [0.472, 0.996] |
+| staggered, 2: H1, bool | 6 | 5.9 | 0 [0, 0] | 0 [0, 0] |
+| staggered, 3: H2, categorical | 12 | 4.2 | 0.6 [0, 0.6] | 0 [0, 0.6] |
+| staggered, 4: H4 | 18 | 1.6 | 0.4 [0.282, 0.583] | 0.2 [0.1, 0.4] |
+| staggered, 5: H5 | 24 | 0.288 | 0.0424 [0.0087, 0.301] | 0.0191 [0.00433, 0.0545] |
+| staggered, 6: H6 | 30 | 1.2 | 1.05 [0.998, 1.11] | 1.02 [0.962, 1.07] |
+
+At 12 trials `default`'s round 4 copies in 1.38 of 36 trials, and in `staggered`'s round 6 the sampled trials leave
+1.11 [1.08, 1.14] s of H6's 1.2 and the incumbent 1.07 [1.04, 1.11].
+
+The incumbent's own regret after the round, `staggered`, 6 trials (H1's is 0 in every variant):
+
+| round: hypothesis | harness | seed-good | seed-mixed | seed-flipped | extra-sampled |
+|---|---|---|---|---|---|
+| 3: H2 | 0 [0, 0.6] | 0 [0, 0] | 0.6 [0, 0.6] (bad seed) | 0 [0, 0] | 0 [0, 0] |
+| 4: H4 | 0.2 [0.1, 0.4] | 0.0689 [0.0168, 0.1] | 0.057 [0.0154, 0.142] (bad seed) | 0.0689 [0.0168, 0.1] | 0.142 [0.046, 0.282] |
+| 5: H5 | 0.0191 [0.00433, 0.0545] | 0.0126 [0.00295, 0.0383] | 0.0136 [0.00346, 0.0353] | 0.0318 [0.00723, 0.0893] (bad seed) | 0.0138 [0.00338, 0.0449] |
+| 6: H6 | 1.02 [0.962, 1.07] | 0.45 [0.45, 0.45] | 1.04 [0.983, 1.1] (bad seed) | 0.45 [0.45, 0.45] | 1 [0.942, 1.06] |
 
 ## Decision
 
@@ -121,23 +166,36 @@ missed):
 the same extra trials sampled by TPE beat it in all four cells. Round 1 is moot; it fails its own test too. Nothing
 changes in the harness: proposals get no seed.
 
-- The premise holds only in part. TPE sets a new numeric lever off default anyway, and found H1's bool (5.9 s) in the
-  round it started in at least 3 runs of 4. What it misses in a hypothesis's first round is a joint setting: H6 pays
-  only with `prefetch` raised and `prefetch_async` on, and the harness's regret after round 6 stays 1.15 s of the
-  1.2 s H6 can save.
-- A seed is worth what its setting is worth, and the reviewer can't know that before it runs. Good seeds win where
-  TPE misses (`staggered`: -0.27 s and -0.22 s, every seed lower) and nothing on `default`, where TPE finds the
-  numeric levers' wins itself. Bad seeds cost: a broken guard buys nothing (round 6: 1.25 s against the harness's
-  1.15), and a seed that beats the incumbent without being best anchors the search (H2 seeded at per_file leaves
-  round 3's median regret at 0.6 s, against 0 for the harness).
-- The extra trials are what helps. `extra-sampled` beat the harness in three cells of four, and `seed-mixed-r1`'s
+What the no rests on:
+
+- Under the rule `default` settles it alone: no seed set passes there, not even `seed-good` (its CI against the
+  harness spans zero at both budgets, and `extra-sampled` beats it at 6 trials). `default` exercises the premise only
+  for H4 and H5, log-scale levers whose gain the harness's incumbent mostly has after their first round (0.0172 s of
+  1.6 left, 0.0636 of 0.317). H6's round 4 copies in about one earlier trial, so TPE samples it at random, not near
+  the default.
+- On `staggered` the premise holds for H6: its round copies in 30 trials, all at `prefetch` 0, and TPE's samples stay
+  near that default, the low end of a linear range. They leave 1.05 s of the 1.2 s H6 can save, though
+  `prefetch` alone could save 0.8, and the incumbent after the round leaves 1.02 s. 19 of the NeuralSGT run's 23
+  numeric levers had their default on a range bound (retro M6). There good seeds beat the same extra trials sampled
+  by TPE (-0.212 and -0.202 s), and so does `seed-flipped`, with only H5's seed bad (-0.191 and -0.194). `seed-mixed`
+  loses: its bad seeds fall on H2 and H6, and the odd/even split that put them there is arbitrary. On `staggered`
+  alone the answer turns on how good the proposers' seeds are, which this benchmark can't measure.
+- Bad seeds: H2 seeded at per_file, better than the default but not best, anchors the search (H2's own regret after
+  its round: median 0.6 s, against 0 for the harness). A seed that breaks the guard buys nothing (H6's: 1.04 s
+  against 1.02). H4's doesn't crash in `staggered` and helps (0.057 s against 0.2); H5's costs little (0.0318 against
+  0.0191).
+- Extra trials help without seeds too: `extra-sampled` beat the harness in three cells of four, and `seed-mixed-r1`'s
   -0.29 s over `seed-mixed` (`default`, 6 trials) is no better than `extra-sampled-r1` gets with the same trials.
 
 For the roadmap:
 
-- #45 (exploration budget) branches from here with `seed-*` and `extra-sampled*` registered. `extra-sampled` is
-  evidence for it: one more TPE trial per new hypothesis, 5-10 more eval runs per run, lowered regret by 0.148,
-  0.0282 and 0.0604 s, and by 0.0139 s with a CI spanning zero at `staggered`, 12 trials.
-- NeuralSGT's single-lever probes (retro M5, 64% of the gain) were queued by `investigate` after the agent had seen a
-  round's results, not fixed when the hypothesis was proposed. This benchmark has 7 levers against that run's 15-22,
-  where TPE covers each lever less; it can't rule out seeding paying in a space that size.
+- #45 (exploration budget) branches from here with `seed-*` and `extra-sampled*` registered. `extra-sampled` −
+  `harness` shows that one more trial per new hypothesis lowers regret (by 0.148, 0.0282 and 0.0604 s, and by
+  0.0139 s with a CI spanning zero at `staggered`, 12 trials), but it spends 5-10 more eval runs per run, and TPE
+  samples those trials: from round 2 on the copies use up `n_startup_trials` (`copied` above), except in `default`'s
+  round 4. It says nothing about #45's k random trials per round.
+- NeuralSGT's single-lever probes (retro M5, 64% of the gain) were close to this variant: at round 1's close the
+  agent queued a probe for each of its 13 hypotheses with identical boilerplate, as screening, and two of the four
+  probe trials behind that gain (11 and 15) were among them. The retro recommends probing on activation. Its
+  probes' settings were the agent's, in a space of 15-22 levers that TPE covers less than this one's 7, so that run
+  is evidence that seeds can pay; how often a proposer's seeds are good, which `staggered` turns on, stays open.
