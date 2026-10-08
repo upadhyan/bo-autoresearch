@@ -178,7 +178,8 @@ def _run(name: str, seed: int, cfg: dict) -> tuple[list[dict], list[dict]]:
 
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description="#47: the harness on Ax's GP against TPE, on the same seeds.")
-    ap.add_argument("--seeds", type=int, default=30, help="runs per variant, seeded 0, 1, … (default 30)")
+    ap.add_argument("--seeds", type=int, default=30, help="runs per variant (default 30)")
+    ap.add_argument("--first-seed", type=int, default=0, help="seed of the first run, then 1 more each (default 0)")
     ap.add_argument("--rounds", type=int, default=len(bench.SCENARIO), help=f"default {len(bench.SCENARIO)}")
     ap.add_argument("--trials", type=int, default=12, help="trials per round (default 12)")
     ap.add_argument("--repeats", type=int, default=2, help="eval runs per trial (default 2)")
@@ -193,7 +194,8 @@ def main(argv: list[str] | None = None) -> None:
     with ProcessPoolExecutor(args.jobs, mp_context=multiprocessing.get_context("spawn")) as pool:
         for name in names:
             start = time.monotonic()
-            out = list(pool.map(_run, [name] * args.seeds, range(args.seeds), [cfg] * args.seeds))
+            seeds = range(args.first_seed, args.first_seed + args.seeds)
+            out = list(pool.map(_run, [name] * args.seeds, seeds, [cfg] * args.seeds))
             runs[name], records[name] = [run for run, _ in out], [rec for _, recs in out for rec in recs]
             print(f"{name}: {args.seeds} seeds in {time.monotonic() - start:.0f} s on {args.jobs} processes; "
                   "median [IQR] over seeds\n")

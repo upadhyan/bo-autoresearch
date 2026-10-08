@@ -122,3 +122,10 @@ def test_the_command_runs_each_variant_on_the_same_seeds_and_compares_it_with_th
     # Each seed's round 1: the baseline, then one startup draw.
     assert [line.split(" | ")[:2] for line in out.splitlines() if line.startswith(("| harness", "| ax"))] == [
         ["| harness", "2"], ["| ax-crash", "2"]]
+
+
+def test_the_seeds_can_start_past_zero_for_a_fresh_set(capsys):
+    cfg = {"rounds": 2, "trials_per_round": 3, "repeats": 1}
+    ax_gp.main(["--first-seed", "7", "--seeds", "1", "--rounds", "2", "--trials", "3", "--repeats", "1", "--jobs", "1",
+                "--variant", "harness"])
+    assert bench.report([bench.simulate(bench.Harness(), 7, cfg)]) in capsys.readouterr().out

@@ -74,3 +74,13 @@ uv run --frozen --project benchmark python benchmark/ax_gp.py --seeds 60 --trial
 uv run --frozen --project benchmark python benchmark/ax_gp.py --seeds 30 --trials 12 --repeats 2 --jobs 8 --variant harness --variant ax-crash
 uv run --frozen --project benchmark python benchmark/ax_gp.py --seeds 30 --trials 24 --repeats 2 --jobs 8 --variant harness --variant ax-crash
 ```
+
+**Confirmation of `ax-crash`**, fixed after its 12-trial result and before its 6- and 24-trial results. If
+`ax-crash` passes the rule at every budget above, it runs again on fresh seeds: 100-159 at 6 trials, 100-129 at 12
+and 24. Go only if it passes the rule there too, at every budget.
+
+```sh
+uv run --frozen --project benchmark python benchmark/ax_gp.py --first-seed 100 --seeds 60 --trials 6 --repeats 2 --jobs 8 --variant harness --variant ax-crash
+uv run --frozen --project benchmark python benchmark/ax_gp.py --first-seed 100 --seeds 30 --trials 12 --repeats 2 --jobs 8 --variant harness --variant ax-crash
+uv run --frozen --project benchmark python benchmark/ax_gp.py --first-seed 100 --seeds 30 --trials 24 --repeats 2 --jobs 8 --variant harness --variant ax-crash
+```
