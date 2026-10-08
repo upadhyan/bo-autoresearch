@@ -37,5 +37,5 @@ def test_resume_names_the_queued_configs_still_waiting(tmp_path):
 
 def test_only_the_backend_imports_optuna():
     src = Path(optimizer.__file__).parent
-    users = [p.name for p in sorted(src.glob("*.py")) if re.search(r"^(import|from) optuna\b", p.read_text(), re.M)]
+    users = [p.name for p in sorted(src.glob("*.py")) if re.search(r"^\s*(import|from) optuna\b", p.read_text(), re.M)]
     assert users == ["optimizer.py"]
