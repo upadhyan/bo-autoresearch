@@ -251,11 +251,14 @@ def test_seeding_queues_each_hypothesis_activated_from_round_2_at_its_seed_from_
     assert [len(rec["trials"]) for rec in rounds] == [4, 5, 5, 5, 4, 4]  # a seed is an extra trial
 
 
-def test_a_bool_lever_with_no_seed_is_seeded_at_its_non_default_value_and_a_numeric_one_not_at_all():
+def test_a_bool_lever_with_no_seed_is_seeded_at_its_non_default_value_a_numeric_or_categorical_one_not_at_all():
     rounds = run(variant=bench.Seeded({}))
     seeds = [t for rec in rounds for t in rec["trials"] if (t["queued"] or "").startswith("seed")]
     assert [(t["round"], t["queued"]) for t in seeds] == [(4, "seed H6")]  # H4 and H5 have numeric levers only
     assert seeds[0]["config"]["prefetch_async"] is True
+    staggered = bench.simulate(bench.Seeded({}), 0, SMALL, bench.SCENARIOS["staggered"])
+    assert [t["queued"] for rec in staggered for t in rec["trials"] if (t["queued"] or "").startswith("seed")] == [
+        "seed H1", "seed H6"]  # not H2, which starts in round 3 with a categorical lever
 
 
 def seed_outcomes(seeds: dict) -> dict:
