@@ -373,6 +373,19 @@ def test_finalize_alternates_holdout_runs_and_writes_the_report(run, monkeypatch
         finalize.start_finalize(run, foreground=True)
 
 
+def test_each_holdout_pair_gets_its_own_repeat_index(run):
+    """Baseline and incumbent of one pair share BOAR_REPEAT, so their seeds match; the pairs differ."""
+    rounds.start_round(run, foreground=True)
+    close_round(run, 1, {"H1": "keep", "H2": "keep"})
+    run.update_state(lambda s: s.update(phase="finalize"))
+    write_eval(run, extra="os.environ['BOAR_SPLIT'] == 'holdout' and "
+                          "open(os.path.join(run_dir, 'holdout-repeats'), 'a').write(os.environ['BOAR_REPEAT'] + ' ')")
+    accept_eval(run)
+    finalize.start_finalize(run, foreground=True)
+    assert [h["label"] for h in store.read_jsonl(run.holdout_path)] == ["baseline", "incumbent", "baseline", "incumbent"]
+    assert run.path("holdout-repeats").read_text().split() == ["1", "1", "2", "2"]
+
+
 def test_report_lists_removals_and_rejections(run):
     rounds.start_round(run, foreground=True)
     hyps = run.hypotheses()

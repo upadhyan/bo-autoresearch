@@ -99,7 +99,8 @@ def run_finalize_worker(run: Run) -> None:
         rounds.check_unchanged(run, commit, "finalize", "boar finalize")
         dirs = gitops.untracked_dirs(run.root)
         out_dir = run.path("holdout", str(i))
-        res = evalrun.run_trial(run, configs[label], "holdout", 1, out_dir, budget)
+        # Both runs of a pair get the same BOAR_REPEAT, so they share seeds; each pair gets its own.
+        res = evalrun.run_trial(run, configs[label], "holdout", 1, out_dir, budget, first_repeat=i // 2 + 1)
         # The writes are put back before the next run and nothing is committed after holdout, so a run
         # that wrote keeps its measurement; the report flags it.
         wrote, stuck = rounds.undo_trial_writes(run, commit, dirs, out_dir, "finalize", "boar finalize")

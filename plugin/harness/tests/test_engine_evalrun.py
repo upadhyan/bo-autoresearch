@@ -76,6 +76,12 @@ def test_complete_trial_records_repeats_files_and_environment(run):
     assert (out / "repeat-1.stderr").read_text() == "warming up\n"
 
 
+def test_each_repeat_gets_its_index_as_boar_repeat(run):
+    write_eval(run, f'echo "$BOAR_REPEAT" >> "$BOAR_RUN_DIR/indices"\necho \'{OK_LINE}\'\n')
+    trial(run)
+    assert run.path("indices").read_text() == "1\n2\n3\n"
+
+
 def test_infeasible_stops_at_first_guard_failure(run):
     write_eval(run, COUNT + 'g=true; [ $n -ge 2 ] && g=false\necho "{\\"metric\\": $n, \\"guards_ok\\": $g}"\n')
     res = trial(run)
