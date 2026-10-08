@@ -490,6 +490,12 @@ def test_wait_times_out_while_the_worker_runs_then_sigterm_stops_it(run):
     assert [t.state for t in study.trials] == [TrialState.FAIL]
 
 
+def test_wait_counts_the_configs_the_round_queued(run):
+    warm = {"queue": [{"label": "a", "config": {}}, {"label": "b", "config": {}}], "same_as": {"b": 3}}
+    run.update_state(lambda s: s["rounds"]["1"].__setitem__("warm", warm))
+    assert worker.progress(run, worker.ROUND, 1) == "round 1, 0/5 trials done"
+
+
 def test_wait_points_a_died_inline_run_at_its_shell_not_at_a_worker_log(run):
     """A `--foreground` run prints to its own shell; a worker.log from an earlier detached attempt is stale."""
     run.round_dir(1).mkdir(parents=True, exist_ok=True)

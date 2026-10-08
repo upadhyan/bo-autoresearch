@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
 
-from boar import evalrun, store
+from boar import control, evalrun, store
 from boar.errors import Refused
 from boar.store import Run
 
@@ -230,7 +230,7 @@ def progress(run: Run, command: str, r: int | None) -> str:
         return f"eval check, one baseline trial of {cfg['repeats']} repeats on dev"
     if command == ROUND:
         k = sum(1 for t in run.trials() if t["round"] == r)
-        return f"round {r}, {k}/{cfg['trials_per_round']} trials done"
+        return f"round {r}, {k}/{control.round_size(cfg, run.state()['rounds'].get(str(r)) or {})} trials done"
     k = len(store.read_jsonl(run.holdout_path))
     return f"finalize, {k}/{2 * cfg['holdout_repeats']} holdout runs done"
 
