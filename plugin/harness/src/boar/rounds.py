@@ -217,8 +217,7 @@ def extra_queue(hyps: list[dict], r: int) -> list[dict]:
         if inv is None:
             continue
         queue = inv.get("queue") or []
-        off = {lever["name"]: lever["default"] for lever in h["levers"]}
-        out.append({"label": f"investigate {h['id']} (off-state)", "config": off})
+        out.append({"label": f"investigate {h['id']} (off-state)", "config": store.lever_defaults([h])})
         out += [{"label": f"investigate {h['id']} ({i}/{len(queue)})", "config": c} for i, c in enumerate(queue, 1)]
     for h in store.active_hypotheses(hyps):
         if h.get("enables") and h.get("activated_round") == r:
@@ -507,12 +506,9 @@ def write_summary(run: Run, r: int, facts: dict | None = None) -> Path:
         "",
     ]
     q, d = f["queued"], f["drift"]
-    first = _labels(rec.get("warm") or {})[0]
-    if q is None and first in f["same_as"]:
-        out.append(f"Not re-measured this round: trial {f['same_as'][first]} measured the {first} on this commit. "
-                   "**drift: n/a**.")
-    elif q is None:
-        out.append("No config was re-measured this round.")
+    if q is None:
+        out.append("Not re-measured this round: its config was already measured on this commit (see the end of this "
+                   "summary). **drift: n/a**.")
     else:
         earlier = (
             f"{fmt(d['earlier'])} pooled over {d['earlier_n']} earlier repeats" if d.get("earlier") is not None

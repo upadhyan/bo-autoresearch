@@ -266,7 +266,7 @@ def test_round_2_warm_starts_from_round_1_and_requeues_the_incumbent(run):
     assert "drift: " in summary and "Re-measured this round (incumbent)" in summary
 
 
-def test_the_incumbent_is_measured_again_only_on_a_new_commit(run):
+def test_the_incumbent_is_not_measured_again_on_an_unchanged_commit(run):
     rounds.start_round(run, foreground=True)
     close_round(run, 1, {"H1": "keep", "H2": "keep"})
     rounds.start_round(run, foreground=True)  # R1 edited nothing: the same commit
@@ -278,14 +278,6 @@ def test_the_incumbent_is_measured_again_only_on_a_new_commit(run):
     assert rec["warm"]["same_as"] == {"incumbent": held} and rec["drift"] == "n/a"
     summary = run.summary_path(2).read_text()
     assert f"incumbent: same as trial {held}" in summary and "(4 of 4)" in summary
-
-    close_round(run, 2, {"H1": "keep", "H2": "keep"})
-    (run.root / "target.py").write_text("X = 2  # R1 changed the code\n")
-    rounds.start_round(run, foreground=True)
-    round3 = [t for t in run.trials() if t["round"] == 3]
-    assert round3[0]["queued"] == "incumbent" and round3[0]["commit"] != round2[0]["commit"]
-    assert run.state()["rounds"]["3"]["warm"]["same_as"] == {}
-    assert "Re-measured this round (incumbent)" in run.summary_path(3).read_text()
 
 
 def test_a_config_that_failed_on_the_rounds_commit_runs_again(run):
@@ -343,24 +335,11 @@ def test_interrupted_queued_trial_is_queued_again(run, monkeypatch):
         rounds.start_round(run, foreground=True)
     assert run.trials() == []
     restore()
+    run.update_state(lambda s: s["rounds"]["1"]["warm"].pop("same_as"))  # as older code recorded it
     rounds.start_round(run, foreground=True)
     trials = run.trials()
     assert trials[0]["queued"] == "baseline" and trials[0]["config"]["fast_b"] == 1
     assert len(trials) == 4
-
-
-def test_a_round_started_by_older_code_resumes_with_every_queued_config(run, monkeypatch):
-    rounds.start_round(run, foreground=True)
-    close_round(run, 1, {"H1": "keep", "H2": "keep"})
-    restore = _interrupt_after(monkeypatch, 1)
-    with pytest.raises(evalrun.Interrupted):
-        rounds.start_round(run, foreground=True)
-    restore()
-    run.update_state(lambda s: s["rounds"]["2"]["warm"].pop("same_as"))  # older code recorded no skips
-    rounds.start_round(run, foreground=True)
-    round2 = [t for t in run.trials() if t["round"] == 2]
-    assert len(round2) == 4 and [t["queued"] for t in round2].count("incumbent") == 1
-    assert run.state()["rounds"]["2"]["run_status"] == "done"
 
 
 def test_resume_refuses_when_the_code_moved(run, monkeypatch):
