@@ -31,13 +31,15 @@ DRIFT = [
 # 29 incumbent re-measures were on an unchanged commit).
 STEADY = [{"add": ["H1", "H2", "H3"]}, {"add": ["H4"]}, {"add": ["H5"]}, {"add": ["H6"]},
           *([{}, {}, {"world": {}}] * 9)[:26]]
-SCENARIOS = {"default": bench.SCENARIO, "drift": DRIFT, "steady": STEADY}
+# Its late phase at worst: R1 changes nothing after round 4, so the incumbent is never measured again.
+UNCHANGED = [*STEADY[:4], *[{}] * 26]
+SCENARIOS = {"default": bench.SCENARIO, "drift": DRIFT, "steady": STEADY, "unchanged": UNCHANGED}
 
 
-def worlds(scenario: list[dict], rounds: int) -> list[dict]:
+def worlds(scenario: list[dict], n_rounds: int) -> list[dict]:
     """The world at each round, as bench.simulate builds it from `scenario`."""
     world, out = dict(bench.WORLD), []
-    for r in range(1, rounds + 1):
+    for r in range(1, n_rounds + 1):
         world.update((scenario[r - 1] if r <= len(scenario) else {}).get("world", {}))
         out.append(dict(world))
     return out

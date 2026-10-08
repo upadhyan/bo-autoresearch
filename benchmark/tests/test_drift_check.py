@@ -157,6 +157,10 @@ def test_the_steady_scenario_never_shifts_the_metric_and_commits_in_12_of_30_rou
     assert [h for step in drift_check.STEADY for h in step.get("add", [])] == list(bench.PROPOSALS)
 
 
+def test_the_unchanged_scenario_is_steady_with_no_commit_after_round_4():
+    assert drift_check.UNCHANGED[:4] == drift_check.STEADY[:4] and drift_check.UNCHANGED[4:] == [{}] * 26
+
+
 class AsyncOn(bench.Harness):
     """Sets prefetch_async on in every sampled trial once H6 is active."""
 
