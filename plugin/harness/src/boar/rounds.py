@@ -226,18 +226,37 @@ def _labels(warm: dict) -> list[str]:
     return [first, *(q["label"] for q in warm.get("queue") or [])]
 
 
-def _enqueue(study: optimizer.OptunaBackend, space: dict, defaults: dict, warm: dict, skip: set[str] = frozenset()) -> None:
-    """Queue the incumbent (or the baseline), so it is measured again on this round's commit, then the extra configs.
+def _filled(warm: dict, space: dict, defaults: dict) -> list[tuple[str, dict]]:
+    """Each queued config's label and params: the incumbent (or the baseline), then each extra config filled from it.
 
-    Each extra config is filled from the incumbent; a lever it names that is pinned now stays at its default.
+    A lever an extra config names that is pinned now stays at its default.
     """
     base = warm.get("incumbent_config") or {}
     partials = [{}] + [q["config"] for q in warm.get("queue") or []]
-    for label, partial in zip(_labels(warm), partials):
-        if label in skip:
-            continue
-        params = {name: partial.get(name, base.get(name, defaults[name])) for name in space}
-        study.enqueue(label, params)
+    return [(label, {name: partial.get(name, base.get(name, defaults[name])) for name in space})
+            for label, partial in zip(_labels(warm), partials)]
+
+
+def _same_as(filled: list[tuple[str, dict]], measured: list[dict], defaults: dict) -> dict[str, int | str]:
+    """The queued configs that need no trial: label -> the latest trial in `measured` with that config, or the label
+    queued before it this round."""
+    seen: dict[str, int | str] = {store.config_key(t["config"], defaults): t["trial"] for t in measured}
+    out = {}
+    for label, params in filled:
+        key = store.config_key(params, defaults)
+        if key in seen:
+            out[label] = seen[key]
+        else:
+            seen[key] = label
+    return out
+
+
+def _enqueue(study: optimizer.OptunaBackend, space: dict, defaults: dict, warm: dict, skip: set[str] = frozenset()) -> None:
+    """Queue the incumbent (or the baseline), so it is measured on this round's commit, then the extra configs;
+    a config `warm["same_as"]` names is not queued."""
+    for label, params in _filled(warm, space, defaults):
+        if label not in skip and label not in (warm.get("same_as") or {}):
+            study.enqueue(label, params)
 
 
 def _open_study(run: Run, r: int, cfg: dict, hyps: list[dict]) -> optimizer.OptunaBackend:
@@ -245,7 +264,8 @@ def _open_study(run: Run, r: int, cfg: dict, hyps: list[dict]) -> optimizer.Optu
     defaults = store.lever_defaults(hyps)
     name = f"round-{r}"
     seed, n_startup = cfg["seed"] + r, cfg["trials_per_round"]
-    warm = run.state()["rounds"][str(r)].get("warm")
+    rec = run.state()["rounds"][str(r)]
+    warm = rec.get("warm")
     if warm is None:
         # Nothing ran yet, so a half-built study from an interrupted start is discarded.
         study = optimizer.OptunaBackend.create(run.storage_url, name, cfg["direction"], space, seed, n_startup)
@@ -257,9 +277,12 @@ def _open_study(run: Run, r: int, cfg: dict, hyps: list[dict]) -> optimizer.Optu
             "copied": len(valid), "excluded": excluded, "incumbent_config": inc["config"] if inc else None,
             "queue": extra_queue(hyps, r),
         }
+        # A failed trial has no measurement to stand in for a new one.
+        measured = [t for t in trials if t["commit"] == rec["commit"] and t["state"] != evalrun.FAILED]
+        warm["same_as"] = _same_as(_filled(warm, space, defaults), measured, defaults)
         _enqueue(study, space, defaults, warm)
         run.update_state(lambda s: s["rounds"][str(r)].__setitem__("warm", warm))
-        log(f"round {r}: copied {len(valid)} warm trials, left out {excluded}; queued {config_text(warm['incumbent_config'] or {})}")
+        log(f"round {r}: copied {len(valid)} warm trials, left out {excluded}")
         return study
     try:
         study = optimizer.OptunaBackend.resume(run.storage_url, name, space, seed, n_startup)
@@ -313,6 +336,8 @@ def run_round_worker(run: Run) -> None:
         if stuck:
             raise Refused(f"trial {n} was recorded as failed, but {stuck}")
     facts = _facts(run, r)
+    for label, n in facts["same_as"].items():
+        log(f"{label}: not run, same as trial {n}")
     write_summary(run, r, facts)
 
     def finish(state: dict) -> None:
@@ -410,6 +435,9 @@ def _facts(run: Run, r: int) -> dict:
     drift_floor = stats.noise_floor(earlier_trials, defaults)
     drift_base = stats.noise_base(earlier_trials, defaults)
     queued = next((t for t in round_trials if t.get("queued") in ("baseline", "incumbent")), None)
+    ran = {t.get("queued"): t["trial"] for t in round_trials}
+    same_as = {label: ref if isinstance(ref, int) else ran.get(ref)
+               for label, ref in ((state["rounds"][str(r)].get("warm") or {}).get("same_as") or {}).items()}
     inc = warmstart.incumbent(trials, hyps, r + 1, direction)
     inc_trial = None
     if inc is not None:
@@ -426,6 +454,7 @@ def _facts(run: Run, r: int) -> dict:
         "noise_trials": stats.noise_trials(trials, defaults),
         "all_trials": trials,
         "queued": queued,
+        "same_as": same_as,
         "drift": _drift(queued, before, defaults, drift_floor, drift_base),
         "noise_base": stats.noise_base(trials, defaults),
         "incumbent": inc,
@@ -473,7 +502,11 @@ def write_summary(run: Run, r: int, facts: dict | None = None) -> Path:
         "",
     ]
     q, d = f["queued"], f["drift"]
-    if q is None:
+    first = _labels(rec.get("warm") or {})[0]
+    if q is None and first in f["same_as"]:
+        out.append(f"Not re-measured this round: trial {f['same_as'][first]} measured the {first} on this commit. "
+                   "**drift: n/a**.")
+    elif q is None:
         out.append("No config was re-measured this round.")
     else:
         earlier = (
@@ -564,6 +597,9 @@ def write_summary(run: Run, r: int, facts: dict | None = None) -> Path:
           f"[diag](../../trials/{t['trial']}/)" if any(run.trial_dir(t["trial"]).glob("diag-*")) else ""]
          for t in f["round_trials"]],
     ))
+    if f["same_as"]:
+        out += ["", "Not run, as the same config was measured on this commit or queued earlier this round: "
+                + "; ".join(f"{label}: same as trial {n}" for label, n in f["same_as"].items()) + "."]
     path = run.summary_path(r)
     store.write_text(path, "\n".join(out) + "\n")
     return path

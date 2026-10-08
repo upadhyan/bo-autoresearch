@@ -43,6 +43,11 @@ def finish_round_1(d, ha, *rest):
     d.close()
 
 
+def new_commit(d):
+    """What R1 leaves when it adds the measurements: the round runs on a new commit."""
+    (d.repo / "target.py").write_text((d.repo / "target.py").read_text() + "# measurements added\n")
+
+
 def test_investigate_keeps_the_hypothesis_measures_its_cause_and_runs_the_queued_configs(driver):
     d = driver.start("round1_run", **FOUR)
     ha, hb, hn = d.hid("fast_a"), d.hid("fast_b"), d.hid("noop")
@@ -59,6 +64,7 @@ def test_investigate_keeps_the_hypothesis_measures_its_cause_and_runs_the_queued
     assert d.hyp(ha)["status"] == "active"
     text = d.next()
     assert text.startswith("[R1]") and f"measure: {ha}: passes, pass_ms (cause: the pass count may not drop)" in text
+    new_commit(d)
     d.round_run()
     round2 = d.trials(2)
     assert len(round2) == 2 + 2

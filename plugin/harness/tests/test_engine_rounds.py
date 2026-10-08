@@ -175,7 +175,7 @@ def test_round_1_runs_baseline_first_and_records_everything(run):
     assert git(run.root, "branch", "--show-current") == f"boar/{RUN_ID}"
     assert rec["run_status"] == "done" and rec["new_trials"] == [1, 2, 3, 4]
     assert rec["warm"] == {"copied": 0, "excluded": {"rule1_state": 0, "rule2_outside_space": 0, "rule3_fixed": 0},
-                           "incumbent_config": None, "queue": []}
+                           "incumbent_config": None, "queue": [], "same_as": {}}
     defaults = store.lever_defaults(run.hypotheses())
     best = stats.incumbent(trials, defaults, "min")
     assert rec["incumbent_trial"] in best["trials"]
@@ -236,6 +236,7 @@ def test_round_2_warm_starts_from_round_1_and_requeues_the_incumbent(run):
     round1 = run.trials()
     # H2 marked fix: round-1 trials that moved fast_b leave the warm-start set. A new hypothesis adds `noop`.
     close_round(run, 1, {"H1": "keep", "H2": "fix"}, new=[hyp("H4", "active", NOOP, activated=2, round_=1)])
+    (run.root / "target.py").write_text("X = 2  # R1 repairs H2: a new commit, so the incumbent is measured again\n")
     hyps = run.hypotheses()
     defaults = store.lever_defaults(hyps)
     valid, counts = warmstart.select(round1, hyps, 2)
@@ -246,7 +247,8 @@ def test_round_2_warm_starts_from_round_1_and_requeues_the_incumbent(run):
     rounds.start_round(run, foreground=True)
     rec = run.state()["rounds"]["2"]
     inc = stats.incumbent(valid, defaults, "min")
-    assert rec["warm"] == {"copied": len(valid), "excluded": counts, "incumbent_config": inc["config"], "queue": []}
+    assert rec["warm"] == {"copied": len(valid), "excluded": counts, "incumbent_config": inc["config"], "queue": [],
+                           "same_as": {}}
     round2 = [t for t in run.trials() if t["round"] == 2]
     assert len(round2) == 4 and [t["trial"] for t in round2] == [5, 6, 7, 8]
     assert round2[0]["queued"] == "incumbent"
@@ -262,6 +264,28 @@ def test_round_2_warm_starts_from_round_1_and_requeues_the_incumbent(run):
     assert f"Copied {len(valid)} earlier trials" in summary
     assert f"rule 3 (a lever of a hypothesis marked fix after the trial ran) {len(moved_b)}" in summary
     assert "drift: " in summary and "Re-measured this round (incumbent)" in summary
+
+
+def test_the_incumbent_is_measured_again_only_on_a_new_commit(run):
+    rounds.start_round(run, foreground=True)
+    close_round(run, 1, {"H1": "keep", "H2": "keep"})
+    rounds.start_round(run, foreground=True)  # R1 edited nothing: the same commit
+    round1, round2 = ([t for t in run.trials() if t["round"] == r] for r in (1, 2))
+    assert round2[0]["commit"] == round1[0]["commit"]
+    assert len(round2) == 4 and not any(t["queued"] for t in round2), "the slot goes to a sampled trial"
+    held = max(stats.incumbent(round1, store.lever_defaults(run.hypotheses()), "min")["trials"])
+    rec = run.state()["rounds"]["2"]
+    assert rec["warm"]["same_as"] == {"incumbent": held} and rec["drift"] == "n/a"
+    summary = run.summary_path(2).read_text()
+    assert f"incumbent: same as trial {held}" in summary and "(4 of 4)" in summary
+
+    close_round(run, 2, {"H1": "keep", "H2": "keep"})
+    (run.root / "target.py").write_text("X = 2  # R1 changed the code\n")
+    rounds.start_round(run, foreground=True)
+    round3 = [t for t in run.trials() if t["round"] == 3]
+    assert round3[0]["queued"] == "incumbent" and round3[0]["commit"] != round2[0]["commit"]
+    assert run.state()["rounds"]["3"]["warm"]["same_as"] == {}
+    assert "Re-measured this round (incumbent)" in run.summary_path(3).read_text()
 
 
 def _interrupt_after(monkeypatch, n_ok: int):
@@ -307,6 +331,20 @@ def test_interrupted_queued_trial_is_queued_again(run, monkeypatch):
     trials = run.trials()
     assert trials[0]["queued"] == "baseline" and trials[0]["config"]["fast_b"] == 1
     assert len(trials) == 4
+
+
+def test_a_round_started_by_older_code_resumes_with_every_queued_config(run, monkeypatch):
+    rounds.start_round(run, foreground=True)
+    close_round(run, 1, {"H1": "keep", "H2": "keep"})
+    restore = _interrupt_after(monkeypatch, 1)
+    with pytest.raises(evalrun.Interrupted):
+        rounds.start_round(run, foreground=True)
+    restore()
+    run.update_state(lambda s: s["rounds"]["2"]["warm"].pop("same_as"))  # older code recorded no skips
+    rounds.start_round(run, foreground=True)
+    round2 = [t for t in run.trials() if t["round"] == 2]
+    assert len(round2) == 4 and [t["queued"] for t in round2].count("incumbent") == 1
+    assert run.state()["rounds"]["2"]["run_status"] == "done"
 
 
 def test_resume_refuses_when_the_code_moved(run, monkeypatch):
@@ -723,6 +761,7 @@ def test_an_incumbent_that_breaks_a_guard_on_re_measurement_is_flagged_and_dethr
     assert run.state()["rounds"]["1"]["drift"] == "n/a"
     close_round(run, 1, {"H1": "keep", "H2": "keep"})
     write_eval(run, guard="cfg['fast_a']")
+    (run.root / "target.py").write_text("X = 2  # a new commit, so the incumbent is measured again\n")
     accept_eval(run)
     rounds.start_round(run, foreground=True)
     rec = run.state()["rounds"]["2"]
@@ -743,6 +782,7 @@ def test_an_incumbent_that_fails_on_re_measurement_is_dethroned(run):
     assert inc.get("fast_a") is True, inc
     close_round(run, 1, {"H1": "keep", "H2": "keep"})
     write_eval(run, crash="cfg['fast_a']")
+    (run.root / "target.py").write_text("X = 2  # a new commit, so the incumbent is measured again\n")
     accept_eval(run)
     rounds.start_round(run, foreground=True)
     queued = next(t for t in run.trials() if t["round"] == 2 and t["queued"])

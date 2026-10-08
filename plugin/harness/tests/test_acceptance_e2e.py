@@ -83,7 +83,8 @@ def check_trials(d, guard) -> list[dict]:
             assert 1 <= len(t["repeats"]) <= d.RUN_CONFIG["repeats"]
         assert t["metric"] == pytest.approx(statistics.median(t["repeats"]))
         assert isinstance(t["metrics"], dict) and t["duration_s"] >= 0
-        first = (n - 1) % per_round == 0
+        # The incumbent is measured again only on a new commit.
+        first = (n - 1) % per_round == 0 and (t["round"] == 1 or commit != st["rounds"][str(t["round"] - 1)]["commit"])
         assert t["queued"] == (("baseline" if t["round"] == 1 else "incumbent") if first else None), n
         tdir = d.run_dir / "trials" / str(n)
         assert json.loads((tdir / "config.json").read_text()) == cfg

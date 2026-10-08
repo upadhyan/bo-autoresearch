@@ -729,8 +729,9 @@ MAX_QUEUE = 2
 
 
 def round_size(cfg: dict, rec: dict) -> int:
-    """N trials, plus one for each extra config the round queued."""
-    return cfg["trials_per_round"] + len((rec.get("warm") or {}).get("queue") or [])
+    """N trials, plus one for each extra config the round queued and did not find measured already."""
+    warm = rec.get("warm") or {}
+    return cfg["trials_per_round"] + sum(q["label"] not in (warm.get("same_as") or {}) for q in warm.get("queue") or [])
 
 
 def investigation(h: dict, r: int) -> dict | None:

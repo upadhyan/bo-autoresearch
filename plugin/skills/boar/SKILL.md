@@ -34,7 +34,7 @@ Read the request and every file it names (often an ideas file). Draft the spec a
 - **Scope**: which changes are allowed (files, components, dependencies) and which are not.
 - **Known cheats**: the ways this particular metric could be gamed, beyond the general list under [Hard rules](#hard-rules).
 - **User ideas**: the user's list, copied word for word.
-- **Budget**: changes to the defaults `rounds` 12, `trials_per_round` 6, `repeats` 3, `trial_target_s` 600, `holdout_repeats` 6, `seed` 0. `trials_per_round` is at least 2: one trial each round re-measures the incumbent.
+- **Budget**: changes to the defaults `rounds` 12, `trials_per_round` 6, `repeats` 3, `trial_target_s` 600, `holdout_repeats` 6, `seed` 0. `trials_per_round` is at least 2: one trial re-measures the incumbent on each new commit.
 
 Show the user the spec and ask for explicit approval. Tell them that once approved the run continues unattended for about rounds × trials_per_round × trial_target_s plus finalize (12 h with the defaults), so it needs permissions that won't prompt (auto mode, or allow rules covering `Bash(boar *)`, the commands research and the eval need, and edits in this repo). Revise until they approve. If `git branch --show-current` shows a `boar/*` branch (a previous run's), ask whether to build on that run's code or check out their own branch first. Then:
 
