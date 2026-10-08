@@ -74,7 +74,7 @@ Where the implementation deliberately differs from [design.md](../design.md), an
     `supersedes` must be null in setup and must name an active hypothesis in R4. An empty list is refused:
     use `propose --none`. Categorical choices must be distinct and the default must match a choice in
     type as well as value. Float bounds and defaults are stored as floats, and `log` is made explicit.
-13. **Warm-start internals.** `warmstart.build_frozen_trials(valid, space, defaults)` takes three
+13. **Warm-start internals.** `optimizer.build_frozen_trials(valid, space, defaults)` takes three
     arguments; the plan's `direction` argument was unused. The defensive "value outside the lever's
     distribution" check runs in `warmstart.select` and is counted under rule 2. A warm trial with no finite
     metric counts under rule 1.
@@ -173,4 +173,16 @@ Where the implementation deliberately differs from [design.md](../design.md), an
     from the trial's eval. Finding one kills the trial's eval and raises a refusal: the trial is not recorded,
     the worker stops, and `boar wait` names the process and says how to resume. It needs `/proc`, so on
     other systems it finds nothing.
+28. **Optimizer backend.** Optuna sits behind `optimizer.OptunaBackend`, the only module that imports it,
+    so another optimizer (Ax, or a sampler under benchmark) is one more class with the same methods. The
+    round keeps every decision: the warm-start set, the incumbent, which full configs are queued with which
+    labels in which order, and which of them a resume skips. A backend provides `create` (a new study,
+    replacing a half-built one of that name, for direction min or max and a seed), `resume` (the stored
+    study, `KeyError` if there is none; it reseeds (see 14) and fails the trial an interrupted run left in
+    flight), `add_warm` (the warm-start set as finished trials with their guard results),
+    `enqueue(label, params)` (asked for first, in order), `waiting()` (labels queued but not asked for yet),
+    `ask(n)` (trial n's params and its label, None when sampled) and `tell(state, metric)` (failed,
+    infeasible or complete). The Optuna backend keeps `study.db` as it was (study `round-<r>`, user attrs
+    `queued`, `boar_trial` and `warm`, the `guards` constraint, see 1), so a round interrupted under older
+    code still resumes.
 
