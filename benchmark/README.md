@@ -65,5 +65,3 @@ VARIANTS = {"harness": Harness(), "cold": Cold()}
 ```sh
 uv run --frozen --project plugin/harness python benchmark/bench.py --variant harness --variant cold
 ```
-
-Experiments' variants stay in `VARIANTS`: `seed-*` and `extra-sampled*` are [#44's](../docs/experiments/44-seeding.md).
