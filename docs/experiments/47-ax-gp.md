@@ -61,3 +61,16 @@ uv run --frozen --project benchmark python benchmark/ax_gp.py --seeds 30 --trial
 `ax − harness` regret lies below zero and Ax's extra eval runs, if any, are at most 5% of the harness's median total.
 Otherwise no-go. A CI whose end nearest zero is within a tenth of its width of zero is rerun on seeds 0-59 and the
 rule applied to that. Time per suggestion and fit failures don't decide; on a go they size #50 and #53.
+
+**Post hoc: `ax-crash`.** Added after the `ax` runs at 6 and 12 trials, before running it. `ax` re-suggests a
+crashed config until the round ends: Ax drops a failed trial's data and may suggest its config again, and with the
+GP unchanged it does. `ax-crash` (`CrashAsGuard`) tells Ax a crash as a broken guard with no metric instead, so the
+guard model learns where crashes are. It runs on the same budgets and seeds, and the rule above is applied to
+`ax-crash − harness`. Chosen after seeing results, it can't make the decision go on its own: a pass would call for a
+confirmatory run on fresh seeds.
+
+```sh
+uv run --frozen --project benchmark python benchmark/ax_gp.py --seeds 60 --trials 6 --repeats 2 --jobs 8 --variant harness --variant ax-crash
+uv run --frozen --project benchmark python benchmark/ax_gp.py --seeds 30 --trials 12 --repeats 2 --jobs 8 --variant harness --variant ax-crash
+uv run --frozen --project benchmark python benchmark/ax_gp.py --seeds 30 --trials 24 --repeats 2 --jobs 8 --variant harness --variant ax-crash
+```
