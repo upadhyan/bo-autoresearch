@@ -8,6 +8,7 @@ import statistics
 import pytest
 
 import bench
+import first_round
 from boar import schema
 
 SMALL = {"rounds": 6, "trials_per_round": 4, "repeats": 2}
@@ -320,3 +321,28 @@ def test_the_scenario_comes_from_the_command_line(capsys, monkeypatch):
     bench.main(["--seeds", "1", "--rounds", "2", "--trials", "1", "--repeats", "1", "--variant", "baseline",
                 "--scenario", "staggered"])
     assert "| 2 | 5.9 [5.9, 5.9] |" in capsys.readouterr().out  # 11.7 on the default scenario
+
+
+def test_a_hypothesis_own_regret_is_its_share_of_the_regret():
+    world = bench.WORLD
+    assert first_round.own_regret(["H6"], {}, world) == pytest.approx(1.2)
+    assert first_round.own_regret(["H6"], {"prefetch": 0.8}, world) == pytest.approx(0.4)  # prefetch alone
+    config = {"dedup_set": True, "route_table": "per_file", "batch": 4, "gc_scale": 2.0, "prefetch": 0.5}
+    regret = bench.true_metric(config, world)[0] - bench.true_metric(bench.best_config(world), world)[0]
+    assert sum(first_round.own_regret([hid], config, world) for hid in bench.PROPOSALS) == pytest.approx(regret)
+
+
+def test_first_rounds_score_the_new_levers_in_the_sampled_trials_and_the_incumbent_after():
+    rows = first_round.first_rounds(Baseline(), 0, SMALL, bench.SCENARIOS["staggered"])
+    assert [(row["round"], row["starts"], row["copied"]) for row in rows] == [
+        (1, ["H3"], 0), (2, ["H1"], 4), (3, ["H2"], 8), (4, ["H4"], 12), (5, ["H5"], 16), (6, ["H6"], 20)]
+    gains = [0, 5.9, 4.2, 1.6, 0.15 * 1.921812, 1.2]  # the baseline leaves each new lever's whole gain
+    assert [row["incumbent"] for row in rows] == pytest.approx(gains)
+    assert [row["sampled"] for row in rows] == [pytest.approx([gain] * 4) for gain in gains]
+
+
+def test_first_round_prints_a_table_per_variant(capsys, monkeypatch):
+    monkeypatch.setitem(bench.VARIANTS, "baseline", Baseline())
+    first_round.main(["--seeds", "1", "--trials", "1", "--repeats", "1", "--scenario", "staggered",
+                      "--variant", "baseline"])
+    assert "| 6 | H6 | 5 | 1.2 [1.2, 1.2] | 1.2 [1.2, 1.2] |" in capsys.readouterr().out
