@@ -52,6 +52,9 @@ def write_eval(run: Run, body: str, mode: int = 0o755) -> Path:
     return exe
 
 
+# The metric is the repeat index: repeats differ, as with an eval that derives its seeds from BOAR_REPEAT.
+BY_REPEAT = 'echo "{\\"metric\\": $BOAR_REPEAT, \\"guards_ok\\": true}"\n'
+
 # A counter in the run dir lets an eval behave differently on each repeat.
 COUNT = 'n=$(cat "$BOAR_RUN_DIR/count" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$BOAR_RUN_DIR/count"\n'
 
@@ -493,12 +496,25 @@ def test_eval_check_warns_about_untracked_files_round_1_would_commit(run):
     """A cache primed before the check isn't written during it; only a warning can name it."""
     (run.root / "cache").mkdir()
     (run.root / "cache" / "k1.txt").write_text("cached\n")
-    write_eval(run, f"echo '{OK_LINE}'\n")
+    write_eval(run, BY_REPEAT)
     res = evalrun.eval_check(run)
     assert res["ok"], res["problems"]
     assert len(res["warnings"]) == 1 and res["warnings"][0].startswith(
         "untracked files that round 1's commit will sweep onto the run branch: cache/k1.txt;"), res["warnings"]
     assert store.read_json(run.eval_check_path)["warnings"] == res["warnings"]
+
+
+def test_eval_check_warns_but_passes_when_the_baseline_repeats_are_bit_identical(run):
+    """config.json is frozen at init, so a truly deterministic workload must still be able to pass."""
+    write_eval(run, f"echo '{OK_LINE}'\n")
+    res = evalrun.eval_check(run)
+    assert res["ok"], res["problems"]
+    assert res["warnings"] == [
+        "the baseline's 3 repeats returned the same metric bit for bit, so the noise floor stays unknown; unless "
+        "the workload is truly deterministic, derive its seeds from BOAR_SPLIT and BOAR_REPEAT"
+    ]
+    write_eval(run, BY_REPEAT)
+    assert evalrun.eval_check(run)["warnings"] == []
 
 
 def test_eval_check_fails_on_links_that_leave_eval(run, tmp_path):

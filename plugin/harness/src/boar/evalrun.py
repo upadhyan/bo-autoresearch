@@ -673,6 +673,13 @@ def eval_check(run: Run) -> dict:
             f"tracked files with uncommitted changes (edited or deleted) that round 1's commit will record on the run "
             f"branch: {_names(tracked)}; restore any that an eval run changed (`git checkout -- <path>`)"
         )
+    reps = trial["repeats"]
+    if len(reps) > 1 and stats.spread(reps) == 0:
+        # A warning, not a problem: config.json is frozen, so a truly deterministic workload has no way out.
+        warnings.append(
+            f"the baseline's {len(reps)} repeats returned the same metric bit for bit, so the noise floor stays "
+            "unknown; unless the workload is truly deterministic, derive its seeds from BOAR_SPLIT and BOAR_REPEAT"
+        )
     result = {
         "ok": not problems, "hash": before, "manifest": before_manifest, "problems": problems, "warnings": warnings,
         "trial": trial, "limit_s": limit, "at": store.now_iso(),
