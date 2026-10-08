@@ -96,6 +96,10 @@ def test_ageing_leaves_out_trials_from_more_than_the_last_rounds():
     assert [t["trial"] for t in valid] == [3, 4, 5]
     assert excluded[drift_check.RULE4] == 2 and incumbent["config"] == {"batch": 8}
     assert drift_check.Age(3).warm(trials, hyps, 4)[1][drift_check.RULE4] == 0
+    # Ageing the study's copy only: the incumbent is still picked over every round.
+    valid, excluded, incumbent = drift_check.VARIANTS["age-3-study"].warm(trials, hyps, 5)
+    assert [t["trial"] for t in valid] == [3, 4, 5]
+    assert excluded[drift_check.RULE4] == 2 and incumbent["config"] == {"batch": 2}
 
 
 def test_the_drift_scenario_reorders_configs_where_it_says_and_keeps_the_regret_reference():

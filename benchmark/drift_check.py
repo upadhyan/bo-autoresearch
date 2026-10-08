@@ -27,8 +27,8 @@ DRIFT = [
     {"world": {"route": {"per_request": 4.5, "per_file": 0.2, "once": 0.6}}},  # per_file now beats once
     {"world": {"scale": 1.0}},  # a uniform speed-up: no reorder
 ]
-# The one real run's shape: 30 rounds, levers added early, no shift at all, and a new commit in 12 rounds (19 of its
-# 29 incumbent re-measures were on an unchanged commit).
+# The one real run's shape: 30 rounds, levers added early, no shift at all, and a new commit in about a third of the
+# rounds (19 of its 29 incumbent re-measures were on an unchanged commit). Here 12 of 30.
 STEADY = [{"add": ["H1", "H2", "H3"]}, {"add": ["H4"]}, {"add": ["H5"]}, {"add": ["H6"]},
           *([{}, {}, {"world": {}}] * 9)[:26]]
 # Its late phase at worst: R1 changes nothing after round 4, so the incumbent is never measured again.
@@ -130,6 +130,14 @@ class Age(Rule4):
         return {t["trial"] for t in trials if t["round"] < r - self.rounds}
 
 
+class AgeStudy(Age):
+    """Rule 4 by age on the study's copy only: the incumbent is still picked over every round."""
+
+    def warm(self, trials, hyps, r):
+        kept, excluded, _ = super().warm(trials, hyps, r)
+        return kept, excluded, bench.Harness().warm(trials, hyps, r)[2]
+
+
 def detection(run: list[dict]) -> list[dict]:
     """Each check in a simulated run of bench.SCENARIO, one per round that re-measured two or more copied configs:
     whether it flagged a pair, and whether the copied data misorders a pair of those configs at the round's world
@@ -155,7 +163,7 @@ def detection(run: list[dict]) -> list[dict]:
 
 
 VARIANTS = {"harness": bench.Harness(), "recheck": Recheck(3), "drop-trials": Recheck(3, "trials"),
-            "drop-older": Recheck(3, "older"), "age-3": Age(3)}
+            "drop-older": Recheck(3, "older"), "age-3": Age(3), "age-3-study": AgeStudy(3)}
 NOISES = (0.0, 0.01, 0.02, 0.05, 0.1)
 
 
