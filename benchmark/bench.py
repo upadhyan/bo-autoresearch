@@ -191,18 +191,19 @@ def simulate(variant: Harness, seed: int, cfg: dict) -> list[dict]:
 # --- the report ------------------------------------------------------------------------------------------------
 
 
-def _spread(xs: list[float]) -> str:
+def _spread(xs: list[float], fmt: str = ".3g") -> str:
     q1, median, q3 = np.percentile(xs, [25, 50, 75])
-    return f"{median:.3g} [{q1:.3g}, {q3:.3g}]"
+    return f"{median:{fmt}} [{q1:{fmt}}, {q3:{fmt}}]"
 
 
 def report(runs: list[list[dict]]) -> str:
-    """A table of each round's regret and cost, median [IQR] over the runs, and a last row for the whole run: the mean
-    regret over its rounds and its total cost."""
-    rows = [[rec["round"], *(_spread([run[i][k] for run in runs]) for k in ("regret", "runs", "remeasured"))]
+    """A table of each round's regret (to 3 significant figures) and cost (in full), median [IQR] over the runs, and a
+    last row for the whole run: the mean regret over its rounds and its total cost."""
+    rows = [[rec["round"], _spread([run[i]["regret"] for run in runs]),
+             *(_spread([run[i][k] for run in runs], "g") for k in ("runs", "remeasured"))]
             for i, rec in enumerate(runs[0])]
     rows.append(["all", _spread([np.mean([rec["regret"] for rec in run]) for run in runs]),
-                 *(_spread([sum(rec[k] for rec in run) for run in runs]) for k in ("runs", "remeasured"))])
+                 *(_spread([sum(rec[k] for rec in run) for run in runs], "g") for k in ("runs", "remeasured"))])
     return rounds.md_table(["round", "regret (s)", "eval runs", "re-measured"], rows)
 
 

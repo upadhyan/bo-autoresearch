@@ -189,13 +189,13 @@ def test_no_feasible_config_beats_the_regret_reference():
 
 
 def test_the_report_gives_the_median_and_iqr_over_seeds_per_round_and_overall():
-    seeds = [[{"round": 1, "regret": x, "runs": 6, "remeasured": 0},
+    seeds = [[{"round": 1, "regret": x, "runs": 1000 + x, "remeasured": 0},
               {"round": 2, "regret": 2 * x, "runs": 8, "remeasured": 1}] for x in (1, 2, 3, 4, 5)]
     rows = [line.strip("| ").split(" | ") for line in bench.report(seeds).splitlines()[2:]]
     assert rows == [
-        ["1", "3 [2, 4]", "6 [6, 6]", "0 [0, 0]"],
+        ["1", "3 [2, 4]", "1003 [1002, 1004]", "0 [0, 0]"],  # costs in full
         ["2", "6 [4, 8]", "8 [8, 8]", "1 [1, 1]"],
-        ["all", "4.5 [3, 6]", "14 [14, 14]", "1 [1, 1]"],  # regret: the mean over rounds; cost: the total
+        ["all", "4.5 [3, 6]", "1011 [1010, 1012]", "1 [1, 1]"],  # regret: the mean over rounds; cost: the total
     ]
 
 
