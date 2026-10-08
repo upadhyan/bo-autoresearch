@@ -27,7 +27,7 @@ def own_regret(hids: list[str], config: dict, world: dict) -> float:
 
 def first_rounds(variant: bench.Harness, seed: int, cfg: dict, scenario: list[dict]) -> list[dict]:
     """One run's rounds that start hypotheses: which, how many earlier trials the round copied in, and the new levers'
-    own regret in each sampled trial and in the incumbent after the round."""
+    own regret at default (all they can save), in each sampled trial and in the incumbent after the round."""
     hyps, world, trials, out = [], dict(bench.WORLD), [], []
     for r, rec in enumerate(bench.simulate(variant, seed, cfg, scenario), 1):
         step = scenario[r - 1] if r <= len(scenario) else {}
@@ -38,6 +38,7 @@ def first_rounds(variant: bench.Harness, seed: int, cfg: dict, scenario: list[di
         if step.get("add"):
             _, _, incumbent = variant.warm(trials, hyps, r + 1)
             out.append({"round": r, "starts": step["add"], "copied": copied,
+                        "default": own_regret(step["add"], {}, world),
                         "sampled": [own_regret(step["add"], t["config"], world) for t in rec["trials"]
                                     if not t["queued"]],
                         "incumbent": own_regret(step["add"], incumbent["config"] if incumbent else {}, world)})
@@ -57,10 +58,12 @@ def main(argv: list[str] | None = None) -> None:
     for name in args.variant or ["harness"]:
         runs = [first_rounds(bench.VARIANTS[name], seed, cfg, scenario) for seed in range(args.seeds)]
         rows = [[row["round"], ", ".join(row["starts"]), f"{np.mean([run[i]['copied'] for run in runs]):.3g}",
+                 f"{row['default']:.3g}",
                  bench._spread([x for run in runs for x in run[i]["sampled"]]),
                  bench._spread([run[i]["incumbent"] for run in runs])] for i, row in enumerate(runs[0])]
         print(f"{name}: the new levers' own regret (s), median [IQR] over sampled trials and over seeds\n")
-        print(rounds.md_table(["round", "starts", "copied (mean)", "sampled trials", "incumbent after"], rows) + "\n")
+        print(rounds.md_table(["round", "starts", "copied (mean)", "at default", "sampled trials", "incumbent after"],
+                              rows) + "\n")
 
 
 if __name__ == "__main__":

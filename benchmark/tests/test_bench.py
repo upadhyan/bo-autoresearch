@@ -341,8 +341,8 @@ def test_first_rounds_score_the_new_levers_in_the_sampled_trials_and_the_incumbe
     assert [row["sampled"] for row in rows] == [pytest.approx([gain] * 4) for gain in gains]
 
 
-def test_first_round_prints_a_table_per_variant(capsys, monkeypatch):
-    monkeypatch.setitem(bench.VARIANTS, "baseline", Baseline())
+def test_first_round_prints_a_table_per_variant_with_what_the_new_levers_can_save(capsys, monkeypatch):
+    monkeypatch.setitem(bench.VARIANTS, "best", Best())
     first_round.main(["--seeds", "1", "--trials", "1", "--repeats", "1", "--scenario", "staggered",
-                      "--variant", "baseline"])
-    assert "| 6 | H6 | 5 | 1.2 [1.2, 1.2] | 1.2 [1.2, 1.2] |" in capsys.readouterr().out
+                      "--variant", "best"])
+    assert "| 6 | H6 | 5 | 1.2 | 0 [0, 0] | 0 [0, 0] |" in capsys.readouterr().out
