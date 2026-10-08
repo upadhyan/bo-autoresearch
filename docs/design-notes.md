@@ -83,8 +83,8 @@ Where the implementation deliberately differs from [design.md](../design.md), an
     distribution" check runs in `warmstart.select` and is counted under rule 2. A warm trial with no finite
     metric counts under rule 1.
 14. **Resuming a round.** If the warm start was never recorded, the round's study is rebuilt from
-    scratch. Otherwise RUNNING Optuna trials are marked FAIL, the incumbent (or the baseline) is queued
-    again if its trial never made it into `trials.jsonl`, and the sampler is reseeded with
+    scratch. Otherwise RUNNING Optuna trials are marked FAIL, each queued config (not one item 29 leaves
+    out) is queued again if its trial never made it into `trials.jsonl`, and the sampler is reseeded with
     `seed + r + 1000003 × (trials in the study)` so a resume doesn't replay the draws the interrupted
     worker already made. An interrupted trial is never recorded.
 15. **Holdout runs** are single invocations, each with a timeout of 3 × `trial_target_s` / `repeats`.
@@ -184,4 +184,13 @@ Where the implementation deliberately differs from [design.md](../design.md), an
     none; it reseeds, see 14, and fails the trial left in flight), `add_warm`, `enqueue(label, params)`
     (asked for first, in order), `waiting()`, `ask(n)` (params and label, None when sampled) and
     `tell(state, metric)`.
+29. **A queued config runs once per commit.** design.md queues the incumbent every round and makes the
+    off-state part of an investigation's `--queue`. R2 instead fills each queued config, then leaves it
+    out when the same config (`store.config_key`) was measured on the round's commit by a trial that
+    completed or broke a guard, or was queued earlier in the round. The eval reproduces a (commit,
+    config), its seeds coming from `BOAR_REPEAT` (see 8), so a repeat adds nothing. The incumbent is
+    therefore measured again only on a new commit, which is all the drift check needs. When an
+    investigation queues configs, the harness queues the hypothesis's off-state ahead of them, and it
+    drops out like any other when it equals the incumbent. `summary.md` lists each left-out config as
+    `same as trial N`, the trial to cite.
 

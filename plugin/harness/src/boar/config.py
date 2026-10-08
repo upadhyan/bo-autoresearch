@@ -15,7 +15,7 @@ DEFAULTS: dict[str, int] = {
     "seed": 0,
 }
 
-# Keys that must be at least 1. trials_per_round needs 2: one trial each round re-measures the incumbent.
+# Keys that must be at least 1. trials_per_round needs 2: one trial re-measures the incumbent on each new commit.
 _POSITIVE = {"rounds", "trials_per_round", "repeats", "trial_target_s", "holdout_repeats"}
 _MINIMUM = {"trials_per_round": 2}
 # Optuna takes seeds in [0, 2**32); the engine reduces seed + round modulo 2**32, so keep the given one in range.
@@ -52,7 +52,7 @@ def parse_overrides(tokens: list[str]) -> dict[str, int]:
         except ValueError:
             raise Refused(f"config key {key} needs an integer, got {raw!r}") from None
         if key in _POSITIVE and value < _MINIMUM.get(key, 1):
-            why = "; one trial each round re-measures the incumbent" if key in _MINIMUM else ""
+            why = "; one trial re-measures the incumbent on each new commit" if key in _MINIMUM else ""
             raise Refused(f"config key {key} must be at least {_MINIMUM.get(key, 1)}, got {value}{why}")
         if key == "seed" and not 0 <= value < _SEED_LIMIT:
             raise Refused(f"config key seed must be between 0 and {_SEED_LIMIT - 1}, got {value}")

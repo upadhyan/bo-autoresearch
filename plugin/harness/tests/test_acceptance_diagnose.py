@@ -43,6 +43,11 @@ def finish_round_1(d, ha, *rest):
     d.close()
 
 
+def new_commit(d):
+    """What R1 leaves when it adds the measurements: the round runs on a new commit."""
+    (d.repo / "target.py").write_text((d.repo / "target.py").read_text() + "# measurements added\n")
+
+
 def test_investigate_keeps_the_hypothesis_measures_its_cause_and_runs_the_queued_configs(driver):
     d = driver.start("round1_run", **FOUR)
     ha, hb, hn = d.hid("fast_a"), d.hid("fast_b"), d.hid("noop")
@@ -59,11 +64,14 @@ def test_investigate_keeps_the_hypothesis_measures_its_cause_and_runs_the_queued
     assert d.hyp(ha)["status"] == "active"
     text = d.next()
     assert text.startswith("[R1]") and f"measure: {ha}: passes, pass_ms (cause: the pass count may not drop)" in text
+    new_commit(d)
     d.round_run()
     round2 = d.trials(2)
     assert len(round2) == 2 + 2
     labels = [t["queued"] for t in round2]
-    assert labels[1:3] == [f"investigate {ha} (1/2)", f"investigate {ha} (2/2)"]
+    assert labels[1:3] == [f"investigate {ha} (off-state)", f"investigate {ha} (2/2)"]
+    summary = (d.run_dir / "rounds" / "2" / "summary.md").read_text()
+    assert f"investigate {ha} (1/2): same as trial {round2[1]['trial']}" in summary  # it queued the off-state
     inc = d.state()["rounds"]["2"]["warm"]["incumbent_config"] or {}
     base = {"fast_a": False, "fast_b": 1, "noop": False, "cache_output": False, **inc}
     assert round2[1]["config"] == {**base, "fast_a": False}
@@ -75,6 +83,42 @@ def investigate(d, hid, *extra):
             "--measure", "passes", *extra)
 
 
+def test_an_off_state_equal_to_the_incumbent_is_not_run_and_cites_the_incumbents_trial(driver):
+    # A guard fails whenever fast_b moves, so the incumbent keeps it at default: fast_b's off-state is the incumbent.
+    d = driver.start("round1_run", guard_fail="config.get('fast_b', 1) != 1", **FOUR)
+    hb = d.hid("fast_b")
+    q = d.tmp / "q.json"
+    q.write_text(json.dumps([{"fast_b": 2}]))
+    d.ok(*investigate(d, hb, "--queue", q))
+    finish_round_1(d, hb, d.hid("fast_a"), d.hid("noop"))
+    new_commit(d)
+    d.round_run()
+    round2 = d.trials(2)
+    [inc] = [t for t in round2 if t["queued"] == "incumbent"]
+    assert len(round2) == 3 and inc["config"]["fast_b"] == 1
+    summary = (d.run_dir / "rounds" / "2" / "summary.md").read_text()
+    assert f"investigate {hb} (off-state): same as trial {inc['trial']}" in summary and "(3 of 3)" in summary
+    d.ok("decide", hb, "remove", "--reason", "passes flat, metric flat", "--trials", inc["trial"])
+    assert json.dumps(inc) in d.ok("review", "show", f"rm-{hb}-r2")
+
+
+def test_a_config_two_investigations_queue_runs_once(driver):
+    d = driver.start("round1_run", **FOUR)
+    ha, hb = d.hid("fast_a"), d.hid("fast_b")
+    q = d.tmp / "q.json"
+    q.write_text(json.dumps([{"fast_a": False, "fast_b": 2, "noop": True}]))
+    d.ok(*investigate(d, ha, "--queue", q))
+    d.ok(*investigate(d, hb, "--queue", q))
+    finish_round_1(d, ha, d.hid("noop"))
+    new_commit(d)
+    log = d.round_run()
+    round2 = d.trials(2)
+    [ran] = [t["trial"] for t in round2 if t["queued"] == f"investigate {ha} (1/1)"]
+    assert f"investigate {hb} (1/1)" not in [t["queued"] for t in round2]
+    assert f"investigate {hb} (1/1): same as trial {ran}" in (d.run_dir / "rounds" / "2" / "summary.md").read_text()
+    assert f"investigate {hb} (1/1): not run, same as trial {ran}" in log
+
+
 def test_investigate_refusals(driver):
     d = driver.start("round1_run", **FOUR)
     ha, hb = d.hid("fast_a"), d.hid("fast_b")
@@ -84,8 +128,6 @@ def test_investigate_refusals(driver):
     assert "investigate only" in d.refused("decide", ha, "keep", "--reason", "r", "--observable-key", "passes", "--cause", "c")
     q.write_text(json.dumps([{"fast_a": False}, {"fast_a": True}, {"fast_b": 4}]))
     assert "at most 2" in d.refused(*investigate(d, ha, "--queue", q))
-    q.write_text(json.dumps([{"fast_a": True}]))
-    assert "off-state" in d.refused(*investigate(d, ha, "--queue", q))
     q.write_text(json.dumps([{"fast_a": False}, {"fast_b": 99}, {"cache_output": True}][:2]))
     assert "not a valid value of 'fast_b'" in d.refused(*investigate(d, ha, "--queue", q))
     q.write_text(json.dumps([{"fast_a": False, "cache_output": True}]))
@@ -93,6 +135,7 @@ def test_investigate_refusals(driver):
     d.ok(*investigate(d, ha))
     finish_round_1(d, ha, hb, d.hid("noop"))
     d.round_run()
+    assert d.state()["rounds"]["2"]["warm"]["queue"] == []  # no --queue, so no off-state either
     assert "one investigation" in d.refused(*investigate(d, ha))
 
 

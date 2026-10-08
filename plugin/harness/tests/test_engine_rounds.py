@@ -175,7 +175,7 @@ def test_round_1_runs_baseline_first_and_records_everything(run):
     assert git(run.root, "branch", "--show-current") == f"boar/{RUN_ID}"
     assert rec["run_status"] == "done" and rec["new_trials"] == [1, 2, 3, 4]
     assert rec["warm"] == {"copied": 0, "excluded": {"rule1_state": 0, "rule2_outside_space": 0, "rule3_fixed": 0},
-                           "incumbent_config": None, "queue": []}
+                           "incumbent_config": None, "queue": [], "same_as": {}}
     defaults = store.lever_defaults(run.hypotheses())
     best = stats.incumbent(trials, defaults, "min")
     assert rec["incumbent_trial"] in best["trials"]
@@ -236,6 +236,7 @@ def test_round_2_warm_starts_from_round_1_and_requeues_the_incumbent(run):
     round1 = run.trials()
     # H2 marked fix: round-1 trials that moved fast_b leave the warm-start set. A new hypothesis adds `noop`.
     close_round(run, 1, {"H1": "keep", "H2": "fix"}, new=[hyp("H4", "active", NOOP, activated=2, round_=1)])
+    (run.root / "target.py").write_text("X = 2  # R1 repairs H2: a new commit, so the incumbent is measured again\n")
     hyps = run.hypotheses()
     defaults = store.lever_defaults(hyps)
     valid, counts = warmstart.select(round1, hyps, 2)
@@ -246,7 +247,8 @@ def test_round_2_warm_starts_from_round_1_and_requeues_the_incumbent(run):
     rounds.start_round(run, foreground=True)
     rec = run.state()["rounds"]["2"]
     inc = stats.incumbent(valid, defaults, "min")
-    assert rec["warm"] == {"copied": len(valid), "excluded": counts, "incumbent_config": inc["config"], "queue": []}
+    assert rec["warm"] == {"copied": len(valid), "excluded": counts, "incumbent_config": inc["config"], "queue": [],
+                           "same_as": {}}
     round2 = [t for t in run.trials() if t["round"] == 2]
     assert len(round2) == 4 and [t["trial"] for t in round2] == [5, 6, 7, 8]
     assert round2[0]["queued"] == "incumbent"
@@ -262,6 +264,36 @@ def test_round_2_warm_starts_from_round_1_and_requeues_the_incumbent(run):
     assert f"Copied {len(valid)} earlier trials" in summary
     assert f"rule 3 (a lever of a hypothesis marked fix after the trial ran) {len(moved_b)}" in summary
     assert "drift: " in summary and "Re-measured this round (incumbent)" in summary
+
+
+def test_the_incumbent_is_not_measured_again_on_an_unchanged_commit(run):
+    rounds.start_round(run, foreground=True)
+    close_round(run, 1, {"H1": "keep", "H2": "keep"})
+    rounds.start_round(run, foreground=True)  # R1 edited nothing: the same commit
+    round1, round2 = ([t for t in run.trials() if t["round"] == r] for r in (1, 2))
+    assert round2[0]["commit"] == round1[0]["commit"]
+    assert len(round2) == 4 and not any(t["queued"] for t in round2), "the slot goes to a sampled trial"
+    held = max(stats.incumbent(round1, store.lever_defaults(run.hypotheses()), "min")["trials"])
+    rec = run.state()["rounds"]["2"]
+    assert rec["warm"]["same_as"] == {"incumbent": held} and rec["drift"] == "n/a"
+    summary = run.summary_path(2).read_text()
+    assert f"incumbent: same as trial {held}" in summary and "(4 of 4)" in summary
+
+
+def test_a_config_that_failed_on_the_rounds_commit_runs_again(run):
+    write_eval(run, crash="not cfg['fast_a'] and cfg['fast_b'] == 1")  # the baseline fails
+    accept_eval(run)
+    rounds.start_round(run, foreground=True)
+    base = run.trials()[0]
+    assert base["queued"] == "baseline" and base["state"] == "failed"
+    close_round(run, 1, {"H1": "investigate", "H2": "keep"})
+    hyps = run.hypotheses()
+    hyps[0]["decisions"]["1"].update(cause="c", measure=[], queue=[{"fast_a": False, "fast_b": 1}])
+    run.save_hypotheses(hyps)
+    rounds.start_round(run, foreground=True)  # the same commit
+    reran = [t for t in run.trials() if t["round"] == 2 and t["queued"] and t["config"] == base["config"]]
+    assert len(reran) == 1 and reran[0]["state"] == "failed" and reran[0]["commit"] == base["commit"]
+    assert base["trial"] not in run.state()["rounds"]["2"]["warm"]["same_as"].values()
 
 
 def _interrupt_after(monkeypatch, n_ok: int):
@@ -303,6 +335,7 @@ def test_interrupted_queued_trial_is_queued_again(run, monkeypatch):
         rounds.start_round(run, foreground=True)
     assert run.trials() == []
     restore()
+    run.update_state(lambda s: s["rounds"]["1"]["warm"].pop("same_as"))  # as older code recorded it
     rounds.start_round(run, foreground=True)
     trials = run.trials()
     assert trials[0]["queued"] == "baseline" and trials[0]["config"]["fast_b"] == 1
@@ -434,6 +467,12 @@ def test_wait_times_out_while_the_worker_runs_then_sigterm_stops_it(run):
     assert "stopped before finishing" in worker.wait(run, 1)
     study = load_study(run, 1)
     assert [t.state for t in study.trials] == [TrialState.FAIL]
+
+
+def test_wait_counts_the_configs_the_round_queued(run):
+    warm = {"queue": [{"label": "a", "config": {}}, {"label": "b", "config": {}}], "same_as": {"b": 3}}
+    run.update_state(lambda s: s["rounds"]["1"].__setitem__("warm", warm))
+    assert worker.progress(run, worker.ROUND, 1) == "round 1, 0/5 trials done"
 
 
 def test_wait_points_a_died_inline_run_at_its_shell_not_at_a_worker_log(run):
@@ -723,6 +762,7 @@ def test_an_incumbent_that_breaks_a_guard_on_re_measurement_is_flagged_and_dethr
     assert run.state()["rounds"]["1"]["drift"] == "n/a"
     close_round(run, 1, {"H1": "keep", "H2": "keep"})
     write_eval(run, guard="cfg['fast_a']")
+    (run.root / "target.py").write_text("X = 2  # a new commit, so the incumbent is measured again\n")
     accept_eval(run)
     rounds.start_round(run, foreground=True)
     rec = run.state()["rounds"]["2"]
@@ -743,6 +783,7 @@ def test_an_incumbent_that_fails_on_re_measurement_is_dethroned(run):
     assert inc.get("fast_a") is True, inc
     close_round(run, 1, {"H1": "keep", "H2": "keep"})
     write_eval(run, crash="cfg['fast_a']")
+    (run.root / "target.py").write_text("X = 2  # a new commit, so the incumbent is measured again\n")
     accept_eval(run)
     rounds.start_round(run, foreground=True)
     queued = next(t for t in run.trials() if t["round"] == 2 and t["queued"])
