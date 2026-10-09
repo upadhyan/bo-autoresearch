@@ -14,7 +14,6 @@ import random
 import time
 
 import numpy as np
-import optuna
 
 from boar import control, evalrun, optimizer, rounds, schema, stats, store, warmstart
 
@@ -187,46 +186,6 @@ class ExtraSampled(Seeded):
 VARIANTS.update({f"seed-{kind}": Seeded(SEEDS[kind]) for kind in SEEDS})
 VARIANTS.update({"seed-mixed-r1": Seeded(SEEDS["mixed"], 1), "extra-sampled": ExtraSampled(SEEDS["mixed"]),
                  "extra-sampled-r1": ExtraSampled(SEEDS["mixed"], 1)})
-
-# --- #45: k trials of every round sampled at random --------------------------------------------------------------
-
-
-class _Explores(optimizer.OptunaBackend):
-    """Asks `random` for the first `k` trials not queued, labelled explore, and TPE for the rest."""
-
-    def ask(self, boar_trial: int) -> tuple[dict, str | None]:
-        if not self.k or self.waiting():
-            return super().ask(boar_trial)
-        self.k -= 1
-        tpe, self._study.sampler = self._study.sampler, self.random
-        params, _ = super().ask(boar_trial)
-        self._study.sampler = tpe
-        return params, "explore"
-
-
-class Explore(Harness):
-    """Samples k trials of every round at random, after the queued ones, whatever was copied in; TPE has no random
-    start-up."""
-
-    def __init__(self, k: int) -> None:
-        self.k = k
-
-    def backend(self, space: dict, seed: int, n_startup: int):
-        backend = _Explores.create(None, "round", DIRECTION, space, seed, 0)
-        backend.k, backend.random = self.k, optuna.samplers.RandomSampler(seed % 2**32)
-        return backend
-
-
-class SeededExplore(Explore, Seeded):
-    """Explore's random trials after Seeded's queue."""
-
-    def __init__(self, k: int, seeds: dict) -> None:
-        Explore.__init__(self, k)
-        Seeded.__init__(self, seeds)
-
-
-VARIANTS.update({f"explore-{k}": Explore(k) for k in (0, 2, 5)})
-VARIANTS.update({f"seed-mixed-explore-{k}": SeededExplore(k, SEEDS["mixed"]) for k in (0, 2, 5)})
 
 # --- a simulated run -------------------------------------------------------------------------------------------
 
