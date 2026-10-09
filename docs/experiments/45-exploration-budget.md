@@ -91,7 +91,7 @@ Nothing changes in the harness.
 - On `staggered` every earlier trial is copied, so the harness samples at random only in round 1, where the only
   lever, `buffer_kb`, has no effect: `explore-0` doesn't differ from it.
 - With seeds, no k beats `seed-mixed` at the real run's budget or on `default` either. On `staggered` at 12 trials,
-  k = 2 and 5 do: the random trials cut the tail seeding adds (upper quartile 0.601, the harness's 0.321, 0.38 at
-  k = 5) while the median rises (0.246 → 0.296). #44 left seeding out, so this changes nothing; a revisit of seeding
+  k = 5 does: its random trials cut the tail seeding adds (upper quartile 0.601 → 0.38, the harness's 0.321) while
+  the median rises (0.246 → 0.296). #44 left seeding out, so this changes nothing; a revisit of seeding
   should test it with `seed-mixed-explore-5`.
 - Roadmap: #45 adopts nothing, so #50 has nothing of it to re-check on Ax.
