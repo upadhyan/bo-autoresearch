@@ -38,10 +38,13 @@ real run's), 6 rounds.
 **Measures.**
 
 - Regret and eval runs: `bench.report` per variant and `bench.compare` for `ax − harness` per seed.
-- GP fits: suggestions Ax made with its GP (generation node `MBM`). One *fell back* when BoTorch logged a failed
-  fit attempt (`Fit attempt #k of 5 triggered retry policy` or `failed with exception`) and refit from resampled
-  hyperparameters, or when Ax logged `switching to fallback model` and drew a Sobol point instead. A fit that raises
-  stops the run.
+- Sampled trials (suggestions) that broke the guard or crashed, per variant: added after the results, from the
+  same runs.
+- GP fits: suggestions Ax made with its GP (generation node `MBM`). A fit *failed* when BoTorch logged a failed
+  attempt (`Fit attempt #k of 5 triggered retry policy` or `failed with exception`) and refit from resampled
+  hyperparameters; a fit that raises stops the run. Ax 1.3.1 falls back only when 5 candidates in a row repeat
+  configs it has (`exceeded MAX_GEN_ATTEMPTS ... switching to fallback model`): the fit is fine, and the suggestion
+  is a Sobol draw (*Sobol instead*).
 - Time per suggestion: wall clock of each ask the queue didn't answer, in processes of one thread each, 8 at a time
   on a shared 20-core WSL2 machine. Timings vary with load; every other number is reproducible exactly.
 
@@ -107,8 +110,24 @@ with `--seeds 60`).
 
 ¹ Its end nearest zero, 0.0345, is just past a tenth of its width (0.0335), so no rerun.
 
-Ax never costs extra eval runs: it spends fewer, because more of its trials crash or break the guard, which stops
-their repeats.
+Ax never costs extra eval runs, but its savings are wasted trials: a sampled trial that breaks the guard or crashes
+stops its repeats, and Ax's do so more often.
+
+**Sampled trials that broke the guard or crashed**, over all seeds (the suggestion table's `broke guard` and
+`crashed`; – not run).
+
+| trials | seeds | sampled | broke guard: `harness` | `ax` | `ax-crash` | crashed: `harness` | `ax` | `ax-crash` |
+|---|---|---|---|---|---|---|---|---|
+| 6 | 0-59 | 1860 | 170 | 348 | 348 | 154 | 220 | 116 |
+| 12 | 0-29 | 2010 | 204 | 467 | 467 | 106 | 300 | 184 |
+| 24 | 0-29 | 4170 | 372 | 1019 | 1019 | 249 | 660 | 368 |
+| 6 | 100-159 | 1860 | 176 | – | 332 | 154 | – | 114 |
+| 12 | 100-129 | 2010 | 179 | – | 464 | 97 | – | 177 |
+| 24 | 100-129 | 4170 | 379 | – | 1022 | 256 | – | 386 |
+
+Ax breaks the guard 1.9-2.7× as often as TPE. Guards break only from round 4, where `prefetch` arrives with the
+optimum on the guard (0.8) and the metric still falling past it. Crashes happen only in round 2: `ax-crash` crashes
+0.74-0.75× as often as TPE at 6 trials and 1.5-1.8× as often at 12 and 24.
 
 **The whole run**, median [IQR] over seeds (`bench.report`'s `all` row).
 
@@ -138,31 +157,34 @@ their repeats.
 | 12 | 0.0574 | 0.583 | 0.00371 | 10 [10, 10] |
 | 24 | 0.00371 | 0.583 | 0.00371 | 22 [22, 22] |
 
-`ax` suggests its first crashed config again for the rest of the round, so its round 2 ends where it started on
-every seed (`test_ax_suggests_a_crashed_config_again_unless_told_the_crash_as_a_broken_guard` pins this). TPE samples,
-so it never repeats one. In rounds 3-6 the two Ax variants have the same medians, as expected: crashes never join a
-warm-start set (rule 1), and H4's fix drops round 2's batch trials (rule 3). On seeds 0-59/0-29, Ax's median regret
-in rounds 3-6 is below TPE's except in round 4 at 12 trials.
+`ax` suggests its first crashed config again for the rest of the round (its re-measured trials;
+`test_ax_suggests_a_crashed_config_again_unless_told_the_crash_as_a_broken_guard` pins this), so its round 2 ends
+with whatever it found before that crash. TPE samples, so it doesn't keep repeating one. In rounds 3-6 the two Ax
+variants have the same medians, as expected: crashes never join a warm-start set (rule 1), and H4's fix drops round
+2's batch trials (rule 3). On seeds 0-59/0-29, Ax's median regret in rounds 3-6 is below TPE's except in round 4 at
+12 trials.
 
 **GP fits and time per suggestion.** Suggestions are asks the queue didn't answer; Ax's fast quartile is its Sobol
 startup. Seconds are wall clock in one thread, with the machine's load average between 4 and 40. TPE's median was
 3-5 ms in every run.
 
-| trials | seeds | variant | suggestions | seconds each, median [IQR] | GP fits | fell back |
-|---|---|---|---|---|---|---|
-| 6 | 0-59 | `ax` | 1860 | 8.04 [0.105, 16.4] | 1329 | 0 |
-| 12 | 0-29 | `ax` | 2010 | 7.31 [0.1, 17.4] | 1387 | 1 |
-| 24 | 0-29 | `ax` | 4170 | 9.06 [0.1, 19.2] | 2834 | 0 |
-| 6 | 0-59 | `ax-crash` | 1860 | 12.4 [0.128, 20.6] | 1329 | 0 |
-| 12 | 0-29 | `ax-crash` | 2010 | 9.17 [0.113, 19.8] | 1387 | 1 |
-| 24 | 0-29 | `ax-crash` | 4170 | 12.3 [0.0997, 23.8] | 2834 | 1 |
-| 6 | 100-159 | `ax-crash` | 1860 | 11.6 [0.126, 19.9] | 1331 | 0 |
-| 12 | 100-129 | `ax-crash` | 2010 | 10.9 [0.113, 20] | 1391 | 0 |
-| 24 | 100-129 | `ax-crash` | 4170 | 11.2 [0.109, 21] | 2835 | 3 |
+| trials | seeds | variant | suggestions | seconds each, median [IQR] | GP fits | fit failed | Sobol instead |
+|---|---|---|---|---|---|---|---|
+| 6 | 0-59 | `ax` | 1860 | 8.04 [0.105, 16.4] | 1329 | 0 | 0 |
+| 12 | 0-29 | `ax` | 2010 | 7.31 [0.1, 17.4] | 1387 | 0 | 1 |
+| 24 | 0-29 | `ax` | 4170 | 9.06 [0.1, 19.2] | 2834 | 0 | 0 |
+| 6 | 0-59 | `ax-crash` | 1860 | 12.4 [0.128, 20.6] | 1329 | 0 | 0 |
+| 12 | 0-29 | `ax-crash` | 2010 | 9.17 [0.113, 19.8] | 1387 | 0 | 1 |
+| 24 | 0-29 | `ax-crash` | 4170 | 12.3 [0.0997, 23.8] | 2834 | 0 | 1 |
+| 6 | 100-159 | `ax-crash` | 1860 | 11.6 [0.126, 19.9] | 1331 | 0 | 0 |
+| 12 | 100-129 | `ax-crash` | 2010 | 10.9 [0.113, 20] | 1391 | 0 | 0 |
+| 24 | 100-129 | `ax-crash` | 4170 | 11.2 [0.109, 21] | 2835 | 0 | 3 |
 
-6 of 16,657 GP fits fell back (0.04%) and none raised. A GP suggestion takes about 10-25 s against TPE's few
-milliseconds; next to a real trial (median 922 s in the NeuralSGT run) that is 1-3% more wall time. Each process
-holds about 0.5 GB with torch loaded.
+None of the 16,657 GP fits failed or raised. 6 suggestions were Sobol draws because 5 GP candidates in a row repeated
+configs Ax had; Ax logs a WARNING for each. A GP suggestion takes about 10-25 s against TPE's few milliseconds, with
+7 levers and runs of at most 144 trials. The NeuralSGT run had 23 levers and 246 trials over 30 rounds (median trial
+922 s); GP fitting and the acquisition slow down with both, so the overhead there is unmeasured. Each process holds
+about 0.5 GB with torch loaded.
 
 **How Ax 1.3.1 models the levers** (`method="fast"`, read from the fitted model in round 4):
 
@@ -200,13 +222,21 @@ holds about 0.5 GB with torch loaded.
 **Go**, for Ax with a crash told as a broken guard.
 
 - The pre-registered `ax` fails the rule at 12 trials (CI [−0.284, 0.0549]) and passes at 6 and 24. It loses round 2
-  on every seed by suggesting its first crashed config again until the round ends.
+  by suggesting its first crashed config again until the round ends.
 - `ax-crash` changes only that. It passes the rule at every budget, on seeds 0-59/0-29 and again on the fresh seeds
-  100-159/100-129, with mean regret 0.16-0.70 s per round below TPE's and fewer eval runs. Being post hoc, it decides
-  only through that confirmation, which was fixed before its 6- and 24-trial results.
-- Costs: about 10-25 s per GP suggestion against minutes per trial, and about 0.5 GB per process with torch. Fits
-  fell back on 0.04% of suggestions and never raised.
-- Limits: one synthetic scenario with 7 levers (the NeuralSGT run had up to 23), and 30-60 seeds per budget.
+  100-159/100-129, with mean regret 0.16-0.70 s per round below TPE's. Being post hoc, it decides only through that
+  confirmation, which was fixed before its 6- and 24-trial results. Its fewer eval runs are not a saving: they are
+  the repeats its sampled trials skipped by breaking the guard (1.9-2.7× as many as TPE's) or, at 12 and 24 trials,
+  by crashing (1.5-1.8×).
+- Costs: about 10-25 s per GP suggestion with 7 levers (unmeasured at the NeuralSGT run's 23), about 0.5 GB per
+  process with torch, and those wasted trials. No GP fit failed or raised; Ax drew 6 suggestions from Sobol because
+  the GP's candidates repeated configs it had.
+- Limits: one synthetic scenario, and a GP's best case: the metric is a sum of one term per lever, smooth in each
+  numeric one (quadratic in log `batch` and log `gc_scale`, linear in `prefetch`), with the optimum on the guard at
+  `prefetch` 0.8. Ax's median lead is largest in rounds 5-6 (at 24 trials on seeds 0-29, round 5's median regret
+  0.0171 s against TPE's 0.497 s); at 12 trials its round 4 median is worse on seeds 0-29 (1.52 s against 1.07 s),
+  not on 100-129 (1.35 s against 1.45 s). The issue's evidence found no framework better on mixed hierarchical
+  spaces. 7 levers (the NeuralSGT run had up to 23), and 30-60 seeds per budget.
 
 For the roadmap:
 
@@ -214,8 +244,9 @@ For the roadmap:
   round counting warm and queued trials, centre point off, guards as a metric under `guards <= 0.5`, a crash as
   guard 1 with no metric, queued configs as attached trials). Before it, re-check the adopted outcomes of #44-#46 on
   `ax-crash`, as the roadmap says.
-- #48 and #49 go ahead on the benchmark's `ax-crash`; #49 starts from its guard and crash handling, and #52 from
-  #49.
+- #48 and #49 go ahead on the benchmark's `ax-crash`; #49 starts from its guard and crash handling and the trials it
+  wastes, and #52 from #49.
 - #53 goes ahead: Ax and CPU-only torch as an opt-in install, as `benchmark/pyproject.toml` does here. A fallback is
-  for a missing torch or a fit that raises, which never happened here.
+  for a missing torch or a fit that raises, which never happened here; Ax already draws from Sobol when the GP's
+  candidates repeat.
 - #51 follows #48 as planned. Nothing in `plugin/` changes here.
