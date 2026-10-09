@@ -26,8 +26,9 @@ A random trial is drawn by Optuna's `RandomSampler`, the way TPE draws its start
 of `explore-5` at 6 trials are the harness's. Queued configs (the incumbent, seeds) come first, as today, then the k
 random trials, then TPE, so the round's TPE trials see what the random ones found, as after TPE's own start-up.
 The random trials are part of N, so every variant runs the harness's trials; eval runs differ only where a crash or
-a broken guard stops a trial's repeats. #44 decided against seeding, so the harness doesn't seed; the
-`seed-mixed` rows show how the answer would change if it did.
+a broken guard stops a trial's repeats (in the results, by at most 1.3 a run on average, against medians of 66-153).
+#44 decided against seeding, so the harness doesn't seed; the `seed-mixed` rows show how the answer would change if
+it did.
 
 Budgets: `--trials 6 --repeats 2` (the NeuralSGT run's) and `--trials 12 --repeats 2`, 6 rounds, seeds 0-499. From
 the repo root:
@@ -66,23 +67,7 @@ seeds; the others are paired differences, mean [95% CI], where negative means th
 | seed-mixed-explore-2 − seed-mixed | 0.047 [-0.0581, 0.147] | 0.0127 [-0.0416, 0.069] | -0.00602 [-0.0285, 0.0171] | -0.0261 [-0.0477, -0.00352] |
 | seed-mixed-explore-5 − seed-mixed | 0.172 [0.09, 0.249] | 0.0781 [0.0297, 0.129] | -0.00433 [-0.0264, 0.0175] | -0.0392 [-0.0611, -0.0176] |
 
-Every k has a cell whose CI lies well above zero, so more seeds can't make a yes. `seed-mixed-explore-2` −
-`seed-mixed` on `staggered`, 12 trials, ends within a tenth of its width of zero; it doesn't decide, but was run again
-on 2000 seeds: -0.0148 [-0.0269, -0.00352].
-
-```sh
-uv run --frozen --project plugin/harness python benchmark/bench.py --seeds 2000 --trials 12 --repeats 2 \
-  --scenario staggered --variant seed-mixed --variant seed-mixed-explore-2
-```
-
-Eval runs per run: the median, then the mean difference.
-
-| | default, 6 trials | default, 12 | staggered, 6 | staggered, 12 |
-|---|---|---|---|---|
-| harness | 66 | 134 | 72 | 144 |
-| explore-0, -2, -5 − harness | -0.2, 0.5, 1.2 | -0.9, -0.1, 0.9 | 0, -0.4, -1.0 | 0, -0.4, -1.0 |
-| seed-mixed | 70 | 138 | 81 | 153 |
-| seed-mixed-explore-0, -2, -5 − seed-mixed | 0.2, 0.7, 1.0 | -0.3, 0.2, 1.3 | 0, -0.4, -1.0 | 0, -0.4, -1.0 |
+Every k has a cell whose CI lies well above zero, so more seeds can't make a yes.
 
 Where it comes from: median regret per round, `default`, 6 trials (the first command's per-variant tables).
 
@@ -101,16 +86,12 @@ Nothing changes in the harness.
 
 - The harness's start-up already samples at random where the model has least data: round 1, and `default`'s round 4,
   where rule 2 leaves out nearly every earlier trial (H3 removed, `buffer_kb` almost never sampled at its default).
-  Without it (`explore-0`) at 6 trials round 4's median regret doubles. At 12 trials the loss is in the tail
-  (the third command's tables): `explore-0` is lower on 267 of 500 seeds and its median is lower (0.469 against
-  0.53; round 4's 1.28 against 1.34), but its round 4 upper quartile is higher (1.98 against 1.85). A fixed k spends
-  TPE's trials in rounds with plenty of data: `explore-5`'s round 2 median is 0.9 against 0.046.
+  Without it (`explore-0`) at 6 trials round 4's median regret doubles. A fixed k spends TPE's trials in rounds with
+  plenty of data: `explore-5`'s round 2 median is 0.9 against 0.046.
 - On `staggered` every earlier trial is copied, so the harness samples at random only in round 1, where the only
   lever, `buffer_kb`, has no effect: `explore-0` doesn't differ from it.
 - With seeds, no k beats `seed-mixed` at the real run's budget or on `default` either. On `staggered` at 12 trials,
   k = 2 and 5 do: the random trials cut the tail seeding adds (upper quartile 0.601, the harness's 0.321, 0.38 at
   k = 5) while the median rises (0.246 → 0.296). #44 left seeding out, so this changes nothing; a revisit of seeding
   should test it with `seed-mixed-explore-5`.
-- Roadmap: #45 adopts nothing, so #50 has nothing of it to re-check on Ax. #50's backend can keep the same start-up
-  rule (initial trials until the study holds `trials_per_round`, copied ones included); #47's Ax variant is where a GP
-  would show otherwise.
+- Roadmap: #45 adopts nothing, so #50 has nothing of it to re-check on Ax.

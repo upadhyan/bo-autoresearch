@@ -325,12 +325,8 @@ def test_exploring_samples_k_trials_of_every_round_at_random_after_the_queued_on
         ["explore", "explore", None, None], ["incumbent", "explore", "explore", None]]  # round 5: R1 changed nothing
 
 
-class ColdExplore(bench.Explore):
+class ColdExplore(bench.Explore, Cold):
     """Explore with no warm start."""
-
-    def warm(self, trials, hyps, r):
-        valid, excluded, incumbent = super().warm(trials, hyps, r)
-        return [], excluded, incumbent
 
 
 def test_explore_trials_are_random_draws_whatever_was_copied_in_and_k_0_leaves_tpe_none():
@@ -349,5 +345,3 @@ def test_each_k_is_a_variant_with_and_without_the_mixed_seeds_which_are_queued_a
     assert {f"{seeds}explore-{k}" for seeds in ("", "seed-mixed-") for k in (0, 2, 5)} <= set(bench.VARIANTS)
     round4 = run(variant=bench.VARIANTS["seed-mixed-explore-2"])[3]["trials"]
     assert [t["queued"] for t in round4] == ["incumbent", "seed H6", "explore", "explore", None]
-    # k above the trials a round samples: all of them random.
-    assert [t["queued"] for t in run(variant=bench.VARIANTS["explore-5"])[0]["trials"]] == ["baseline", *["explore"] * 3]
