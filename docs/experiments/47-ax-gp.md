@@ -392,3 +392,38 @@ each: a single process with 8 threads was 2.5 times slower per suggestion). TPE'
   investigation, while probes made 64% of the real run's gain, so the optimizer's share of the search is overstated.
 - Guard noise is gentler than the real run's (a 2% change to one lever moved its R² by more than its whole tolerance).
 - 9 rounds against the real run's 30.
+
+### What ran instead (2026-10-09)
+
+The plan above was cut before running, to a quick check of the core question: does `ax-crash` beat TPE on the new
+target at the real run's budget? Only part B at 6 trials ran, on seeds 0-15, then 16-31 because the first 16 left
+the CI just touching 0 (−0.335 to +0.029). Part A and the 12- and 24-trial budgets did not run.
+
+```sh
+uv run --frozen --project benchmark python benchmark/ax_gp.py --target training --seeds 16 --trials 6 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash --out quick6.json
+uv run --frozen --project benchmark python benchmark/ax_gp.py --target training --first-seed 16 --seeds 16 --trials 6 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash --out quick6b.json
+```
+
+### Results
+
+**Each arm − `harness`, per seed, over seeds 0-31** (the two `--out` files pooled; regret is in dev-error points):
+
+| arm | regret: mean [95% CI] | lower / tied / higher | infeasible incumbents |
+|---|---|---|---|
+| `harness-crash` | +0.053 [−0.070, 0.197] | 14 / 6 / 12 | +0.03 [0.00, 0.09] |
+| `ax-crash` | −0.222 [−0.377, −0.073] | 21 / 0 / 11 | 0 [0, 0] |
+| `ax-crash − harness-crash` | −0.275 [−0.454, −0.103] | 20 / 0 / 12 | −0.03 [−0.09, 0.00] |
+
+Median regret over the run's rounds: `harness` 2.41, `harness-crash` 2.40, `ax-crash` 2.03. `ax-crash` trails or ties
+TPE in rounds 1-3 and leads from round 4 on, once its GP has copied trials to fit.
+
+Sampled trials over the 32 seeds (1,536 per TPE arm, 1,530 for Ax): TPE broke the guard 272 times and crashed 170;
+`ax-crash` broke the guard 146 times and crashed 371. Ax's suggestions took 25-29 s each (median) against TPE's 6 ms,
+with 8 processes running; alone, one took 11.6 s (and 29 s with 8 threads in one process).
+
+### Decision
+
+**GO**, on the quick check: `ax-crash` beats TPE on the training target at 6 trials per round (U < 0, L′ ≤ 0), and
+the gain is not crash handling (`ax-crash − harness-crash` also passes; TPE told crashes as broken guards is no
+better than TPE). Not checked: the default target under rule 4, and 12 or 24 trials per round. #48 and #49 go
+ahead, on the same scale of quick runs.
