@@ -272,7 +272,7 @@ def _open_study(run: Run, r: int, cfg: dict, hyps: list[dict]) -> optimizer.Optu
         # Nothing ran yet, so a half-built study from an interrupted start is discarded.
         study = optimizer.OptunaBackend.create(run.storage_url, name, cfg["direction"], space, seed, n_startup)
         trials = run.trials()
-        valid, excluded = warmstart.select(trials, hyps, r)
+        valid, excluded = warmstart.copied(trials, hyps, r)
         study.add_warm(valid, defaults)
         inc = warmstart.incumbent(trials, hyps, r, cfg["direction"]) if r > 1 else None
         warm = {
@@ -562,7 +562,8 @@ def write_summary(run: Run, r: int, facts: dict | None = None) -> Path:
         f"Copied {warm['copied']} earlier trials into study `round-{r}`. Left out: "
         f"rule 1 (state failed) {ex.get(warmstart.RULE1, 0)}; "
         f"rule 2 (a lever outside the search space set away from default) {ex.get(warmstart.RULE2, 0)}; "
-        f"rule 3 (a lever of a hypothesis marked fix after the trial ran) {ex.get(warmstart.RULE3, 0)}.",
+        f"rule 3 (a lever of a hypothesis marked fix after the trial ran) {ex.get(warmstart.RULE3, 0)}; "
+        f"rule 4 (from more than {warmstart.COPIED_ROUNDS} rounds before) {ex.get(warmstart.RULE4, 0)}.",
         "",
         "## Lever effects",
         "",

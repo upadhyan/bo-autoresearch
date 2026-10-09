@@ -140,7 +140,7 @@ uv run boar --help
 
 `uv run pytest -q` runs the unit tests (control, engine), the acceptance tests and the launcher and
 hook tests. The acceptance tests drive the real CLI in-process through whole runs on a toy target (no
-LLM), detached workers included. They cover each of the three warm-start rules. For a manual run
+LLM), detached workers included. They cover each of the four warm-start rules. For a manual run
 against an agent, see [`examples/toy`](../../examples/toy).
 
 To try the plugin from the working tree, start Claude Code from the repo root with

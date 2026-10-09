@@ -138,7 +138,7 @@ These are the items from design.md "Acceptance". Run the commands from `/tmp/boa
      `refused: …` and exit 1, and `$R/trials.jsonl` must not grow. Running it at `[R3]` or `[R4]` is refused too,
      because that round has already run and is not closed yet.
 
-design.md also requires a harness test for each of the three warm-start rules. Those live in `plugin/harness/tests/`, not
+design.md also requires a harness test for each of the four warm-start rules. Those live in `plugin/harness/tests/`, not
 here.
 
 ## Regenerating the workloads

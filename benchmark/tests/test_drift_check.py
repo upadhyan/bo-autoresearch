@@ -91,6 +91,16 @@ def test_ageing_leaves_out_trials_from_more_than_the_last_rounds():
     # Ageing the study's copy only: the incumbent is still picked over every round.
     valid, _, incumbent = drift_check.VARIANTS["age-3-study"].warm(trials, hyps, 5)
     assert [t["trial"] for t in valid] == [3, 4, 5] and incumbent["config"] == {"batch": 2}
+    # The baseline, the harness before rule 4, copies every trial rules 1-3 keep.
+    assert [t["trial"] for t in drift_check.VARIANTS["copy-all"].warm(trials, hyps, 5)[0]] == [1, 2, 3, 4, 5]
+
+
+def test_the_harness_now_runs_what_age_3_study_measured():
+    cfg = {"rounds": 8, "trials_per_round": 3, "repeats": 2}
+    for seed in range(2):
+        harness, aged = (bench.simulate(v, seed, cfg) for v in (bench.Harness(), drift_check.VARIANTS["age-3-study"]))
+        assert [(rec["regret"], rec["trials"]) for rec in harness] == [(rec["regret"], rec["trials"]) for rec in aged]
+        assert harness[5]["excluded"]["rule4_old"] > 0  # rounds 1-2 left the study in round 6
 
 
 def test_the_drift_scenario_reorders_configs_where_it_says():

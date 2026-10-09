@@ -182,7 +182,7 @@ def test_full_scripted_run(driver):
     assert len(d.trials(2)) == 4
     warm2 = st["rounds"]["2"]["warm"]
     assert warm2["copied"] == 4
-    assert warm2["excluded"] == {"rule1_state": 0, "rule2_outside_space": 0, "rule3_fixed": 0}
+    assert warm2["excluded"] == {"rule1_state": 0, "rule2_outside_space": 0, "rule3_fixed": 0, "rule4_old": 0}
     summary2 = check_summary(d, 2)
     assert re.search(r"\b4\b", summary_section(summary2, "Warm start"))
 

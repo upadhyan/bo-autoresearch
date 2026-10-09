@@ -41,7 +41,7 @@ A variant is a subclass of `Harness` that overrides one or more of its three met
 
 - `backend(space, seed, n_startup)`: the round's optimizer, with `OptunaBackend`'s methods (`add_warm`,
   `enqueue`, `ask`, `tell`);
-- `warm(trials, hyps, r)`: the warm-start set, the exclusion counts and the incumbent;
+- `warm(trials, hyps, r)`: the trials copied into the study, the exclusion counts and the incumbent;
 - `queue(hyps, r, incumbent)`: the partial configs queued ahead of sampling, which the round then fills,
   dedupes and enqueues.
 

@@ -119,8 +119,8 @@ class Harness:
         return optimizer.OptunaBackend.create(None, "round", DIRECTION, space, seed, n_startup)  # None: in memory
 
     def warm(self, trials: list[dict], hyps: list[dict], r: int) -> tuple[list[dict], dict, dict | None]:
-        """Round r's warm-start set, how many trials each rule left out, and the incumbent: rules 1-3."""
-        valid, excluded = warmstart.select(trials, hyps, r)
+        """The trials copied into round r's study, how many trials each rule left out, and the incumbent: rules 1-4."""
+        valid, excluded = warmstart.copied(trials, hyps, r)
         return valid, excluded, warmstart.incumbent(trials, hyps, r, DIRECTION)
 
     def queue(self, hyps: list[dict], r: int, incumbent: dict | None) -> dict:

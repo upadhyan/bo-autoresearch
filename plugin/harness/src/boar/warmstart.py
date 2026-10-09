@@ -1,7 +1,8 @@
 """Which earlier trials carry into a round's study (`optimizer` copies them in).
 
 A trial joins round r's warm-start set only if its measurement still means the same thing in
-round r's search space; the first rule it fails is the one it is counted under.
+round r's search space; the first rule it fails is the one it is counted under. The study copies in
+only the set's trials from the last 3 rounds (rule 4).
 """
 
 from __future__ import annotations
@@ -12,7 +13,8 @@ from typing import Any
 from boar import stats, store
 from boar.optimizer import build_frozen_trials, distributions, quiet_optuna  # noqa: F401 - moved there, still importable here
 
-RULE1, RULE2, RULE3 = "rule1_state", "rule2_outside_space", "rule3_fixed"
+RULE1, RULE2, RULE3, RULE4 = "rule1_state", "rule2_outside_space", "rule3_fixed", "rule4_old"
+COPIED_ROUNDS = 3
 
 
 def allowed(lever: dict, value: Any) -> bool:
@@ -76,6 +78,15 @@ def select(trials: list[dict], hyps: list[dict], round_r: int) -> tuple[list[dic
         else:
             valid.append(t)
     return valid, counts
+
+
+def copied(trials: list[dict], hyps: list[dict], round_r: int) -> tuple[list[dict], dict[str, int]]:
+    """The trials round `round_r`'s study copies in, and the exclusion counts: rule 4 leaves out the warm-start
+    set's trials from more than 3 rounds before. A trial from before a lever existed sits at its default, and enough
+    of them hold TPE there (docs/experiments/46-drift-check.md). The incumbent and the summary use the whole set."""
+    valid, counts = select(trials, hyps, round_r)
+    recent = [t for t in valid if t["round"] >= round_r - COPIED_ROUNDS]
+    return recent, {**counts, RULE4: len(valid) - len(recent)}
 
 
 def incumbent(trials: list[dict], hyps: list[dict], round_r: int, direction: str) -> dict | None:

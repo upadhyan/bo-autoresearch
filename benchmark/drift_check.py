@@ -3,7 +3,7 @@ contradicts help?
 
 docs/experiments/46-drift-check.md has the results. Run from the repo root:
 
-    uv run --frozen --project plugin/harness python benchmark/drift_check.py --scenario drift --variant harness …
+    uv run --frozen --project plugin/harness python benchmark/drift_check.py --scenario drift --variant copy-all …
     uv run --frozen --project plugin/harness python benchmark/drift_check.py --scenario drift --detect
 """
 
@@ -13,7 +13,7 @@ import argparse
 import itertools
 
 import bench
-from boar import rounds, stats, store
+from boar import rounds, stats, store, warmstart
 
 # A shift at most new commits, and no removal: in bench.SCENARIO, H3's removal before round 4 leaves out nearly every
 # copied trial (each sets buffer_kb), so the round 4 shift has little copied data to contradict.
@@ -66,8 +66,16 @@ def rechecked(trials: list[dict], r: int) -> list[dict]:
     return [t for t in trials if t["round"] == r and (t["queued"] or "").startswith(("incumbent", "recheck"))]
 
 
-class Rule4(bench.Harness):
-    """The harness with a fourth warm-start rule: the trials `dropped` names leave the warm start and the incumbent."""
+class CopyAll(bench.Harness):
+    """The harness before rule 4, this experiment's baseline: the study copies the whole warm-start set."""
+
+    def warm(self, trials, hyps, r):
+        valid, excluded = warmstart.select(trials, hyps, r)
+        return valid, excluded, warmstart.incumbent(trials, hyps, r, bench.DIRECTION)
+
+
+class Rule4(CopyAll):
+    """The baseline with a fourth warm-start rule: the trials `dropped` names leave the warm start and the incumbent."""
 
     def dropped(self, trials: list[dict], r: int) -> set[int]:
         return set()
@@ -130,7 +138,7 @@ class AgeStudy(Age):
 
     def warm(self, trials, hyps, r):
         kept, excluded, _ = super().warm(trials, hyps, r)
-        return kept, excluded, bench.Harness().warm(trials, hyps, r)[2]
+        return kept, excluded, CopyAll().warm(trials, hyps, r)[2]
 
 
 def detection(run: list[dict]) -> list[dict]:
@@ -157,8 +165,9 @@ def detection(run: list[dict]) -> list[dict]:
     return checks
 
 
-VARIANTS = {"harness": bench.Harness(), "recheck": Recheck(3), "drop-trials": Recheck(3, "trials"),
-            "drop-older": Recheck(3, "older"), "age-3": Age(3), "age-3-study": AgeStudy(3)}
+VARIANTS = {"harness": bench.Harness(), "copy-all": CopyAll(), "recheck": Recheck(3),
+            "drop-trials": Recheck(3, "trials"), "drop-older": Recheck(3, "older"), "age-3": Age(3),
+            "age-3-study": AgeStudy(3)}
 NOISES = (0.0, 0.01, 0.02, 0.05, 0.1)
 
 
