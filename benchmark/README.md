@@ -65,10 +65,8 @@ uv run --frozen --project plugin/harness python benchmark/bench.py --variant har
 
 ## Ax (#47)
 
-`ax_gp.py` runs the harness with Ax's GP (`AxBackend`) in place of TPE, on the same seeds, and adds each variant's
-time per suggestion, how many suggested trials broke the guard or crashed, and how many GP fits failed. `--variant ax-crash` tells Ax a crash as a broken guard instead of
-a failed trial. Ax and CPU-only torch live in this directory's own uv project
-(`pyproject.toml`, `uv.lock`), so they never reach the plugin; without them the Ax tests skip.
+`ax_gp.py` runs the harness on Ax's GP in place of TPE. It needs Ax and CPU-only torch from this directory's own uv
+project (`pyproject.toml`, `uv.lock`), which keeps them out of the plugin; without them its tests skip.
 
 ```sh
 uv run --frozen --project benchmark python benchmark/ax_gp.py --seeds 30 --trials 12 --repeats 2
