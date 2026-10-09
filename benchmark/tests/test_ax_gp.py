@@ -70,14 +70,6 @@ def test_the_gp_takes_over_once_trials_cover_the_startup_budget_and_a_seed_repro
     assert bench.simulate(ax_gp.Recorded(ax_gp.AxBackend), 0, TINY) == run
 
 
-def test_each_suggestion_records_how_its_trial_ended():
-    variant = ax_gp.Recorded()
-    run = bench.simulate(variant, 1, {"rounds": 4, "trials_per_round": 6, "repeats": 1})
-    sampled = [t["state"] for r in run for t in r["trials"] if t["queued"] is None]
-    assert [r["state"] for r in variant.records] == sampled
-    assert {"complete", "infeasible", "failed"} <= set(sampled)
-
-
 @pytest.mark.parametrize("logger, level, message, fit", [
     ("botorch", logging.DEBUG, "Fit attempt #1 of 5 triggered retry policy; retrying...", "failed"),  # BoTorch refits
     ("botorch", logging.DEBUG, "Fit attempt #1 of 5 failed with exception:\nNotPSDError", "failed"),
@@ -103,13 +95,16 @@ def test_a_failed_gp_fit_is_told_apart_from_a_sobol_draw_after_repeated_candidat
 
 
 def test_the_suggestion_table_gives_the_time_per_suggestion_how_its_trials_ended_and_how_its_gp_fits_went():
-    table = ax_gp.suggestions({
-        "harness": [{"seconds": s, "fit": None, "state": state}
-                    for s, state in ((0.01, "complete"), (0.02, "infeasible"), (0.03, "failed"))],
-        "ax": [{"seconds": 1, "fit": None, "state": "complete"}, {"seconds": 2, "fit": "ok", "state": "infeasible"},
-               {"seconds": 3, "fit": "repeated", "state": "infeasible"},
-               {"seconds": 4, "fit": "failed", "state": "failed"}],
-    })
+    def run(*states):  # one round: a queued trial that broke the guard, then the suggested trials
+        queued = {"state": "infeasible", "queued": "baseline"}
+        return [{"trials": [queued, *({"state": s, "queued": None} for s in states)]}]
+
+    table = ax_gp.suggestions(
+        {"harness": [run("complete", "infeasible", "failed")],
+         "ax": [run("complete", "infeasible"), run("infeasible", "failed")]},
+        {"harness": [{"seconds": s, "fit": None} for s in (0.01, 0.02, 0.03)],
+         "ax": [{"seconds": 1, "fit": None}, {"seconds": 2, "fit": "ok"}, {"seconds": 3, "fit": "repeated"},
+                {"seconds": 4, "fit": "failed"}]})
     rows = [line.strip("| ").split(" | ") for line in table.splitlines()[2:]]
     # median [IQR] seconds, broke guard, crashed, GP fits, fit failed, Sobol instead
     assert rows == [["harness", "3", "0.02 [0.015, 0.025]", "1", "1", "0", "0", "0"],
@@ -133,19 +128,12 @@ def test_ax_suggests_a_crashed_config_again_unless_told_the_crash_as_a_broken_gu
     assert after != crashed
 
 
-
 def test_the_command_runs_each_variant_on_the_same_seeds_and_compares_it_with_the_first(capsys):
-    ax_gp.main(["--seeds", "2", "--rounds", "1", "--trials", "2", "--repeats", "1", "--jobs", "2",
+    ax_gp.main(["--first-seed", "7", "--seeds", "2", "--rounds", "2", "--trials", "3", "--repeats", "1", "--jobs", "2",
                 "--variant", "harness", "--variant", "ax-crash"])
     out = capsys.readouterr().out
     assert "harness: 2 seeds" in out and "ax-crash: 2 seeds" in out and "ax-crash − harness, per seed:" in out
-    # Each seed's round 1: the baseline, then one startup draw.
+    assert bench.report([bench.simulate(bench.Harness(), seed, TINY) for seed in (7, 8)]) in out
+    # Each seed: the baseline, then two startup draws; the incumbent, then two suggestions.
     assert [line.split(" | ")[:2] for line in out.splitlines() if line.startswith(("| harness", "| ax"))] == [
-        ["| harness", "2"], ["| ax-crash", "2"]]
-
-
-def test_the_seeds_can_start_past_zero_for_a_fresh_set(capsys):
-    cfg = {"rounds": 2, "trials_per_round": 3, "repeats": 1}
-    ax_gp.main(["--first-seed", "7", "--seeds", "1", "--rounds", "2", "--trials", "3", "--repeats", "1", "--jobs", "1",
-                "--variant", "harness"])
-    assert bench.report([bench.simulate(bench.Harness(), 7, cfg)]) in capsys.readouterr().out
+        ["| harness", "8"], ["| ax-crash", "8"]]

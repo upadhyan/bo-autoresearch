@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import logging.handlers
 import multiprocessing
 import os
 import re
@@ -23,14 +24,14 @@ from ax.api.configs import ChoiceParameterConfig, RangeParameterConfig
 import bench
 from boar import rounds
 
-# Ax logs each trial at INFO and BoTorch a failed GP fit attempt at DEBUG: `_Log` reads both, the console neither.
+# Ax logs each trial at INFO and BoTorch a failed GP fit attempt at DEBUG: `_LOG` keeps both, the console neither.
+_LOG = logging.handlers.BufferingHandler(10**9)
 for _name in ("ax", "botorch"):
     for _handler in logging.getLogger(_name).handlers:
         _handler.setLevel(logging.WARNING)
+    logging.getLogger(_name).addHandler(_LOG)
 logging.getLogger("botorch").setLevel(logging.DEBUG)
 
-# A GP fit failed: BoTorch logs a failed attempt, then refits from resampled hyperparameters. A fit that raises stops
-# the run: Ax 1.3.1 falls back (to a Sobol draw) only when the GP's candidates keep repeating trials it has (REPEATED).
 FIT_FAILED = re.compile(r"Fit attempt #\d+ of \d+ (triggered retry|failed)")
 REPEATED = re.compile(r"MAX_GEN_ATTEMPTS.*switching to fallback model")
 
@@ -46,31 +47,12 @@ def _parameter(name: str, lever: dict) -> RangeParameterConfig | ChoiceParameter
                                 scaling="log" if lever["log"] else "linear")
 
 
-class _Log(logging.Handler):
-    """What Ax and BoTorch log while Ax makes one suggestion."""
-
-    def __init__(self) -> None:
-        super().__init__(logging.DEBUG)
-        self.text = ""
-
-    def emit(self, record: logging.LogRecord) -> None:
-        self.text += record.getMessage() + "\n"
-
-    def __enter__(self) -> _Log:
-        for name in ("ax", "botorch"):
-            logging.getLogger(name).addHandler(self)
-        return self
-
-    def __exit__(self, *exc) -> None:
-        for name in ("ax", "botorch"):
-            logging.getLogger(name).removeHandler(self)
-
-
 class AxBackend:
     """A round's optimizer with OptunaBackend's methods, on an Ax Client with its default GP.
 
-    `fit` says how the last suggestion went: None if Ax didn't fit a GP for it (its startup draws), "failed" if a fit
-    attempt failed (`FIT_FAILED`), "repeated" if Ax drew it from Sobol instead (`REPEATED`), else "ok".
+    `fit` says how the last suggestion went: None if Ax didn't fit a GP for it (its startup draws), "failed" if
+    BoTorch logged a failed fit attempt and refit (`FIT_FAILED`; a fit that raises stops the run), "repeated" if Ax
+    drew it from Sobol because the GP's candidates repeated trials it has (`REPEATED`), else "ok".
     """
 
     def __init__(self, space: dict, seed: int, n_startup: int) -> None:
@@ -102,14 +84,15 @@ class AxBackend:
             label, params = self._queue.pop(0)
             self._trial = self._client.attach_trial(params)
             return params, label
-        with _Log() as log:
-            ((self._trial, params),) = self._client.get_next_trials(max_trials=1).items()
-        if not re.search(r"using GenerationNode MBM\.", log.text):
+        _LOG.buffer.clear()
+        ((self._trial, params),) = self._client.get_next_trials(max_trials=1).items()
+        log = "\n".join(r.getMessage() for r in _LOG.buffer)
+        if not re.search(r"using GenerationNode MBM\.", log):
             self.fit = None
-        elif FIT_FAILED.search(log.text):
+        elif FIT_FAILED.search(log):
             self.fit = "failed"
         else:
-            self.fit = "repeated" if REPEATED.search(log.text) else "ok"
+            self.fit = "repeated" if REPEATED.search(log) else "ok"
         return params, None
 
     def tell(self, state: str, metric: float | None) -> None:
@@ -131,12 +114,10 @@ class CrashAsGuard(AxBackend):
 
 
 class _Recorded:
-    """`backend`'s methods, recording each ask the queue didn't answer: its seconds, `backend.fit` if any, and the
-    state its trial ended in."""
+    """`backend`'s methods, recording each ask the queue didn't answer: its seconds, and `backend.fit` if any."""
 
     def __init__(self, backend, records: list[dict]) -> None:
         self._backend, self._records = backend, records
-        self._suggested = False
 
     def __getattr__(self, name: str):
         return getattr(self._backend, name)
@@ -144,15 +125,9 @@ class _Recorded:
     def ask(self, boar_trial: int) -> tuple[dict, str | None]:
         start = time.perf_counter()
         params, label = self._backend.ask(boar_trial)
-        self._suggested = label is None
-        if self._suggested:
+        if label is None:
             self._records.append({"seconds": time.perf_counter() - start, "fit": getattr(self._backend, "fit", None)})
         return params, label
-
-    def tell(self, state: str, metric: float | None) -> None:
-        if self._suggested:
-            self._records[-1]["state"] = state
-        self._backend.tell(state, metric)
 
 
 class Recorded(bench.Harness):
@@ -167,12 +142,13 @@ class Recorded(bench.Harness):
         return _Recorded(make(space, seed, n_startup), self.records)
 
 
-def suggestions(records: dict[str, list[dict]]) -> str:
-    """A table of each variant's suggestions: how many, their seconds (median [IQR]), how many broke the guard or
-    crashed, and how many Ax made with a GP, with a failed fit, or from Sobol because the GP's repeated (`fit`)."""
+def suggestions(runs: dict[str, list[list[dict]]], records: dict[str, list[dict]]) -> str:
+    """A table of each variant's suggestions: how many, their seconds (median [IQR]), how many of their trials broke
+    the guard or crashed, and how many Ax made with a GP, a failed fit or a Sobol draw (`fit`)."""
     rows = []
     for name, recs in records.items():
-        states, fits = [r["state"] for r in recs], [r["fit"] for r in recs]
+        states = [t["state"] for run in runs[name] for rec in run for t in rec["trials"] if t["queued"] is None]
+        fits = [r["fit"] for r in recs]
         rows.append([name, len(recs), bench._spread([r["seconds"] for r in recs]), states.count("infeasible"),
                      states.count("failed"), len(fits) - fits.count(None), fits.count("failed"),
                      fits.count("repeated")])
@@ -216,7 +192,7 @@ def main(argv: list[str] | None = None) -> None:
             print(bench.report(runs[name]) + "\n")
     for name in names[1:]:
         print(f"{name} − {names[0]}, per seed:\n\n{bench.compare(runs[names[0]], runs[name])}\n")
-    print(f"Suggestions (asks the queue didn't answer), over all seeds:\n\n{suggestions(records)}")
+    print(f"Suggestions (asks the queue didn't answer), over all seeds:\n\n{suggestions(runs, records)}")
 
 
 if __name__ == "__main__":
