@@ -81,7 +81,8 @@ The experiment and its results are in [docs/experiments/47-ax-gp.md](../docs/exp
 levers, interactions, a memory limit that crashes, a noisy two-lever guard and a removal. Its three versions
 (`training.TARGETS`) differ in whether the removed lever interacts with the others and whether a commit moves the
 guard; 47-ax-gp.md's re-validation section describes them. `bench.simulate` takes one as its `target`, and `ax_gp.py`
-as `--target`; `--window 5-7` compares over those rounds only and `--level` sets the CI level:
+as `--target`; `--window 5-7` compares over those rounds only, `--level` sets the CI level, and `--out` saves every
+run and suggestion as JSON:
 
 ```sh
 uv run --frozen --project benchmark python benchmark/ax_gp.py --target training --seeds 4 --trials 6 --variant harness --variant ax-crash --window 5-7

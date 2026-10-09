@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -144,10 +145,18 @@ def test_the_command_runs_each_variant_on_the_same_seeds_and_compares_it_with_th
         ["| harness", "8"], ["| ax-crash", "8"]]
 
 
-def test_the_command_runs_the_target_it_names_in_its_worker_processes(capsys):
+def test_the_command_runs_the_target_it_names_in_its_worker_processes_and_saves_the_runs(capsys, tmp_path):
     ax_gp.main(["--target", "training-additive", "--first-seed", "7", "--seeds", "2", "--rounds", "2", "--trials", "3",
-                "--repeats", "1", "--jobs", "2", "--variant", "harness", "--variant", "harness", "--window", "2-2"])
+                "--repeats", "1", "--jobs", "2", "--variant", "harness", "--variant", "harness", "--window", "2-2",
+                "--out", str(tmp_path / "runs.json")])
     out = capsys.readouterr().out
-    target = training.TARGETS["training-additive"]
-    assert bench.report([bench.simulate(bench.Harness(), seed, TINY, target) for seed in (7, 8)]) in out
+    runs = [bench.simulate(bench.Harness(), seed, TINY, training.TARGETS["training-additive"]) for seed in (7, 8)]
+    assert bench.report(runs) in out
     assert "harness − harness, per seed, rounds 2-2:" in out
+    assert json.loads((tmp_path / "runs.json").read_text())["runs"]["harness"] == runs
+
+
+@pytest.mark.parametrize("flag", [["--window", "7-5"], ["--window", "2-3"], ["--window", "2"], ["--level", "95"]])
+def test_a_bad_window_or_level_stops_the_command_before_anything_runs(flag):
+    with pytest.raises(SystemExit):  # 2 rounds: no comparison could be printed after hours of runs
+        ax_gp.main(["--rounds", "2", "--seeds", "1", "--variant", "harness", *flag])

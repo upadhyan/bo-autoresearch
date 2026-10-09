@@ -9,6 +9,7 @@ Needs Ax, so it runs in benchmark/'s own environment (docs/experiments/47-ax-gp.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import logging.handlers
 import multiprocessing
@@ -181,10 +182,19 @@ def main(argv: list[str] | None = None) -> None:
                     help="repeat to compare with the first (default harness, ax)")
     ap.add_argument("--window", help="compare over rounds A-B only (default every round)")
     ap.add_argument("--level", type=float, default=0.95, help="the comparison's CI level (default 0.95)")
+    ap.add_argument("--out", help="also save every run and suggestion to this JSON file")
     args = ap.parse_args(argv)
     names = args.variant or ["harness", "ax"]
     cfg = {"rounds": args.rounds or len(TARGETS[args.target].SCENARIO), "trials_per_round": args.trials,
            "repeats": args.repeats}
+    window = None  # checked before the runs, which can take hours
+    if args.window:
+        first, _, last = args.window.partition("-")
+        if not (first.isdigit() and last.isdigit() and 1 <= int(first) <= int(last) <= cfg["rounds"]):
+            ap.error(f"--window {args.window}: need A-B with 1 <= A <= B <= {cfg['rounds']}, the rounds")
+        window = set(range(int(first), int(last) + 1))
+    if not 0 < args.level < 1:
+        ap.error(f"--level {args.level}: a fraction, e.g. 0.95")
     os.environ.update(OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1")  # read by torch and numpy in each process
     runs, records = {}, {}
     with ProcessPoolExecutor(args.jobs, mp_context=multiprocessing.get_context("spawn")) as pool:
@@ -196,8 +206,9 @@ def main(argv: list[str] | None = None) -> None:
             print(f"{name}: {args.seeds} seeds in {time.monotonic() - start:.0f} s on {args.jobs} processes; "
                   "median [IQR] over seeds\n")
             print(bench.report(runs[name]) + "\n")
-    first, last = (int(r) for r in args.window.split("-")) if args.window else (None, None)
-    window = set(range(first, last + 1)) if args.window else None
+    if args.out:
+        with open(args.out, "w") as f:
+            json.dump({"args": vars(args), "runs": runs, "suggestions": records}, f)
     for name in names[1:]:
         print(f"{name} − {names[0]}, per seed{f', rounds {args.window}' if window else ''}:\n\n"
               f"{bench.compare(runs[names[0]], runs[name], window, args.level)}\n")

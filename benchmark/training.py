@@ -77,7 +77,7 @@ def _scenario(round7: dict) -> list[dict]:
     return [
         {"add": ["H1", "H2", "H3", "H7", "H10", "H13", "H14"]},
         {"add": ["H4", "H5", "H8"]},  # the guard can break; fp32 only, so the memory limit bounds batch × width
-        {"add": ["H6", "H11"]},  # fp16 or checkpointing puts the limit past the best batch and width
+        {"add": ["H6", "H11"]},  # fp16 or checkpointing; from round 4 the best width (548) fits only with one
         {"add": ["H9"], "investigate": {"H4": [{"aux_weight": 0.1}]}},  # H4's off-state and a probe, then removed
         {"remove": ["H4"], "add": ["H12", "H15"]},
         {},  # R1 changed nothing: the same commit
@@ -101,6 +101,16 @@ def _capacity(width, dropout):
             + 4 * (dropout - 0.05 - 0.06 * np.log(width / 128)) ** 2)
 
 
+def _memory(batch, width, precision: str, ckpt: bool):
+    """Activation memory, for floats or numpy arrays: batch × width × bytes per value, × 0.35 with checkpointing."""
+    return batch * width * BYTES[precision] * (0.35 if ckpt else 1)
+
+
+def _steps(precision: str, ckpt: bool) -> float:
+    """Error from fewer steps in the budget: a slower precision, and checkpointing's recomputation."""
+    return {"fp32": 0.25, "bf16": 0.05, "fp16": 0.0}[precision] + 0.12 * ckpt
+
+
 def _regularisation(aug, smoothing):
     return 1.5 * (aug - 1) ** 2 + 8 * (smoothing - 0.25) ** 2
 
@@ -112,7 +122,7 @@ def _lr_best(c: dict, world: dict) -> float:
 def crashes(config: dict) -> bool:
     """Whether the config runs out of memory: a crash at every commit."""
     c = {**DEFAULTS, **config}
-    return c["batch"] * c["width"] * BYTES[c["precision"]] * (0.35 if c["checkpointing"] else 1) > MEMORY
+    return _memory(c["batch"], c["width"], c["precision"], c["checkpointing"]) > MEMORY
 
 
 def reg_r2(config: dict, world: dict) -> float:
@@ -131,7 +141,7 @@ def true_metric(config: dict, world: dict) -> tuple[float, bool]:
         + _capacity(c["width"], c["dropout"])
         + _regularisation(c["aug_strength"], c["label_smoothing"])
         + {"constant": 0.5, "step": 0.3, "cosine": 0.15 + 4 * (c["lr_floor"] - 0.25) ** 2}[c["schedule"]]
-        + {"fp32": 0.25, "bf16": 0.05, "fp16": 0.0}[c["precision"]] + 0.12 * c["checkpointing"]  # fewer steps
+        + _steps(c["precision"], c["checkpointing"])
         + (-0.25 + 0.2 * math.log(c["ema_halflife"] / 300) ** 2 if c["ema"] else 0.0)
         + 0.6 * ((c["init_scale"] - 4) / 3) ** 2
         + 0.05 * (math.log10(c["weight_decay"]) + 3.5) ** 2
@@ -159,9 +169,8 @@ def best_config(world: dict, space=None) -> dict:
     cells = []
     for precision in values("precision", PROPOSALS["H11"]["levers"][0]["choices"]):
         for ckpt in values("checkpointing", [False, True]):
-            memory = batch[:, None] * width[None, :] * BYTES[precision] * (0.35 if ckpt else 1)
-            error = dynamics[:, None] + capacity[None, :] + {"fp32": 0.25, "bf16": 0.05, "fp16": 0.0}[precision]
-            error = np.where(memory > MEMORY, np.inf, error + 0.12 * ckpt)
+            error = np.where(_memory(batch[:, None], width[None, :], precision, ckpt) > MEMORY, np.inf,
+                             dynamics[:, None] + capacity[None, :] + _steps(precision, ckpt))
             i, j = np.unravel_index(np.argmin(error), error.shape)
             cells.append((error[i, j], {"batch": int(batch[i]), "width": int(width[j]), "precision": str(precision),
                                         "checkpointing": bool(ckpt), "lr_scale": float(lr[i]),

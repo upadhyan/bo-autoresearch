@@ -219,20 +219,23 @@ def report(runs: list[list[dict]]) -> str:
 
 
 def _per_run(run: list[dict], window: set[int] | None = None) -> dict:
-    """A run's `all` row over the rounds in `window` (every round if None): its mean regret and its total eval runs."""
+    """A run's `all` row over the rounds in `window` (every round if None): its mean regret, its total eval runs, and
+    how many rounds ended on an incumbent whose true guard breaks. Regret ignores the true guard, so such an incumbent
+    (one that passed a noisy guard) can score below 0."""
     recs = [rec for rec in run if window is None or rec["round"] in window]
-    return {"regret (s)": np.mean([rec["regret"] for rec in recs]), "eval runs": sum(rec["runs"] for rec in recs)}
+    return {"regret (s)": np.mean([rec["regret"] for rec in recs]), "eval runs": sum(rec["runs"] for rec in recs),
+            "infeasible incumbents": sum(not rec.get("feasible", True) for rec in recs)}
 
 
 def compare(
     base: list[list[dict]], runs: list[list[dict]], window: set[int] | None = None, level: float = 0.95
 ) -> str:
     """A table of each seed's difference from the base variant's run on the same seed (runs minus base) in mean regret
-    and in eval runs over the rounds in `window` (every round if None): the mean, its bootstrap CI at `level`, and how
-    many seeds came out lower, tied and higher."""
+    and in eval runs over the rounds in `window` (every round if None), and in rounds ending on an incumbent whose true
+    guard breaks: the mean, its bootstrap CI at `level`, and how many seeds came out lower, tied and higher."""
     rng = np.random.default_rng(0)
     rows = []
-    for k, fmt in (("regret (s)", ".3g"), ("eval runs", ".1f")):
+    for k, fmt in (("regret (s)", ".3g"), ("eval runs", ".1f"), ("infeasible incumbents", ".2f")):
         d = np.array([_per_run(run, window)[k] - _per_run(b, window)[k] for b, run in zip(base, runs)])
         lo, hi = np.percentile(rng.choice(d, (2000, len(d))).mean(axis=1), [50 * (1 - level), 50 * (1 + level)])
         rows.append([k, f"{d.mean():{fmt}}", f"[{lo:{fmt}}, {hi:{fmt}}]",

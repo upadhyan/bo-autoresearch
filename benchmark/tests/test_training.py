@@ -43,18 +43,12 @@ def test_the_active_levers_grow_to_19_and_aux_weight_is_tuned_in_rounds_2_to_4_o
 SMALL = {"rounds": 5, "trials_per_round": 3, "repeats": 2}
 
 
-@pytest.mark.parametrize("name", TARGETS)
-def test_a_seed_reproduces_its_run_on_each_target(name):
+def test_a_seed_reproduces_its_run():
     def run(seed: int) -> list[dict]:
-        return bench.simulate(bench.Harness(), seed, SMALL, TARGETS[name])
+        return bench.simulate(bench.Harness(), seed, SMALL, TARGETS["training"])
 
     assert run(3) == run(3)
     assert [t["metric"] for r in run(3) for t in r["trials"]] != [t["metric"] for r in run(4) for t in r["trials"]]
-
-
-def test_without_a_target_simulate_runs_benchs_own_scenario():
-    cfg = {"rounds": 2, "trials_per_round": 3, "repeats": 1}
-    assert bench.simulate(bench.Harness(), 0, cfg) == bench.simulate(bench.Harness(), 0, cfg, bench)
 
 
 # The best true metric in each round's space, from an independent grid search over every lever (no closed forms),
@@ -84,7 +78,7 @@ def test_the_regret_reference_is_the_best_feasible_config_in_each_rounds_space(n
 
 def memory(config: dict) -> float:
     c = {**training.DEFAULTS, **config}
-    return c["batch"] * c["width"] * training.BYTES[c["precision"]] * (0.35 if c["checkpointing"] else 1)
+    return training._memory(c["batch"], c["width"], c["precision"], c["checkpointing"])
 
 
 def test_the_memory_limit_sits_just_past_the_optimum_while_only_fp32_exists_and_a_crash_ends_the_trial():

@@ -260,7 +260,7 @@ it. Three versions differ only in two switches; #48 and #49 use the other two.
 |---|---|
 | 1 | lr_scale + warmup_frac, batch, pin_memory + num_workers, aug_strength, schedule + lr_floor, init_scale, weight_decay |
 | 2 | aux_weight (harmful), width, label_smoothing: the guard can now break |
-| 3 | checkpointing, precision: fp16 or checkpointing puts the memory limit past the best batch and width |
+| 3 | checkpointing, precision: fp16 or checkpointing halves the memory; from round 4 the best width fits only with one |
 | 4 | dropout; H4 investigated: its off-state (the incumbent with aux_weight 0) and aux_weight 0.1 are queued |
 | 5 | H4 removed (rule 2 drops every round 2-4 trial with aux_weight off 0); ema + ema_halflife, cudnn_benchmark + log_every |
 | 6 | same commit |
@@ -277,8 +277,9 @@ it. Three versions differ only in two switches; #48 and #49 use the other two.
   default halflife hurts).
 - 4 dead levers (pin_memory, num_workers, cudnn_benchmark, log_every).
 - Crash: out of memory when batch × width × bytes per value (× 0.35 with checkpointing) passes a limit, at every
-  commit. It cuts into the best batch × width only while fp32 is the only precision (rounds 1-2: the round-2 optimum
-  uses 93% of it; from round 3, fp16 uses 53%).
+  commit. It sits just past the best batch × width without binding there: the round-2 optimum (fp32) uses 93% of
+  it, round 3's (fp16) 46%; from round 4, when dropout moves the best width to 548, that width fits only with fp16 or
+  checkpointing (53% with fp16).
 - Guard: the regression head's R² ≥ 0.73. Augmentation and smoothing together cost R², and so does aux_weight above
   0.7; neither augmentation nor smoothing alone can break it. The best feasible config sits on the floor. R² is
   measured with noise on every repeat (sd 0.01 shared per repeat plus 0.01 per config, paired like the metric), so a
@@ -327,14 +328,18 @@ exists in every round; #47's only in round 2).
 
 **Deciding measure:** per seed, the mean regret over the run's rounds, `ax-crash − harness`, and its 95% bootstrap CI
 [L, U] (`bench.compare`: 2000 resamples of the seeds, percentiles; at 30-60 seeds its one-sided miss rate is about
-3% against a nominal 2.5%).
+3% against a nominal 2.5%). Regret ignores the true guard: an incumbent that passed its noisy repeats but breaks the
+true guard can score a little below 0 (about −0.03 to −0.1 a round). `bench.compare` also prints, per seed, the
+difference in rounds that ended on such an incumbent ("infeasible incumbents"), with the same CI [L′, U′].
 
 **Rerun clause**, for every deciding CI in #47-#49: if the CI end nearer the threshold (0 here) is within a tenth of
 the CI's width of it, the comparison runs once more on twice the seeds (same first seed) and is decided on that CI.
 
 ### Decision rule
 
-Each of the six comparisons (A and B at 6, 12 and 24 trials) is PASS if U < 0, WORSE if L > 0, else UNRESOLVED.
+Each of the six comparisons (A and B at 6, 12 and 24 trials) is PASS if U < 0 and L′ ≤ 0, WORSE if L > 0, else
+UNRESOLVED. L′ > 0 means `ax-crash` ships more incumbents that break the true guard, so a lower regret doesn't pass
+on it (the default target's guard has no noise, so its L′ is always 0).
 
 - **GO** if all six PASS.
 - **NO-GO** if any is WORSE.
@@ -347,14 +352,14 @@ runs only by breaking the guard or crashing less, so the cap could only fail an 
 harness-crash` doesn't (U ≥ 0), the write-up says the gain there is crash handling, not the GP; on a GO with that
 caveat, you decide between #50 and giving TPE crash-as-infeasible (the cheaper fix) before #50 starts.
 
-**Reported, not deciding:** sampled trials that broke the guard or crashed per arm; incumbents whose true guard
-breaks (passed on noisy repeats); round-2-4 trials rule 2 keeps at round 5 per arm (Ax can land exactly on a bound,
-TPE can't); seconds per suggestion and GP fits; eval runs.
+**Reported, not deciding:** sampled trials that broke the guard or crashed per arm; in B, round-2-4 trials rule 2
+keeps at round 5 per arm (Ax can land exactly on aux_weight's bound, TPE can't); seconds per suggestion and GP fits;
+eval runs. Each command saves its runs with `--out`, and the counts not printed come from that file.
 
 | outcome | roadmap |
 |---|---|
 | GO | #50 proceeds (re-check #46's rule 4 there); #48 and #49 run |
-| GO with the crash caveat | you choose: #50, or crash-as-infeasible on TPE |
+| GO with the crash caveat | you choose: #50, or crash-as-infeasible on TPE; #48 and #49 run only if you choose #50 |
 | NO-GO | the roadmap closes #48-#53; you confirm first |
 | INCONCLUSIVE | you choose: more seeds or stop |
 
@@ -364,12 +369,12 @@ Part 2 adds `harness-crash` and makes `ax_gp.py` compare each arm with every ear
 harness-crash` prints alongside `ax-crash − harness`.
 
 ```sh
-uv run --frozen --project benchmark python benchmark/ax_gp.py --first-seed 200 --seeds 60 --trials 6 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash
-uv run --frozen --project benchmark python benchmark/ax_gp.py --first-seed 200 --seeds 60 --trials 12 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash
-uv run --frozen --project benchmark python benchmark/ax_gp.py --first-seed 200 --seeds 30 --trials 24 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash
-uv run --frozen --project benchmark python benchmark/ax_gp.py --target training --seeds 60 --trials 6 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash
-uv run --frozen --project benchmark python benchmark/ax_gp.py --target training --seeds 60 --trials 12 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash
-uv run --frozen --project benchmark python benchmark/ax_gp.py --target training --seeds 30 --trials 24 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash
+uv run --frozen --project benchmark python benchmark/ax_gp.py --first-seed 200 --seeds 60 --trials 6 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash --out a6.json
+uv run --frozen --project benchmark python benchmark/ax_gp.py --first-seed 200 --seeds 60 --trials 12 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash --out a12.json
+uv run --frozen --project benchmark python benchmark/ax_gp.py --first-seed 200 --seeds 30 --trials 24 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash --out a24.json
+uv run --frozen --project benchmark python benchmark/ax_gp.py --target training --seeds 60 --trials 6 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash --out b6.json
+uv run --frozen --project benchmark python benchmark/ax_gp.py --target training --seeds 60 --trials 12 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash --out b12.json
+uv run --frozen --project benchmark python benchmark/ax_gp.py --target training --seeds 30 --trials 24 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash --out b24.json
 ```
 
 **Compute**, at #47's 10-25 s per GP suggestion (a planning probe on 20 random levers took 11-29 s): A about 10,000

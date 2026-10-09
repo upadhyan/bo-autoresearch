@@ -230,6 +230,7 @@ def test_a_comparison_gives_each_seeds_difference_from_the_first_variant():
     assert rows == [
         ["regret (s)", "0.75", "[0.25, 1]", "0 / 1 / 3"],  # mean, 95% bootstrap CI, seeds lower / tied / higher
         ["eval runs", "0.0", "[0.0, 0.0]", "0 / 4 / 0"],
+        ["infeasible incumbents", "0.00", "[0.00, 0.00]", "0 / 4 / 0"],  # rounds whose incumbent breaks the true guard
     ]
 
 
@@ -246,6 +247,8 @@ def test_a_comparison_can_cover_a_window_of_rounds_at_another_ci_level():
     lo, hi = (float(x) for x in rows[0][2].strip("[]").split(", "))
     assert 0.5 <= lo <= 0.75 <= hi <= 1  # the middle half of the bootstrap means
     assert bench.compare(base, runs) != table
+    runs[0][1]["feasible"] = False  # seed 0's round 2 ends on an incumbent that breaks the true guard
+    assert "| infeasible incumbents | 0.25 |" in bench.compare(base, runs, window={2})
 
 
 def test_a_second_variant_is_compared_with_the_first_on_the_same_seeds(capsys):
