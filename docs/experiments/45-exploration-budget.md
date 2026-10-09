@@ -96,12 +96,15 @@ Where it comes from: median regret per round, `default`, 6 trials (the first com
 ## Decision
 
 **No.** No k beats the harness in a single cell, and the rule needs all four: `explore-0` loses on `default` at both
-budgets, `explore-2` on `staggered` at both, `explore-5` everywhere. Nothing changes in the harness.
+budgets (at 12 trials on the mean, through its tail), `explore-2` on `staggered` at both, `explore-5` everywhere.
+Nothing changes in the harness.
 
 - The harness's start-up already samples at random where the model has least data: round 1, and `default`'s round 4,
   where rule 2 leaves out nearly every earlier trial (H3 removed, `buffer_kb` almost never sampled at its default).
-  Without it (`explore-0`) round 4's median regret doubles. A fixed k spends TPE's trials in rounds with plenty of
-  data: `explore-5`'s round 2 median is 0.9 against 0.046.
+  Without it (`explore-0`) at 6 trials round 4's median regret doubles. At 12 trials the loss is in the tail
+  (the third command's tables): `explore-0` is lower on 267 of 500 seeds and its median is lower (0.469 against
+  0.53; round 4's 1.28 against 1.34), but its round 4 upper quartile is higher (1.98 against 1.85). A fixed k spends
+  TPE's trials in rounds with plenty of data: `explore-5`'s round 2 median is 0.9 against 0.046.
 - On `staggered` every earlier trial is copied, so the harness samples at random only in round 1, where the only
   lever, `buffer_kb`, has no effect: `explore-0` doesn't differ from it.
 - With seeds, no k beats `seed-mixed` at the real run's budget or on `default` either. On `staggered` at 12 trials,
