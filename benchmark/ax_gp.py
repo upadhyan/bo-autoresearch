@@ -3,7 +3,7 @@
 Needs Ax, so it runs in benchmark/'s own environment (docs/experiments/47-ax-gp.md):
 
     uv run --frozen --project benchmark python benchmark/ax_gp.py [--target training] [--seeds 30] [--trials 12] \
-        [--repeats 2] [--variant harness --variant ax …]
+        [--repeats 2] [--variant harness --variant ax …] [--window 5-7 …] [--level 0.95 …] [--out runs.json]
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from ax.api.configs import ChoiceParameterConfig, RangeParameterConfig
 
 import bench
 import training
-from boar import rounds
+from boar import optimizer, rounds
 
 # Ax logs each trial at INFO and BoTorch a failed GP fit attempt at DEBUG: `_LOG` keeps both, the console neither.
 _LOG = logging.handlers.BufferingHandler(10**9)
@@ -115,6 +115,21 @@ class CrashAsGuard(AxBackend):
             super().tell(state, metric)
 
 
+class CrashAsInfeasible(optimizer.OptunaBackend):
+    """TPE told a crash as a broken guard, as CrashAsGuard tells Ax (#47's re-validation). TPE ranks a trial that
+    broke a guard by its constraint alone, so the metric it is told for a crash is never read."""
+
+    def tell(self, state: str, metric: float | None) -> None:
+        if state == "failed":
+            super().tell("infeasible", 0.0)
+        else:
+            super().tell(state, metric)
+
+
+def _tpe_crash_as_infeasible(space: dict, seed: int, n_startup: int) -> CrashAsInfeasible:
+    return CrashAsInfeasible.create(None, "round", bench.DIRECTION, space, seed, n_startup)
+
+
 class _Recorded:
     """`backend`'s methods, recording each ask the queue didn't answer: its seconds, and `backend.fit` if any."""
 
@@ -158,14 +173,20 @@ def suggestions(runs: dict[str, list[list[dict]]], records: dict[str, list[dict]
                             "Sobol instead"], rows)
 
 
-VARIANTS = {"harness": None, "ax": AxBackend, "ax-crash": CrashAsGuard}  # the harness on TPE or on Ax
+# Each makes a fresh variant: the harness on TPE or on Ax, recording its suggestions.
+VARIANTS = {
+    "harness": Recorded,
+    "harness-crash": lambda: Recorded(_tpe_crash_as_infeasible),
+    "ax": lambda: Recorded(AxBackend),
+    "ax-crash": lambda: Recorded(CrashAsGuard),
+}
 TARGETS = {"default": bench, **training.TARGETS}  # bench's own scenario, or the shared hard one
 
 
 def _run(name: str, target: str, seed: int, cfg: dict) -> tuple[list[dict], list[dict]]:
     """One seed's run through a variant on a target, and the suggestions it made."""
     warnings.simplefilter("ignore")  # Ax warns about its own deprecations and every constant guard column
-    variant = Recorded(VARIANTS[name])
+    variant = VARIANTS[name]()
     return bench.simulate(variant, seed, cfg, TARGETS[target]), variant.records
 
 
@@ -179,22 +200,24 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--repeats", type=int, default=2, help="eval runs per trial (default 2)")
     ap.add_argument("--jobs", type=int, default=8, help="processes, one thread each (default 8)")
     ap.add_argument("--variant", action="append", choices=list(VARIANTS),
-                    help="repeat to compare with the first (default harness, ax)")
-    ap.add_argument("--window", help="compare over rounds A-B only (default every round)")
-    ap.add_argument("--level", type=float, default=0.95, help="the comparison's CI level (default 0.95)")
+                    help="repeat to compare each with every earlier one (default harness, ax)")
+    ap.add_argument("--window", action="append", default=[],
+                    help="also compare over rounds A-B only; repeatable (every round is always compared)")
+    ap.add_argument("--level", type=float, action="append", help="the comparisons' CI level; repeatable (default 0.95)")
     ap.add_argument("--out", help="also save every run and suggestion to this JSON file")
     args = ap.parse_args(argv)
     names = args.variant or ["harness", "ax"]
     cfg = {"rounds": args.rounds or len(TARGETS[args.target].SCENARIO), "trials_per_round": args.trials,
            "repeats": args.repeats}
-    window = None  # checked before the runs, which can take hours
-    if args.window:
-        first, _, last = args.window.partition("-")
+    windows: dict[str, set[int] | None] = {"": None}  # checked before the runs, which can take hours
+    for w in args.window:
+        first, _, last = w.partition("-")
         if not (first.isdigit() and last.isdigit() and 1 <= int(first) <= int(last) <= cfg["rounds"]):
-            ap.error(f"--window {args.window}: need A-B with 1 <= A <= B <= {cfg['rounds']}, the rounds")
-        window = set(range(int(first), int(last) + 1))
-    if not 0 < args.level < 1:
-        ap.error(f"--level {args.level}: a fraction, e.g. 0.95")
+            ap.error(f"--window {w}: need A-B with 1 <= A <= B <= {cfg['rounds']}, the rounds")
+        windows[f", rounds {w}"] = set(range(int(first), int(last) + 1))
+    levels = args.level or [0.95]
+    if not all(0 < level < 1 for level in levels):
+        ap.error(f"--level {levels}: fractions, e.g. 0.95")
     os.environ.update(OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1")  # read by torch and numpy in each process
     runs, records = {}, {}
     with ProcessPoolExecutor(args.jobs, mp_context=multiprocessing.get_context("spawn")) as pool:
@@ -209,9 +232,12 @@ def main(argv: list[str] | None = None) -> None:
     if args.out:
         with open(args.out, "w") as f:
             json.dump({"args": vars(args), "runs": runs, "suggestions": records}, f)
-    for name in names[1:]:
-        print(f"{name} − {names[0]}, per seed{f', rounds {args.window}' if window else ''}:\n\n"
-              f"{bench.compare(runs[names[0]], runs[name], window, args.level)}\n")
+    for i, name in enumerate(names):
+        for base in names[:i]:
+            for label, window in windows.items():
+                for level in levels:
+                    table = bench.compare(runs[base], runs[name], window, level)
+                    print(f"{name} − {base}, per seed{label}:\n\n{table}\n")
     print(f"Suggestions (asks the queue didn't answer), over all seeds:\n\n{suggestions(runs, records)}")
 
 

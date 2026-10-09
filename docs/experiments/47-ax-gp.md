@@ -321,10 +321,12 @@ exists in every round; #47's only in round 2).
 
 | part | target | trials per round | seeds | repeats |
 |---|---|---|---|---|
-| A | `default` (bench.SCENARIO, 6 rounds) | 6, 12 / 24 | 200-259 / 200-229 | 2 |
-| B | `training` (9 rounds) | 6, 12 / 24 | 0-59 / 0-29 | 2 |
+| A | `default` (bench.SCENARIO, 6 rounds) | 6, 12 / 24 | 200-229 / 200-214 | 2 |
+| B | `training` (9 rounds) | 6, 12 / 24 | 0-29 / 0-14 | 2 |
 
-60 seeds at 6 and 12 trials: at 30, the pass probability at 12 trials was 0.66-0.88 even at #47's own effect sizes.
+Amended before any run, to halve the compute: these were 60 seeds at 6 and 12 trials and 30 at 24. At 30 seeds the
+pass probability at 12 trials was 0.66-0.88 even at #47's own effect sizes, so UNRESOLVED is more likely; the rerun
+clause still doubles the seeds of a comparison that lands near its threshold.
 
 **Deciding measure:** per seed, the mean regret over the run's rounds, `ax-crash − harness`, and its 95% bootstrap CI
 [L, U] (`bench.compare`: 2000 resamples of the seeds, percentiles; at 30-60 seeds its one-sided miss rate is about
@@ -365,20 +367,21 @@ eval runs. Each command saves its runs with `--out`, and the counts not printed 
 
 ### Commands
 
-Part 2 adds `harness-crash` and makes `ax_gp.py` compare each arm with every earlier one, so `ax-crash −
-harness-crash` prints alongside `ax-crash − harness`.
+`ax_gp.py` compares each arm with every earlier one, so `ax-crash − harness-crash` prints alongside `ax-crash −
+harness`.
 
 ```sh
-uv run --frozen --project benchmark python benchmark/ax_gp.py --first-seed 200 --seeds 60 --trials 6 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash --out a6.json
-uv run --frozen --project benchmark python benchmark/ax_gp.py --first-seed 200 --seeds 60 --trials 12 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash --out a12.json
-uv run --frozen --project benchmark python benchmark/ax_gp.py --first-seed 200 --seeds 30 --trials 24 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash --out a24.json
-uv run --frozen --project benchmark python benchmark/ax_gp.py --target training --seeds 60 --trials 6 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash --out b6.json
-uv run --frozen --project benchmark python benchmark/ax_gp.py --target training --seeds 60 --trials 12 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash --out b12.json
-uv run --frozen --project benchmark python benchmark/ax_gp.py --target training --seeds 30 --trials 24 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash --out b24.json
+uv run --frozen --project benchmark python benchmark/ax_gp.py --first-seed 200 --seeds 30 --trials 6 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash --out a6.json
+uv run --frozen --project benchmark python benchmark/ax_gp.py --first-seed 200 --seeds 30 --trials 12 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash --out a12.json
+uv run --frozen --project benchmark python benchmark/ax_gp.py --first-seed 200 --seeds 15 --trials 24 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash --out a24.json
+uv run --frozen --project benchmark python benchmark/ax_gp.py --target training --seeds 30 --trials 6 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash --out b6.json
+uv run --frozen --project benchmark python benchmark/ax_gp.py --target training --seeds 30 --trials 12 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash --out b12.json
+uv run --frozen --project benchmark python benchmark/ax_gp.py --target training --seeds 15 --trials 24 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash --out b24.json
 ```
 
 **Compute**, at #47's 10-25 s per GP suggestion (a planning probe on 20 random levers took 11-29 s): A about 10,000
-Ax suggestions, B about 15,000; about 13 h on 8 processes. TPE's arms take minutes.
+Ax suggestions, B about 15,000 at the original seeds; with the seeds halved, about 6.5 h on 8 processes (one thread
+each: a single process with 8 threads was 2.5 times slower per suggestion). TPE's arms take minutes.
 
 ### Limits fixed in advance
 

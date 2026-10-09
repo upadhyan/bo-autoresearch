@@ -115,7 +115,12 @@ def measure(config: dict, world: dict, commit: str, seed: int, repeats: int) -> 
 
 
 class Harness:
-    """BOAR's round as the harness runs it. A variant subclasses it and overrides what it changes."""
+    """BOAR's round as the harness runs it. A variant subclasses it and overrides what it changes.
+
+    simulate sets `commit` to the round's commit before it calls `warm`, then `backend`. A backend with a
+    `tell_record` method is told each trial's whole record (a guard's margin, say) instead of `tell`."""
+
+    commit = ""
 
     def backend(self, space: dict, seed: int, n_startup: int):
         """The round's optimizer, with OptunaBackend's methods: multivariate TPE."""
@@ -168,8 +173,9 @@ def simulate(variant: Harness, seed: int, cfg: dict, target=None) -> list[dict]:
         if not commit or step:
             commit = f"c{r}"
         space, defaults = store.search_space(hyps), store.lever_defaults(hyps)
-        backend = variant.backend(space, seed + r, cfg["trials_per_round"])
+        variant.commit = commit
         valid, excluded, incumbent = variant.warm(trials, hyps, r)
+        backend = variant.backend(space, seed + r, cfg["trials_per_round"])
         backend.add_warm(valid, defaults)
         warm = variant.queue(hyps, r, incumbent)
         measured = [t for t in trials if t["commit"] == commit and t["state"] != evalrun.FAILED]
@@ -186,7 +192,10 @@ def simulate(variant: Harness, seed: int, cfg: dict, target=None) -> list[dict]:
             result = target.measure(config, world, commit, seed, cfg["repeats"])
             new.append({"trial": n, "round": r, "commit": commit, "config": config, **result, "queued": queued})
             trials.append(new[-1])
-            backend.tell(result["state"], result["metric"])
+            if hasattr(backend, "tell_record"):
+                backend.tell_record(new[-1])
+            else:
+                backend.tell(result["state"], result["metric"])
         # Regret: the true metric at the round's commit of the incumbent after the round (the baseline if there is
         # none, as at finalize) minus that of the best config in the round's search space. `feasible`: whether the
         # incumbent's true guard holds (a noisy guard can pass a config that breaks it).

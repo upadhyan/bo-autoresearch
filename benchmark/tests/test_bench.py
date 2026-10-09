@@ -139,6 +139,29 @@ class TryDedup(bench.Harness):
         return warm
 
 
+class Records(bench.Harness):
+    """TPE, keeping each round's commit as warm sees it and each record its backend is told."""
+
+    def __init__(self) -> None:
+        self.commits, self.told = [], []
+
+    def warm(self, trials, hyps, r):
+        self.commits.append(self.commit)
+        return super().warm(trials, hyps, r)
+
+    def backend(self, space, seed, n_startup):
+        backend = super().backend(space, seed, n_startup)
+        backend.tell_record = self.told.append  # a backend with tell_record gets the whole record instead of tell
+        return backend
+
+
+def test_warm_knows_the_rounds_commit_and_a_backend_can_take_whole_records():
+    variant = Records()
+    rounds = run(variant=variant)
+    assert variant.commits[::2] == [rec["commit"] for rec in rounds]  # every other call scores the round after
+    assert variant.told == [t for rec in rounds for t in rec["trials"]]
+
+
 def test_a_variant_changes_a_policy_by_overriding_its_method():
     round1 = run(variant=TryDedup())[0]["trials"]
     assert [t["queued"] for t in round1[:2]] == ["baseline", "try dedup"] and round1[1]["config"]["dedup_set"]

@@ -134,15 +134,27 @@ def test_ax_suggests_a_crashed_config_again_unless_told_the_crash_as_a_broken_gu
     assert after != crashed
 
 
-def test_the_command_runs_each_variant_on_the_same_seeds_and_compares_it_with_the_first(capsys):
+def test_tpe_can_be_told_a_crash_as_a_broken_guard():
+    backend = ax_gp._tpe_crash_as_infeasible(SPACE, 0, 6)
+    backend.ask(1)
+    backend.tell("failed", None)
+    (trial,) = backend._study.trials
+    assert trial.state.name == "COMPLETE" and trial.constraints == {"guards": 1.0}
+
+
+def test_the_command_runs_each_variant_on_the_same_seeds_and_compares_it_with_every_earlier_one(capsys):
     ax_gp.main(["--first-seed", "7", "--seeds", "2", "--rounds", "2", "--trials", "3", "--repeats", "1", "--jobs", "2",
-                "--variant", "harness", "--variant", "ax-crash"])
+                "--variant", "harness", "--variant", "harness-crash", "--variant", "ax-crash",
+                "--level", "0.95", "--level", "0.975"])
     out = capsys.readouterr().out
-    assert "harness: 2 seeds" in out and "ax-crash: 2 seeds" in out and "ax-crash − harness, per seed:" in out
+    assert "harness: 2 seeds" in out and "ax-crash: 2 seeds" in out
+    for pair in ("harness-crash − harness", "ax-crash − harness", "ax-crash − harness-crash"):
+        assert out.count(f"{pair}, per seed:") == 2, pair  # once per level
+    assert "97.5% CI" in out
     assert bench.report([bench.simulate(bench.Harness(), seed, TINY) for seed in (7, 8)]) in out
     # Each seed: the baseline, then two startup draws; the incumbent, then two suggestions.
     assert [line.split(" | ")[:2] for line in out.splitlines() if line.startswith(("| harness", "| ax"))] == [
-        ["| harness", "8"], ["| ax-crash", "8"]]
+        ["| harness", "8"], ["| harness-crash", "8"], ["| ax-crash", "8"]]
 
 
 def test_the_command_runs_the_target_it_names_in_its_worker_processes_and_saves_the_runs(capsys, tmp_path):
