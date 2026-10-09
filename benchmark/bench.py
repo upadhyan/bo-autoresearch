@@ -244,9 +244,10 @@ def _change(hyps: list[dict], step: dict, r: int) -> None:
         store.hypothesis(hyps, hid)["decisions"][str(r - 1)] = {"decision": "fix"}
 
 
-def simulate(variant: Harness, seed: int, cfg: dict, scenario: list[dict] = SCENARIO) -> list[dict]:
+def simulate(variant: Harness, seed: int, cfg: dict, scenario: list[dict] | None = None) -> list[dict]:
     """One run through `variant`, the same for the same seed: a record per round. `cfg` has the harness config's
-    rounds, trials_per_round and repeats."""
+    rounds, trials_per_round and repeats; `scenario` is SCENARIO, as it is when called, unless given."""
+    scenario = SCENARIO if scenario is None else scenario
     hyps: list[dict] = []
     trials: list[dict] = []
     world, commit, out, seen = dict(WORLD), "", [], set()
