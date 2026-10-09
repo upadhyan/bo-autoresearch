@@ -139,10 +139,10 @@ optimum on the guard (0.8) and the metric still falling past it. Crashes happen 
 
 `ax` suggests its first crashed config again for the rest of the round (its re-measured trials;
 `test_ax_suggests_a_crashed_config_again_unless_told_the_crash_as_a_broken_guard` pins this), so its round 2 ends
-with whatever it found before that crash. TPE samples, so it doesn't keep repeating one. In rounds 3-6 the two Ax
-variants have the same medians, as expected: crashes never join a warm-start set (rule 1), and H4's fix drops round
-2's batch trials (rule 3). On seeds 0-59/0-29, Ax's median regret in rounds 3-6 is below TPE's except in round 4 at
-12 trials, and furthest below in rounds 5-6.
+with whatever it found before that crash. TPE samples, so it doesn't keep repeating one. Outside round 2 the two Ax
+variants have the same medians, as expected: round 1 has no crash, crashes never join a warm-start set (rule 1), and
+H4's fix drops round 2's batch trials (rule 3). On seeds 0-59/0-29, Ax's median regret in rounds 3-6 is below
+TPE's except in round 4 at 12 trials, and furthest below in rounds 5-6.
 
 **GP fits and time per suggestion.** Suggestions are asks the queue didn't answer; Ax's fast quartile is its Sobol
 startup. Seconds are wall clock in one thread, with the machine's load average between 4 and 40. TPE's median was
@@ -198,19 +198,24 @@ is unmeasured. Each process holds about 0.5 GB with torch loaded.
 
 ## Decision
 
-**Go**, for Ax with a crash told as a broken guard.
+**Go**, for Ax with a crash told as a broken guard. Under the rule as first written, which applies to the
+pre-registered `ax`, it is no-go: the go rests on the post hoc `ax-crash`, a deviation to accept knowingly.
 
 - The pre-registered `ax` fails the rule at 12 trials and passes at 6 and 24: it loses round 2 by suggesting its
-  first crashed config again until the round ends (Round 2).
+  first crashed config again until the round ends (Round 2). That is Ax's design, not the scenario's: it treats a
+  failed trial as transient and leaves its config out of its dedupe set (`arms_by_signature_for_deduplication`),
+  so `mark_trial_failed` was unsound for a crash that repeats.
 - `ax-crash` changes only that, and passes the rule at every budget, on the original seeds and on the fresh ones.
-  Being post hoc, it decides only through that confirmation, fixed before its 6- and 24-trial results. Its fewer
-  eval runs are not a saving: they are repeats skipped by sampled trials that broke the guard or crashed (Sampled
-  trials).
+  Being post hoc, it decides only through that confirmation, fixed before its 6- and 24-trial results. Outside
+  round 2 it has `ax`'s medians, and in round 2 TPE's or lower (Round 2): it removes `ax`'s round-2 loss, and the
+  rest of its lead over TPE is `ax`'s. Its fewer eval runs are not a saving: they are repeats skipped by sampled
+  trials that broke the guard or crashed (Sampled trials).
 - Costs: seconds per GP suggestion against TPE's milliseconds (unmeasured at the NeuralSGT run's 23 levers), torch's
   memory, and those wasted trials. No GP fit failed or raised (GP fits).
-- Limits: one synthetic scenario, and a GP's best case: the metric is a sum of one term per lever, smooth in each
-  numeric one (quadratic in log `batch` and log `gc_scale`, linear in `prefetch`), with the optimum on the guard at
-  `prefetch` 0.8. The issue's evidence found no framework better on mixed hierarchical spaces. 7 levers (the
+- Limits: one synthetic scenario, the same one whose round-2 crash prompted `ax-crash`, so the fresh seeds confirm
+  its crash handling only on that crash; and a GP's best case: the metric is a sum of one term per lever, smooth in
+  each numeric one (quadratic in log `batch` and log `gc_scale`, linear in `prefetch`), with the optimum on the guard
+  at `prefetch` 0.8. The issue's evidence found no framework better on mixed hierarchical spaces. 7 levers (the
   NeuralSGT run had up to 23), and 30-60 seeds per budget.
 
 For the roadmap:
