@@ -190,16 +190,22 @@ def _rates(checks: list[dict]) -> list[str]:
 
 
 def detect(seeds: int, cfg: dict) -> str:
-    """A table of the checks in Recheck runs by noise level and configs re-measured."""
+    """Tables of the checks in Recheck runs: by noise level and configs re-measured, then by round."""
     headers = ["checks", "misordered", "flagged if misordered", "flagged if in order"]
-    default, rows = bench.NOISE, []
+    default, rows, by_round = bench.NOISE, [], {}
     for noise in NOISES:
         bench.NOISE = noise
         for n in (2, 3, 4):
             checks = [c for seed in range(seeds) for c in detection(bench.simulate(Recheck(n), seed, cfg))]
             rows.append([noise, n, *_rates(checks)])
+            if (noise, n) == (default, 3):
+                by_round = {r: [c for c in checks if c["round"] == r] for r in sorted({c["round"] for c in checks})}
     bench.NOISE = default
-    return rounds.md_table(["noise", "re-measured", *headers], rows)
+    return "\n\n".join([
+        rounds.md_table(["noise", "re-measured", *headers], rows),
+        f"By round, at noise {default} with 3 configs re-measured:",
+        rounds.md_table(["round", *headers], [[r, *_rates(cs)] for r, cs in by_round.items()]),
+    ])
 
 
 def main(argv: list[str] | None = None) -> None:

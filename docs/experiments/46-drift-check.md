@@ -129,6 +129,24 @@ At noise 0.02 with 3 configs re-measured:
 The check flags only reversals beyond the noise floor on both sides; the truth counts any reversal. Hits fall from
 100% at noise 0 to 26% at 0.02. More configs catch more and raise more false alarms.
 
+`drift`, 6×2, noise 0.02, n = 3, by round (the same command's second table):
+
+| round | shift | checks | misordered | hits | false alarms |
+|---|---|---|---|---|---|
+| 2 | none (H4 added) | 200 | 0 | — | 7/200 |
+| 3 | uniform (1.1x slower) | 200 | 0 | — | 24/200 |
+| 4 | reorders (batch) | 200 | 154 | 55/154 | 5/46 |
+| 5 | none (same commit) | 109 | 60 | 4/60 | 2/49 |
+| 6 | reorders (gc_scale) | 200 | 158 | 49/158 | 10/42 |
+| 7 | reorders (route_table) | 200 | 43 | 12/43 | 20/157 |
+| 8 | uniform (1x again) | 200 | 104 | 15/104 | 7/96 |
+
+- Shifts that reorder: it catches about a third of the misorders in rounds 4 and 6. Round 7's (per_file overtakes
+  once) misorders the top 3 only when they differ in route_table.
+- Uniform or no shifts misorder nothing in rounds 2-3 yet draw false alarms, most after the slowdown (24/200).
+  Round 8 changes no order, yet half its checks are misordered: pooling mixes measurements from before and after
+  the earlier shifts. Round 5 re-measures, on round 4's commit, top configs last measured before it.
+
 ### Regret
 
 Each variant minus `copy-all` on the same seeds: mean over seeds of the run's mean regret (s), its 95% bootstrap CI,
@@ -236,8 +254,8 @@ incumbent's own trials no longer age out. On `drift` it keeps 65-75% of it.
 
 **The drift check: no.** On `drift` at the benchmark's noise it catches 16-26% of the misorders in the copied data,
 with 9-12% false alarms per check. Dropping what it flags doesn't beat giving the harness those eval runs as trials
-at the real run's budget. Without drift the re-measurements cost 15-17% more eval runs and lower no regret. Nothing
-changes in the harness; it keeps the incumbent's drift flag.
+at the real run's budget. Without drift the re-measurements cost 15-17% more eval runs and lower no regret. The
+harness gets no check; it keeps the incumbent's drift flag.
 
 **Ageing old rounds out: yes by the rule, but not as a drift fix.** It lowers regret with no drift at all too (`steady`,
 `unchanged`): copied trials from before a lever existed hold TPE at that lever's default. The gain comes from the trials

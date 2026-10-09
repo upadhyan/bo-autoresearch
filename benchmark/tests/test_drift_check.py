@@ -150,6 +150,8 @@ def test_the_command_line_measures_detection_over_noise_levels_and_configs_re_me
     out = capsys.readouterr().out
     rows = table_rows(out, "drift: 1 seeds, 2 trials per round, 2 repeats; each check, over seeds")
     assert [row[:2] for row in rows] == [[str(noise), str(n)] for noise in drift_check.NOISES for n in (2, 3, 4)]
+    by_round = table_rows(out, "By round, at noise 0.02 with 3 configs re-measured:")
+    assert by_round and {row[0] for row in by_round} <= {str(r) for r in range(2, 9)}
     assert bench.NOISE == 0.02
 
 
