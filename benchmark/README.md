@@ -65,3 +65,15 @@ VARIANTS = {"harness": Harness(), "cold": Cold()}
 ```sh
 uv run --frozen --project plugin/harness python benchmark/bench.py --variant harness --variant cold
 ```
+
+## Ax (#47)
+
+`ax_gp.py` runs the harness on Ax's GP in place of TPE. It needs Ax and CPU-only torch from this directory's own uv
+project (`pyproject.toml`, `uv.lock`), which keeps them out of the plugin; without them its tests skip.
+
+```sh
+uv run --frozen --project benchmark python benchmark/ax_gp.py --seeds 30 --trials 12 --repeats 2
+uv run --frozen --project benchmark pytest benchmark/tests -q
+```
+
+The experiment and its results are in [docs/experiments/47-ax-gp.md](../docs/experiments/47-ax-gp.md).
