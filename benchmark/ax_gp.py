@@ -29,8 +29,10 @@ for _name in ("ax", "botorch"):
         _handler.setLevel(logging.WARNING)
 logging.getLogger("botorch").setLevel(logging.DEBUG)
 
-# How a GP suggestion fell back: BoTorch refit from resampled hyperparameters, or Ax drew it from Sobol instead.
-FALLBACK = re.compile(r"Fit attempt #\d+ of \d+ (triggered retry|failed)|switching to fallback model")
+# A GP fit failed: BoTorch logs a failed attempt, then refits from resampled hyperparameters. A fit that raises stops
+# the run: Ax 1.3.1 falls back (to a Sobol draw) only when the GP's candidates keep repeating trials it has (REPEATED).
+FIT_FAILED = re.compile(r"Fit attempt #\d+ of \d+ (triggered retry|failed)")
+REPEATED = re.compile(r"MAX_GEN_ATTEMPTS.*switching to fallback model")
 
 
 def _parameter(name: str, lever: dict) -> RangeParameterConfig | ChoiceParameterConfig:
@@ -67,8 +69,8 @@ class _Log(logging.Handler):
 class AxBackend:
     """A round's optimizer with OptunaBackend's methods, on an Ax Client with its default GP.
 
-    `fit` says how the last suggestion went: None if Ax didn't fit a GP for it (its startup draws), "fallback" if
-    BoTorch or Ax had to fall back (`FALLBACK`), else "ok". A fit that raises stops the run.
+    `fit` says how the last suggestion went: None if Ax didn't fit a GP for it (its startup draws), "failed" if a fit
+    attempt failed (`FIT_FAILED`), "repeated" if Ax drew it from Sobol instead (`REPEATED`), else "ok".
     """
 
     def __init__(self, space: dict, seed: int, n_startup: int) -> None:
@@ -104,8 +106,10 @@ class AxBackend:
             ((self._trial, params),) = self._client.get_next_trials(max_trials=1).items()
         if not re.search(r"using GenerationNode MBM\.", log.text):
             self.fit = None
+        elif FIT_FAILED.search(log.text):
+            self.fit = "failed"
         else:
-            self.fit = "fallback" if FALLBACK.search(log.text) else "ok"
+            self.fit = "repeated" if REPEATED.search(log.text) else "ok"
         return params, None
 
     def tell(self, state: str, metric: float | None) -> None:
@@ -127,10 +131,12 @@ class CrashAsGuard(AxBackend):
 
 
 class _Recorded:
-    """`backend`'s methods, recording each ask the queue didn't answer: its seconds, and `backend.fit` if any."""
+    """`backend`'s methods, recording each ask the queue didn't answer: its seconds, `backend.fit` if any, and the
+    state its trial ended in."""
 
     def __init__(self, backend, records: list[dict]) -> None:
         self._backend, self._records = backend, records
+        self._suggested = False
 
     def __getattr__(self, name: str):
         return getattr(self._backend, name)
@@ -138,9 +144,15 @@ class _Recorded:
     def ask(self, boar_trial: int) -> tuple[dict, str | None]:
         start = time.perf_counter()
         params, label = self._backend.ask(boar_trial)
-        if label is None:
+        self._suggested = label is None
+        if self._suggested:
             self._records.append({"seconds": time.perf_counter() - start, "fit": getattr(self._backend, "fit", None)})
         return params, label
+
+    def tell(self, state: str, metric: float | None) -> None:
+        if self._suggested:
+            self._records[-1]["state"] = state
+        self._backend.tell(state, metric)
 
 
 class Recorded(bench.Harness):
@@ -156,14 +168,16 @@ class Recorded(bench.Harness):
 
 
 def suggestions(records: dict[str, list[dict]]) -> str:
-    """A table of each variant's suggestions: how many, their seconds (median [IQR]), and its GP fits and fallbacks."""
+    """A table of each variant's suggestions: how many, their seconds (median [IQR]), how many broke the guard or
+    crashed, and how many Ax made with a GP, with a failed fit, or from Sobol because the GP's repeated (`fit`)."""
     rows = []
     for name, recs in records.items():
-        fits = [r["fit"] for r in recs if r["fit"]]
-        fell_back = fits.count("fallback")
-        rows.append([name, len(recs), bench._spread([r["seconds"] for r in recs]), len(fits),
-                     f"{fell_back} ({fell_back / len(fits):.0%})" if fits else "0"])
-    return rounds.md_table(["variant", "suggestions", "seconds each", "GP fits", "fell back"], rows)
+        states, fits = [r["state"] for r in recs], [r["fit"] for r in recs]
+        rows.append([name, len(recs), bench._spread([r["seconds"] for r in recs]), states.count("infeasible"),
+                     states.count("failed"), len(fits) - fits.count(None), fits.count("failed"),
+                     fits.count("repeated")])
+    return rounds.md_table(["variant", "suggestions", "seconds each", "broke guard", "crashed", "GP fits", "fit failed",
+                            "Sobol instead"], rows)
 
 
 VARIANTS = {"harness": None, "ax": AxBackend, "ax-crash": CrashAsGuard}  # the harness on TPE or on Ax

@@ -70,14 +70,24 @@ def test_the_gp_takes_over_once_trials_cover_the_startup_budget_and_a_seed_repro
     assert bench.simulate(ax_gp.Recorded(ax_gp.AxBackend), 0, TINY) == run
 
 
+def test_each_suggestion_records_how_its_trial_ended():
+    variant = ax_gp.Recorded()
+    run = bench.simulate(variant, 1, {"rounds": 4, "trials_per_round": 6, "repeats": 1})
+    sampled = [t["state"] for r in run for t in r["trials"] if t["queued"] is None]
+    assert [r["state"] for r in variant.records] == sampled
+    assert {"complete", "infeasible", "failed"} <= set(sampled)
 
-@pytest.mark.parametrize("logger, level, message", [
-    ("botorch", logging.DEBUG, "Fit attempt #1 of 5 triggered retry policy; retrying..."),  # BoTorch refits
-    ("botorch", logging.DEBUG, "Fit attempt #1 of 5 failed with exception:\nNotPSDError"),
-    ("ax.generation_strategy.generation_node", logging.WARNING,  # Ax gives up on the GP for this suggestion
-     "gen failed with error GenerationStrategyRepeatedPoints, switching to fallback model with generator_enum Sobol"),
+
+@pytest.mark.parametrize("logger, level, message, fit", [
+    ("botorch", logging.DEBUG, "Fit attempt #1 of 5 triggered retry policy; retrying...", "failed"),  # BoTorch refits
+    ("botorch", logging.DEBUG, "Fit attempt #1 of 5 failed with exception:\nNotPSDError", "failed"),
+    ("ax.generation_strategy.generation_node", logging.WARNING,  # the GP fitted, but its candidates were all measured
+     "gen failed with error GenerationStrategy exceeded `MAX_GEN_ATTEMPTS` of 5 while trying to generate a unique "
+     "parameterization. This indicates that the search space has likely been fully explored, or that the sweep has "
+     "converged., switching to fallback model with generator_enum Generators.SOBOL", "repeated"),
 ])
-def test_a_gp_suggestion_ax_or_botorch_had_to_fall_back_for_counts_as_a_fallback(monkeypatch, logger, level, message):
+def test_a_failed_gp_fit_is_told_apart_from_a_sobol_draw_after_repeated_candidates(monkeypatch, logger, level, message,
+                                                                                    fit):
     backend = ax_gp.AxBackend({"batch": SPACE["batch"]}, 0, 2)
     backend.add_warm([{"trial": n, "config": {"batch": n}, "state": "complete", "metric": float(n)} for n in (1, 2)],
                      bench.DEFAULTS)
@@ -89,18 +99,21 @@ def test_a_gp_suggestion_ax_or_botorch_had_to_fall_back_for_counts_as_a_fallback
 
     monkeypatch.setattr(backend._client, "get_next_trials", falling_back)
     backend.ask(3)
-    assert backend.fit == "fallback"
+    assert backend.fit == fit
 
 
-def test_the_suggestion_table_gives_the_time_per_suggestion_and_how_many_gp_fits_fell_back():
+def test_the_suggestion_table_gives_the_time_per_suggestion_how_its_trials_ended_and_how_its_gp_fits_went():
     table = ax_gp.suggestions({
-        "harness": [{"seconds": s, "fit": None} for s in (0.01, 0.02, 0.03)],
-        "ax": [{"seconds": 1, "fit": None}, {"seconds": 2, "fit": "ok"}, {"seconds": 3, "fit": "ok"},
-               {"seconds": 4, "fit": "fallback"}],
+        "harness": [{"seconds": s, "fit": None, "state": state}
+                    for s, state in ((0.01, "complete"), (0.02, "infeasible"), (0.03, "failed"))],
+        "ax": [{"seconds": 1, "fit": None, "state": "complete"}, {"seconds": 2, "fit": "ok", "state": "infeasible"},
+               {"seconds": 3, "fit": "repeated", "state": "infeasible"},
+               {"seconds": 4, "fit": "failed", "state": "failed"}],
     })
     rows = [line.strip("| ").split(" | ") for line in table.splitlines()[2:]]
-    assert rows == [["harness", "3", "0.02 [0.015, 0.025]", "0", "0"],  # median [IQR] seconds
-                    ["ax", "4", "2.5 [1.75, 3.25]", "3", "1 (33%)"]]
+    # median [IQR] seconds, broke guard, crashed, GP fits, fit failed, Sobol instead
+    assert rows == [["harness", "3", "0.02 [0.015, 0.025]", "1", "1", "0", "0", "0"],
+                    ["ax", "4", "2.5 [1.75, 3.25]", "2", "1", "3", "1", "1"]]
 
 
 def _crash_then_ask(backend_class) -> tuple[dict, dict]:
