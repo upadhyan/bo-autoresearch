@@ -149,6 +149,13 @@ def test_the_steady_scenario_never_shifts_the_metric_and_commits_in_12_of_30_rou
     assert [h for step in drift_check.STEADY for h in step.get("add", [])] == list(bench.PROPOSALS)
 
 
+def test_the_unchanged_scenario_commits_nothing_after_round_4(monkeypatch):
+    monkeypatch.setattr(bench, "SCENARIO", drift_check.UNCHANGED)
+    run = bench.simulate(bench.Harness(), 0, {"rounds": 30, "trials_per_round": 1, "repeats": 1})
+    assert [rec["commit"] for rec in run] == ["c1", "c2", "c3", *["c4"] * 27]
+    assert drift_check.worlds(drift_check.UNCHANGED) == [bench.WORLD] * 30
+
+
 def test_the_lever_count_takes_the_sampled_trials_from_the_round_that_adds_the_lever(monkeypatch):
     monkeypatch.setattr(bench, "SCENARIO", drift_check.STEADY)  # H6 in round 4
     on = {"prefetch_async": True}
