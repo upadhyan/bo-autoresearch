@@ -12,6 +12,7 @@ pytest.importorskip("ax")
 import ax_gp
 import bench
 import boar
+import training
 from boar import schema, warmstart
 
 SPACE = {lever["name"]: schema.normalize_lever(lever) for p in bench.PROPOSALS.values() for lever in p["levers"]}
@@ -141,3 +142,12 @@ def test_the_command_runs_each_variant_on_the_same_seeds_and_compares_it_with_th
     # Each seed: the baseline, then two startup draws; the incumbent, then two suggestions.
     assert [line.split(" | ")[:2] for line in out.splitlines() if line.startswith(("| harness", "| ax"))] == [
         ["| harness", "8"], ["| ax-crash", "8"]]
+
+
+def test_the_command_runs_the_target_it_names_in_its_worker_processes(capsys):
+    ax_gp.main(["--target", "training-additive", "--first-seed", "7", "--seeds", "2", "--rounds", "2", "--trials", "3",
+                "--repeats", "1", "--jobs", "2", "--variant", "harness", "--variant", "harness", "--window", "2-2"])
+    out = capsys.readouterr().out
+    target = training.TARGETS["training-additive"]
+    assert bench.report([bench.simulate(bench.Harness(), seed, TINY, target) for seed in (7, 8)]) in out
+    assert "harness − harness, per seed, rounds 2-2:" in out

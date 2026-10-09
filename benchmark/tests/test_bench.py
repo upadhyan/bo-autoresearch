@@ -233,6 +233,21 @@ def test_a_comparison_gives_each_seeds_difference_from_the_first_variant():
     ]
 
 
+def test_a_comparison_can_cover_a_window_of_rounds_at_another_ci_level():
+    def seeds(regrets: list[tuple[float, float]]) -> list[list[dict]]:
+        return [[{"round": r, "regret": x, "runs": 4 * r, "remeasured": 0} for r, x in enumerate(pair, 1)]
+                for pair in regrets]
+
+    base, runs = seeds([(1, 1), (1, 2), (1, 3), (1, 4)]), seeds([(9, 2), (9, 2), (9, 4), (9, 5)])
+    table = bench.compare(base, runs, window={2}, level=0.5)
+    rows = [line.strip("| ").split(" | ") for line in table.splitlines()[2:]]
+    # Round 2 only: differences 1, 0, 1, 1, so the mean is 0.75; round 1's 8s don't count.
+    assert rows[0][:2] == ["regret (s)", "0.75"] and rows[0][3] == "0 / 1 / 3" and rows[1][1] == "0.0"
+    lo, hi = (float(x) for x in rows[0][2].strip("[]").split(", "))
+    assert 0.5 <= lo <= 0.75 <= hi <= 1  # the middle half of the bootstrap means
+    assert bench.compare(base, runs) != table
+
+
 def test_a_second_variant_is_compared_with_the_first_on_the_same_seeds(capsys):
     bench.main(["--seeds", "2", "--rounds", "1", "--trials", "2", "--repeats", "1", "--variant", "harness",
                 "--variant", "harness"])

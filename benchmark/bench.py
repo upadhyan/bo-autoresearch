@@ -11,6 +11,7 @@ import argparse
 import json
 import math
 import random
+import sys
 import time
 
 import numpy as np
@@ -77,10 +78,12 @@ def true_metric(config: dict, world: dict) -> tuple[float, bool]:
     return world["scale"] * seconds, c["prefetch"] <= 0.8  # prefetching further reorders the output
 
 
-def best_config(world: dict) -> dict:
-    """The feasible config with the lowest true metric at `world`. Each lever acts alone, so each has a best value."""
-    return {"dedup_set": True, "route_table": min(world["route"], key=world["route"].get), "buffer_kb": 8,
+def best_config(world: dict, space=None) -> dict:
+    """The feasible config with the lowest true metric at `world` over the levers in `space` (all if None), the others
+    at default. Each lever acts alone, so each has a best value."""
+    best = {"dedup_set": True, "route_table": min(world["route"], key=world["route"].get), "buffer_kb": 8,
             "batch": world["batch_opt"], "gc_scale": world["gc_opt"], "prefetch": 0.8, "prefetch_async": True}
+    return {name: value for name, value in best.items() if space is None or name in space}
 
 
 def _normal(*key) -> float:
@@ -133,28 +136,34 @@ VARIANTS = {"harness": Harness()}
 # --- a simulated run -------------------------------------------------------------------------------------------
 
 
-def _change(hyps: list[dict], step: dict, r: int) -> None:
-    """Round r's hypothesis changes, as round r-1's close left them."""
+def _change(hyps: list[dict], step: dict, r: int, proposals: dict | None = None) -> None:
+    """Round r's hypothesis changes, as round r-1's close left them. `proposals` defaults to PROPOSALS."""
+    proposals = proposals or PROPOSALS
     for hid in step.get("add", []):
-        levers = [schema.normalize_lever(lever) for lever in PROPOSALS[hid]["levers"]]
-        hyps.append({**PROPOSALS[hid], "id": hid, "levers": levers, "status": store.ACTIVE, "activated_round": r,
+        levers = [schema.normalize_lever(lever) for lever in proposals[hid]["levers"]]
+        hyps.append({**proposals[hid], "id": hid, "levers": levers, "status": store.ACTIVE, "activated_round": r,
                      "decisions": {}})
     for hid in step.get("remove", []):
         store.hypothesis(hyps, hid).update(status=store.REMOVED, removed_round=r - 1)
         store.hypothesis(hyps, hid)["decisions"][str(r - 1)] = {"decision": "remove"}
     for hid in step.get("fix", []):
         store.hypothesis(hyps, hid)["decisions"][str(r - 1)] = {"decision": "fix"}
+    for hid, queue in step.get("investigate", {}).items():  # round r runs its off-state, then `queue`
+        store.hypothesis(hyps, hid)["decisions"][str(r - 1)] = {"decision": "investigate", "queue": queue}
 
 
-def simulate(variant: Harness, seed: int, cfg: dict) -> list[dict]:
+def simulate(variant: Harness, seed: int, cfg: dict, target=None) -> list[dict]:
     """One run through `variant`, the same for the same seed: a record per round. `cfg` has the harness config's
-    rounds, trials_per_round and repeats."""
+    rounds, trials_per_round and repeats. `target` is what is tuned: an object with this module's PROPOSALS,
+    DEFAULTS, WORLD, SCENARIO, measure, true_metric and best_config (training.TARGETS has some); None is this
+    module, read when the run starts."""
+    target = target or sys.modules[__name__]
     hyps: list[dict] = []
     trials: list[dict] = []
-    world, commit, out, seen = dict(WORLD), "", [], set()
+    world, commit, out, seen = dict(target.WORLD), "", [], set()
     for r in range(1, cfg["rounds"] + 1):
-        step = SCENARIO[r - 1] if r <= len(SCENARIO) else {}
-        _change(hyps, step, r)
+        step = target.SCENARIO[r - 1] if r <= len(target.SCENARIO) else {}
+        _change(hyps, step, r, target.PROPOSALS)
         world.update(step.get("world", {}))
         if not commit or step:
             commit = f"c{r}"
@@ -171,20 +180,22 @@ def simulate(variant: Harness, seed: int, cfg: dict) -> list[dict]:
             n = len(trials) + 1
             params, queued = backend.ask(n)
             config = store.full_config(hyps, params)
-            key = store.config_key(config, DEFAULTS)
+            key = store.config_key(config, target.DEFAULTS)
             remeasured += key in seen
             seen.add(key)
-            result = measure(config, world, commit, seed, cfg["repeats"])
+            result = target.measure(config, world, commit, seed, cfg["repeats"])
             new.append({"trial": n, "round": r, "commit": commit, "config": config, **result, "queued": queued})
             trials.append(new[-1])
             backend.tell(result["state"], result["metric"])
         # Regret: the true metric at the round's commit of the incumbent after the round (the baseline if there is
-        # none, as at finalize) minus that of the best config in the round's search space.
+        # none, as at finalize) minus that of the best config in the round's search space. `feasible`: whether the
+        # incumbent's true guard holds (a noisy guard can pass a config that breaks it).
         _, _, after = variant.warm(trials, hyps, r + 1)
-        best = {name: value for name, value in best_config(world).items() if name in space}
-        regret = true_metric(after["config"] if after else {}, world)[0] - true_metric(best, world)[0]
-        out.append({"round": r, "commit": commit, "regret": regret, "runs": sum(t["runs"] for t in new),
-                    "remeasured": remeasured, "excluded": excluded, "same_as": warm["same_as"], "trials": new})
+        metric, feasible = target.true_metric(after["config"] if after else {}, world)
+        regret = metric - target.true_metric(target.best_config(world, space), world)[0]
+        out.append({"round": r, "commit": commit, "regret": regret, "feasible": feasible,
+                    "runs": sum(t["runs"] for t in new), "remeasured": remeasured, "excluded": excluded,
+                    "same_as": warm["same_as"], "trials": new})
     return out
 
 
@@ -207,22 +218,26 @@ def report(runs: list[list[dict]]) -> str:
     return rounds.md_table(["round", "regret (s)", "eval runs", "re-measured"], rows)
 
 
-def _per_run(run: list[dict]) -> dict:
-    """A run's `all` row: its mean regret over rounds and its total eval runs."""
-    return {"regret (s)": np.mean([rec["regret"] for rec in run]), "eval runs": sum(rec["runs"] for rec in run)}
+def _per_run(run: list[dict], window: set[int] | None = None) -> dict:
+    """A run's `all` row over the rounds in `window` (every round if None): its mean regret and its total eval runs."""
+    recs = [rec for rec in run if window is None or rec["round"] in window]
+    return {"regret (s)": np.mean([rec["regret"] for rec in recs]), "eval runs": sum(rec["runs"] for rec in recs)}
 
 
-def compare(base: list[list[dict]], runs: list[list[dict]]) -> str:
+def compare(
+    base: list[list[dict]], runs: list[list[dict]], window: set[int] | None = None, level: float = 0.95
+) -> str:
     """A table of each seed's difference from the base variant's run on the same seed (runs minus base) in mean regret
-    and in eval runs: the mean, its 95% bootstrap CI, and how many seeds came out lower, tied and higher."""
+    and in eval runs over the rounds in `window` (every round if None): the mean, its bootstrap CI at `level`, and how
+    many seeds came out lower, tied and higher."""
     rng = np.random.default_rng(0)
     rows = []
     for k, fmt in (("regret (s)", ".3g"), ("eval runs", ".1f")):
-        d = np.array([_per_run(run)[k] - _per_run(b)[k] for b, run in zip(base, runs)])
-        lo, hi = np.percentile(rng.choice(d, (2000, len(d))).mean(axis=1), [2.5, 97.5])
+        d = np.array([_per_run(run, window)[k] - _per_run(b, window)[k] for b, run in zip(base, runs)])
+        lo, hi = np.percentile(rng.choice(d, (2000, len(d))).mean(axis=1), [50 * (1 - level), 50 * (1 + level)])
         rows.append([k, f"{d.mean():{fmt}}", f"[{lo:{fmt}}, {hi:{fmt}}]",
                      " / ".join(str(int(n)) for n in ((d < 0).sum(), (d == 0).sum(), (d > 0).sum()))])
-    return rounds.md_table(["", "mean", "95% CI", "seeds lower / tied / higher"], rows)
+    return rounds.md_table(["", "mean", f"{100 * level:g}% CI", "seeds lower / tied / higher"], rows)
 
 
 def main(argv: list[str] | None = None) -> None:

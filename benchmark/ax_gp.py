@@ -2,8 +2,8 @@
 
 Needs Ax, so it runs in benchmark/'s own environment (docs/experiments/47-ax-gp.md):
 
-    uv run --frozen --project benchmark python benchmark/ax_gp.py [--seeds 30] [--trials 12] [--repeats 2] \
-        [--variant harness --variant ax …]
+    uv run --frozen --project benchmark python benchmark/ax_gp.py [--target training] [--seeds 30] [--trials 12] \
+        [--repeats 2] [--variant harness --variant ax …]
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from ax.api.client import Client
 from ax.api.configs import ChoiceParameterConfig, RangeParameterConfig
 
 import bench
+import training
 from boar import rounds
 
 # Ax logs each trial at INFO and BoTorch a failed GP fit attempt at DEBUG: `_LOG` keeps both, the console neither.
@@ -157,41 +158,49 @@ def suggestions(runs: dict[str, list[list[dict]]], records: dict[str, list[dict]
 
 
 VARIANTS = {"harness": None, "ax": AxBackend, "ax-crash": CrashAsGuard}  # the harness on TPE or on Ax
+TARGETS = {"default": bench, **training.TARGETS}  # bench's own scenario, or the shared hard one
 
 
-def _run(name: str, seed: int, cfg: dict) -> tuple[list[dict], list[dict]]:
-    """One seed's run through a variant, and the suggestions it made."""
+def _run(name: str, target: str, seed: int, cfg: dict) -> tuple[list[dict], list[dict]]:
+    """One seed's run through a variant on a target, and the suggestions it made."""
     warnings.simplefilter("ignore")  # Ax warns about its own deprecations and every constant guard column
     variant = Recorded(VARIANTS[name])
-    return bench.simulate(variant, seed, cfg), variant.records
+    return bench.simulate(variant, seed, cfg, TARGETS[target]), variant.records
 
 
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description="#47: the harness on Ax's GP against TPE, on the same seeds.")
+    ap.add_argument("--target", choices=list(TARGETS), default="default", help="what is tuned (default bench's)")
     ap.add_argument("--seeds", type=int, default=30, help="runs per variant (default 30)")
     ap.add_argument("--first-seed", type=int, default=0, help="seed of the first run, then 1 more each (default 0)")
-    ap.add_argument("--rounds", type=int, default=len(bench.SCENARIO), help=f"default {len(bench.SCENARIO)}")
+    ap.add_argument("--rounds", type=int, help="default the target's")
     ap.add_argument("--trials", type=int, default=12, help="trials per round (default 12)")
     ap.add_argument("--repeats", type=int, default=2, help="eval runs per trial (default 2)")
     ap.add_argument("--jobs", type=int, default=8, help="processes, one thread each (default 8)")
     ap.add_argument("--variant", action="append", choices=list(VARIANTS),
                     help="repeat to compare with the first (default harness, ax)")
+    ap.add_argument("--window", help="compare over rounds A-B only (default every round)")
+    ap.add_argument("--level", type=float, default=0.95, help="the comparison's CI level (default 0.95)")
     args = ap.parse_args(argv)
     names = args.variant or ["harness", "ax"]
-    cfg = {"rounds": args.rounds, "trials_per_round": args.trials, "repeats": args.repeats}
+    cfg = {"rounds": args.rounds or len(TARGETS[args.target].SCENARIO), "trials_per_round": args.trials,
+           "repeats": args.repeats}
     os.environ.update(OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1")  # read by torch and numpy in each process
     runs, records = {}, {}
     with ProcessPoolExecutor(args.jobs, mp_context=multiprocessing.get_context("spawn")) as pool:
         for name in names:
             start = time.monotonic()
             seeds = range(args.first_seed, args.first_seed + args.seeds)
-            out = list(pool.map(_run, [name] * args.seeds, seeds, [cfg] * args.seeds))
+            out = list(pool.map(_run, [name] * args.seeds, [args.target] * args.seeds, seeds, [cfg] * args.seeds))
             runs[name], records[name] = [run for run, _ in out], [rec for _, recs in out for rec in recs]
             print(f"{name}: {args.seeds} seeds in {time.monotonic() - start:.0f} s on {args.jobs} processes; "
                   "median [IQR] over seeds\n")
             print(bench.report(runs[name]) + "\n")
+    first, last = (int(r) for r in args.window.split("-")) if args.window else (None, None)
+    window = set(range(first, last + 1)) if args.window else None
     for name in names[1:]:
-        print(f"{name} − {names[0]}, per seed:\n\n{bench.compare(runs[names[0]], runs[name])}\n")
+        print(f"{name} − {names[0]}, per seed{f', rounds {args.window}' if window else ''}:\n\n"
+              f"{bench.compare(runs[names[0]], runs[name], window, args.level)}\n")
     print(f"Suggestions (asks the queue didn't answer), over all seeds:\n\n{suggestions(runs, records)}")
 
 

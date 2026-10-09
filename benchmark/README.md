@@ -74,3 +74,15 @@ uv run --frozen --project benchmark pytest benchmark/tests -q
 ```
 
 The experiment and its results are in [docs/experiments/47-ax-gp.md](../docs/experiments/47-ax-gp.md).
+
+## The `training` targets (#47-#49)
+
+`training.py` is a second, harder thing to tune: a model trained for a fixed time, scored on dev error, with 20
+levers, interactions, a memory limit that crashes, a noisy two-lever guard and a removal. Its three versions
+(`training.TARGETS`) differ in whether the removed lever interacts with the others and whether a commit moves the
+guard; 47-ax-gp.md's re-validation section describes them. `bench.simulate` takes one as its `target`, and `ax_gp.py`
+as `--target`; `--window 5-7` compares over those rounds only and `--level` sets the CI level:
+
+```sh
+uv run --frozen --project benchmark python benchmark/ax_gp.py --target training --seeds 4 --trials 6 --variant harness --variant ax-crash --window 5-7
+```
