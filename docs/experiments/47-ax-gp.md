@@ -90,6 +90,9 @@ uv run --frozen --project benchmark python benchmark/ax_gp.py --first-seed 100 -
 
 ## Results
 
+These numbers were measured before #46's warm-start rule 4, which changed `harness` and, through `Harness.warm`, both
+Ax variants (copying only the last 3 rounds into each round's study). They reproduce at commit `0da9252`.
+
 Every number but the seconds comes exactly from the commands above, which also print each variant's medians by
 round and for the whole run (`bench.report`). At 6 trials, `ax − harness` on seeds 0-29 had the CI [−0.725, 0.0607],
 within a tenth of its width of zero, so 6 trials ran again on seeds 0-59 (the same command with `--seeds 60`).

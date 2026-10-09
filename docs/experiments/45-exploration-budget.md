@@ -53,6 +53,9 @@ Regret is each run's mean over its 6 rounds; differences are paired per seed (`b
 
 ## Results
 
+These numbers were measured before #46's warm-start rule 4, which changed `harness` and every variant built on
+`bench.Harness` (copying only the last 3 rounds into each round's study). They reproduce at commit `0da9252`.
+
 Each run's mean regret over its rounds, in seconds. The `harness` and `seed-mixed` rows are median [IQR] over the 500
 seeds; the others are paired differences, mean [95% CI], where negative means the exploring variant does better.
 
