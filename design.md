@@ -19,7 +19,7 @@ Each term has exactly this meaning everywhere in this document.
 | **Dev / holdout** | Two separate sets of workloads, both drawn from the spec's target population. BO only ever sees dev. Holdout is used once, at finalize. |
 | **Trial** | One lever config, evaluated `repeats` times on dev. Its metric is the median of those runs. |
 | **Round** | Implement the levers, run N trials, decide on each hypothesis, propose new ones, review, close the round. |
-| **Warm-start set** | The earlier trials that are still valid in the current search space (rules under [BO and warm start](#bo-and-warm-start)). Each round's optimization starts from it. |
+| **Warm-start set** | The earlier trials that are still valid in the current search space (rules under [BO and warm start](#bo-and-warm-start)). Each round's study starts from its last 3 rounds. |
 | **Baseline** | The config with every lever at its default. |
 | **Incumbent** | The best feasible config in the warm-start set. Trials that share a config have their repeats pooled before ranking. |
 | **Noise floor** | How much the baseline trial's repeats spread. Any effect smaller than this counts as no effect. |
@@ -106,7 +106,7 @@ Done when: the user approves the spec. This is the only point where a human has 
 
 1. Refuses to run if the eval's hash has changed or any verdicts are still pending.
 2. Commits the working tree to `boar/<run-id>` and records the commit.
-3. Builds the round's study over the current search space and copies the warm-start set into it.
+3. Builds the round's study over the current search space and copies the warm-start set's last 3 rounds into it.
 4. Queues the incumbent as the round's first trial, so it is measured again on the current commit. In round 1, or when the warm-start set has no feasible trial, the baseline takes its place. After it come the configs that last round's investigations queued and the joint trial of each newly active enabler ([Diagnosis](#diagnosis)).
 5. Runs trials until N new ones have finished, plus one for each extra queued config.
 6. Writes `rounds/<r>/summary.md`, which contains:
@@ -239,6 +239,8 @@ The harness is a Python CLI called `boar`, and it depends on `optuna`. It doesn'
   3. None of the levers it set away from default belongs to a hypothesis marked `fix` after the trial ran.
 
   Levers that are new in round r get filled in at their default. That is exact: their code didn't exist when the trial ran, which is the same as default behaviour.
+
+  Of the set, the study copies in only the trials from the last 3 rounds (rule 4, counted with the others). A trial from before a lever existed sits at its default, and copying every round's trials held TPE there ([#46](docs/experiments/46-drift-check.md)). The incumbent, the lever effects and the drift flag use the whole set.
 - `add_trials` doesn't call `constraints_func`. Store each copied trial's constraint values on the trial where the sampler reads them; Optuna keeps them in `system_attrs`.
 - Pinned levers are never suggested. The config passed to the eval always lists every lever ever defined, with pinned levers at their default.
 - A crash, a non-zero exit, a hang or output that can't be parsed makes the trial `failed`. A guard failure makes it `infeasible`. Neither kind of trial can become the incumbent, and failed trials never join a warm-start set.
@@ -364,7 +366,7 @@ Build a toy target: a Python script with two real slow paths that can be fixed. 
 - the summaries for rounds 2 and 3 show earlier trials copied into the warm-start set;
 - trying to stop mid-run, or running `boar round run` before R5 is complete, is refused.
 
-In addition, a harness test covers each of the three warm-start rules.
+In addition, a harness test covers each of the four warm-start rules.
 
 ## Out of scope (v1)
 

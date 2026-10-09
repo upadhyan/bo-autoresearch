@@ -174,7 +174,8 @@ def test_round_1_runs_baseline_first_and_records_everything(run):
     assert "target.py" in git(run.root, "show", "--name-only", "--format=", "HEAD")
     assert git(run.root, "branch", "--show-current") == f"boar/{RUN_ID}"
     assert rec["run_status"] == "done" and rec["new_trials"] == [1, 2, 3, 4]
-    assert rec["warm"] == {"copied": 0, "excluded": {"rule1_state": 0, "rule2_outside_space": 0, "rule3_fixed": 0},
+    assert rec["warm"] == {"copied": 0, "excluded": {"rule1_state": 0, "rule2_outside_space": 0, "rule3_fixed": 0,
+                                                     "rule4_old": 0},
                            "incumbent_config": None, "queue": [], "same_as": {}}
     defaults = store.lever_defaults(run.hypotheses())
     best = stats.incumbent(trials, defaults, "min")
@@ -247,8 +248,8 @@ def test_round_2_warm_starts_from_round_1_and_requeues_the_incumbent(run):
     rounds.start_round(run, foreground=True)
     rec = run.state()["rounds"]["2"]
     inc = stats.incumbent(valid, defaults, "min")
-    assert rec["warm"] == {"copied": len(valid), "excluded": counts, "incumbent_config": inc["config"], "queue": [],
-                           "same_as": {}}
+    assert rec["warm"] == {"copied": len(valid), "excluded": {**counts, "rule4_old": 0},
+                           "incumbent_config": inc["config"], "queue": [], "same_as": {}}
     round2 = [t for t in run.trials() if t["round"] == 2]
     assert len(round2) == 4 and [t["trial"] for t in round2] == [5, 6, 7, 8]
     assert round2[0]["queued"] == "incumbent"
@@ -752,6 +753,19 @@ def test_drift_is_judged_against_the_floor_from_earlier_rounds(run):
     facts = rounds._facts(run, 2)
     assert facts["drift"]["flag"] == "yes", facts["drift"]
     assert facts["noise_floor"] == pytest.approx(0.2)
+
+
+def test_the_study_copies_the_last_3_rounds_and_the_incumbent_comes_from_every_round(run):
+    for t in (_hand_trial(1, 1, {}, [100.0, 100.2], "baseline"), _hand_trial(2, 1, {"fast_a": True}, [60.0, 60.0]),
+              _hand_trial(3, 2, {"fast_b": 2}, [97.0, 97.0]), _hand_trial(4, 4, {"fast_b": 3}, [94.0, 94.0])):
+        run.append_trial(t)
+    run.update_state(lambda s: s["rounds"].update({"5": {**fresh_round(), "commit": "c"}}))
+    rounds._open_study(run, 5, run.config(), run.hypotheses())
+    warm = run.state()["rounds"]["5"]["warm"]
+    assert warm["copied"] == 2 and warm["excluded"][warmstart.RULE4] == 2
+    assert warm["incumbent_config"] == {"fast_a": True}
+    assert sorted(t.user_attrs["boar_trial"] for t in load_study(run, 5).trials) == [3, 4]
+    assert "rule 4 (from more than 3 rounds before) 2." in rounds.write_summary(run, 5).read_text()
 
 
 def test_an_incumbent_that_breaks_a_guard_on_re_measurement_is_flagged_and_dethroned(run):

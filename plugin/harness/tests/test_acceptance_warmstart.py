@@ -1,8 +1,9 @@
-"""Acceptance: the three warm-start rules (design.md "BO and warm start"), on hand-built records.
+"""Acceptance: the four warm-start rules (design.md "BO and warm start"), on hand-built records.
 
 An earlier trial joins round r's warm-start set when (1) its state is complete or infeasible,
 (2) every lever outside round r's search space was at its default, and (3) none of the levers it
-set away from default belongs to a hypothesis marked `fix` after the trial ran.
+set away from default belongs to a hypothesis marked `fix` after the trial ran. The study copies
+in (4) the set's trials from the last 3 rounds.
 """
 
 from __future__ import annotations
@@ -150,6 +151,15 @@ def test_only_earlier_rounds_are_considered():
     valid, excluded = warmstart.select(trials, hyps, 2)
     assert ids(valid) == [1]
     assert excluded == NO_EXCLUSIONS
+
+
+def test_rule4_the_study_copies_the_warm_start_set_of_the_last_3_rounds():
+    hyps = [hyp("H1", "active", bool_lever("fast_a"))]
+    trials = [trial(n, n, {"fast_a": n % 2 == 0}) for n in range(1, 5)] + [trial(5, 1, {}, "failed", None)]
+    copied, excluded = warmstart.copied(trials, hyps, 5)
+    assert ids(copied) == [2, 3, 4]
+    assert excluded == {**NO_EXCLUSIONS, "rule1_state": 1, "rule4_old": 1}, "the failed trial counts under rule 1"
+    assert ids(warmstart.select(trials, hyps, 5)[0]) == [1, 2, 3, 4], "the warm-start set keeps every round"
 
 
 def _round3_hyps() -> list[dict]:
