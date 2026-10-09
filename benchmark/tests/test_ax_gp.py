@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import pytest
 
@@ -10,9 +11,15 @@ pytest.importorskip("ax")
 
 import ax_gp
 import bench
+import boar
 from boar import schema, warmstart
 
 SPACE = {lever["name"]: schema.normalize_lever(lever) for p in bench.PROPOSALS.values() for lever in p["levers"]}
+
+
+def test_the_harness_is_the_working_tree_not_a_copy_made_at_sync():
+    # uv rebuilds a non-editable path dependency only when its pyproject.toml changes, not its source.
+    assert Path(boar.__file__).resolve().is_relative_to(Path(__file__).resolve().parents[2] / "plugin/harness/src")
 
 
 def test_queued_configs_come_first_in_order_then_ax_samples_the_space():

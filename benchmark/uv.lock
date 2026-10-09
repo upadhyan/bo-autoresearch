@@ -100,7 +100,7 @@ wheels = [
 [[package]]
 name = "boar"
 version = "0.4.0"
-source = { directory = "../plugin/harness" }
+source = { editable = "../plugin/harness" }
 dependencies = [
     { name = "optuna" },
 ]
@@ -130,7 +130,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "ax-platform", specifier = ">=1.3,<1.4" },
-    { name = "boar", directory = "../plugin/harness" },
+    { name = "boar", editable = "../plugin/harness" },
     { name = "torch", index = "https://download.pytorch.org/whl/cpu" },
 ]
 
