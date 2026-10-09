@@ -316,3 +316,38 @@ def test_the_scenario_comes_from_the_command_line(capsys, monkeypatch):
     bench.main(["--seeds", "1", "--rounds", "2", "--trials", "1", "--repeats", "1", "--variant", "baseline",
                 "--scenario", "staggered"])
     assert "| 2 | 5.9 [5.9, 5.9] |" in capsys.readouterr().out  # 11.7 on the default scenario
+
+
+def test_exploring_samples_k_trials_of_every_round_at_random_after_the_queued_ones():
+    rounds = run(variant=bench.Explore(2))
+    assert [[t["queued"] for t in rec["trials"]] for rec in rounds] == [
+        ["baseline", "explore", "explore", None], *[["incumbent", "explore", "explore", None]] * 3,
+        ["explore", "explore", None, None], ["incumbent", "explore", "explore", None]]  # round 5: R1 changed nothing
+
+
+class ColdExplore(bench.Explore):
+    """Explore with no warm start."""
+
+    def warm(self, trials, hyps, r):
+        valid, excluded, incumbent = super().warm(trials, hyps, r)
+        return [], excluded, incumbent
+
+
+def test_explore_trials_are_random_draws_whatever_was_copied_in_and_k_0_leaves_tpe_none():
+    def configs(rounds: list[dict], label: str | None = "explore") -> list[list[dict]]:
+        return [[t["config"] for t in rec["trials"] if t["queued"] == label] for rec in rounds]
+
+    # Round 1 copies nothing, so the harness samples all 3 trials after the baseline at random.
+    harness = configs(run(), None)[0]
+    assert configs(run(variant=bench.Explore(3)))[0] == harness
+    assert configs(run(variant=bench.Explore(2)))[0] == harness[:2]
+    assert configs(run(variant=bench.Explore(0)), None)[0][0] != harness[0]  # TPE's, from the baseline alone
+    assert configs(run(variant=ColdExplore(2))) == configs(run(variant=bench.Explore(2)))
+
+
+def test_each_k_is_a_variant_with_and_without_the_mixed_seeds_which_are_queued_ahead_of_the_random_trials():
+    assert {f"{seeds}explore-{k}" for seeds in ("", "seed-mixed-") for k in (0, 2, 5)} <= set(bench.VARIANTS)
+    round4 = run(variant=bench.VARIANTS["seed-mixed-explore-2"])[3]["trials"]
+    assert [t["queued"] for t in round4] == ["incumbent", "seed H6", "explore", "explore", None]
+    # k above the trials a round samples: all of them random.
+    assert [t["queued"] for t in run(variant=bench.VARIANTS["explore-5"])[0]["trials"]] == ["baseline", *["explore"] * 3]
