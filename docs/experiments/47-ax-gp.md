@@ -230,3 +230,157 @@ For the roadmap:
 - #53 goes ahead: Ax and CPU-only torch as an opt-in install, as `benchmark/pyproject.toml` does here, and a fallback
   for a missing torch or a fit that raises (none did here).
 - #51 follows #48 as planned. Nothing in `plugin/` changes here.
+
+## Re-validation (pre-registered 2026-10-09, not yet run)
+
+The go above rests on `ax-crash`, chosen after seeing results, on the one scenario whose crash prompted it, and its
+numbers predate #46's warm-start rule 4. Before #50 builds on it, `ax-crash` runs again under rule 4 on fresh seeds
+(A) and on a second, harder scenario it wasn't fitted to (B). Everything in this section, the rule included, is
+fixed before either runs. Nothing has been run on the new scenario but the scenario's own checks (its tests and the
+properties below, from random configs).
+
+### The `training` target
+
+`benchmark/training.py`: a model trained for a fixed wall-clock time, tuned for dev error (%), shaped after the one
+real run (the NeuralSGT retro: 23 levers, most numeric defaults on a range bound, inert and conditional levers, a
+regression-guard floor, harmful hypotheses removed). `bench.simulate` runs it as a target; `ax_gp.py --target` picks
+it. Three versions differ only in two switches; #48 and #49 use the other two.
+
+| target | aux_weight changes how lr behaves | guard moves at round 7 | used by |
+|---|---|---|---|
+| `training` | yes | yes (+0.06 R²) | #47 B, #49 stage 2 |
+| `training-fixed-guard` | yes | no (round 7 is a commit that changes nothing) | #48, #49 |
+| `training-additive` | no (aux_weight only adds error) | no | #48 |
+
+**Levers.** 20 levers in 15 hypotheses: 4 bool, 2 categorical, 4 log int, 1 int, 2 log float, 7 float; 10 of the
+14 numeric defaults sit on a bound, so a sampled trial never has one exactly at default. Active: 10 in round 1, 13,
+15, 16, then 19 from round 5.
+
+| round | change (a non-empty step is a new commit) |
+|---|---|
+| 1 | lr_scale + warmup_frac, batch, pin_memory + num_workers, aug_strength, schedule + lr_floor, init_scale, weight_decay |
+| 2 | aux_weight (harmful), width, label_smoothing: the guard can now break |
+| 3 | checkpointing, precision: fp16 or checkpointing puts the memory limit past the best batch and width |
+| 4 | dropout; H4 investigated: its off-state (the incumbent with aux_weight 0) and aux_weight 0.1 are queued |
+| 5 | H4 removed (rule 2 drops every round 2-4 trial with aux_weight off 0); ema + ema_halflife, cudnn_benchmark + log_every |
+| 6 | same commit |
+| 7 | `training`: the guard loosens by 0.06; the others: a new commit that changes nothing |
+| 8, 9 | same commit |
+
+**Metric** (dev error; regret is in the same units, and the tables' "regret (s)" header is the toy target's):
+
+- lr is best at √(batch/64), times 1 + 1.5 × aux_weight where aux_weight interacts; warmup's best grows with lr; an
+  lr past 3× its best adds 2.0 (the run diverges and recovers late), the scenario's numeric step.
+- Wider is better but runs fewer steps (best width 548 alone); dropout's best grows with width.
+- Smooth terms for aug_strength, label_smoothing, init_scale, weight_decay; schedule and precision are choices;
+  lr_floor matters only under cosine (cosine without it loses to step), ema_halflife only with ema on (ema at the
+  default halflife hurts).
+- 4 dead levers (pin_memory, num_workers, cudnn_benchmark, log_every).
+- Crash: out of memory when batch × width × bytes per value (× 0.35 with checkpointing) passes a limit, at every
+  commit. It cuts into the best batch × width only while fp32 is the only precision (rounds 1-2: the round-2 optimum
+  uses 93% of it; from round 3, fp16 uses 53%).
+- Guard: the regression head's R² ≥ 0.73. Augmentation and smoothing together cost R², and so does aux_weight above
+  0.7; neither augmentation nor smoothing alone can break it. The best feasible config sits on the floor. R² is
+  measured with noise on every repeat (sd 0.01 shared per repeat plus 0.01 per config, paired like the metric), so a
+  config on the floor fails a repeat about half the time, and the trial records its lowest measured margin.
+- Noise: 0.05 relative per part (#47's scenario: 0.02), closer to the real run's ratio of gain to seed noise.
+
+**Properties** (random configs, log-uniform for log levers; 20,000 per round):
+
+| round | levers | optimum | baseline regret | crash | guard broken |
+|---|---|---|---|---|---|
+| 1 | 10 | 5.910 | 3.30 | 7% | 0% |
+| 2 | 13 | 5.045 | 4.16 | 25% | 53% |
+| 3-4 | 15-16 | 4.795, 4.725 | 4.41, 4.48 | 10% | 63% |
+| 5-6 | 19 | 4.475 | 4.73 | 10% | 26% |
+| 7-9 `training` | 19 | 4.271 | 4.93 | 10% | 4% |
+| 7-9 others | 19 | 4.475 | 4.73 | 10% | 25% |
+
+Leaving one lever at default from the round-5 optimum costs: aug_strength 1.37, batch 0.94, width 0.68, init_scale
+0.60, lr_scale 0.46, label_smoothing 0.40, schedule 0.35, weight_decay 0.31, ema_halflife 0.29, lr_floor 0.25, ema
+0.25, warmup_frac 0.10, dropout 0.08; precision's default crashes there. A repeat's noise sd at the optimum is about
+0.30. The round-7 move is worth 0.20 a round.
+
+`best_config` gives each round's optimum exactly (enumeration plus closed forms); `test_training.py` checks it against
+an independent grid search over every lever and 2000 random configs per round and target.
+
+### Setup
+
+**Arms**, each the harness's round with rules 1-4 (current main):
+
+| arm | optimizer | crash told as |
+|---|---|---|
+| `harness` | `OptunaBackend` (multivariate TPE) | `FAIL`: TPE never sees it |
+| `harness-crash` | `OptunaBackend` | a broken guard (reported only; see below) |
+| `ax-crash` | `ax_gp.CrashAsGuard` | a broken guard |
+
+`harness-crash` is TPE told a crash as an infeasible trial, as `CrashAsGuard` tells Ax. It separates a GP beating TPE
+from crash-awareness beating crash-blindness, which the new target makes count more than #47's did (its crash region
+exists in every round; #47's only in round 2).
+
+| part | target | trials per round | seeds | repeats |
+|---|---|---|---|---|
+| A | `default` (bench.SCENARIO, 6 rounds) | 6, 12 / 24 | 200-259 / 200-229 | 2 |
+| B | `training` (9 rounds) | 6, 12 / 24 | 0-59 / 0-29 | 2 |
+
+60 seeds at 6 and 12 trials: at 30, the pass probability at 12 trials was 0.66-0.88 even at #47's own effect sizes.
+
+**Deciding measure:** per seed, the mean regret over the run's rounds, `ax-crash − harness`, and its 95% bootstrap CI
+[L, U] (`bench.compare`: 2000 resamples of the seeds, percentiles; at 30-60 seeds its one-sided miss rate is about
+3% against a nominal 2.5%).
+
+**Rerun clause**, for every deciding CI in #47-#49: if the CI end nearer the threshold (0 here) is within a tenth of
+the CI's width of it, the comparison runs once more on twice the seeds (same first seed) and is decided on that CI.
+
+### Decision rule
+
+Each of the six comparisons (A and B at 6, 12 and 24 trials) is PASS if U < 0, WORSE if L > 0, else UNRESOLVED.
+
+- **GO** if all six PASS.
+- **NO-GO** if any is WORSE.
+- **INCONCLUSIVE** otherwise: #48 and #49 don't start, and you decide between more seeds and stopping.
+
+The earlier rule's cap on Ax's extra eval runs is dropped: with the trials per round fixed, a variant runs more eval
+runs only by breaking the guard or crashing less, so the cap could only fail an improvement. Eval runs are reported.
+
+**Reading `harness-crash`**, also fixed now: at a budget where `ax-crash − harness` passes but `ax-crash −
+harness-crash` doesn't (U ≥ 0), the write-up says the gain there is crash handling, not the GP; on a GO with that
+caveat, you decide between #50 and giving TPE crash-as-infeasible (the cheaper fix) before #50 starts.
+
+**Reported, not deciding:** sampled trials that broke the guard or crashed per arm; incumbents whose true guard
+breaks (passed on noisy repeats); round-2-4 trials rule 2 keeps at round 5 per arm (Ax can land exactly on a bound,
+TPE can't); seconds per suggestion and GP fits; eval runs.
+
+| outcome | roadmap |
+|---|---|
+| GO | #50 proceeds (re-check #46's rule 4 there); #48 and #49 run |
+| GO with the crash caveat | you choose: #50, or crash-as-infeasible on TPE |
+| NO-GO | the roadmap closes #48-#53; you confirm first |
+| INCONCLUSIVE | you choose: more seeds or stop |
+
+### Commands
+
+Part 2 adds `harness-crash` and makes `ax_gp.py` compare each arm with every earlier one, so `ax-crash −
+harness-crash` prints alongside `ax-crash − harness`.
+
+```sh
+uv run --frozen --project benchmark python benchmark/ax_gp.py --first-seed 200 --seeds 60 --trials 6 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash
+uv run --frozen --project benchmark python benchmark/ax_gp.py --first-seed 200 --seeds 60 --trials 12 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash
+uv run --frozen --project benchmark python benchmark/ax_gp.py --first-seed 200 --seeds 30 --trials 24 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash
+uv run --frozen --project benchmark python benchmark/ax_gp.py --target training --seeds 60 --trials 6 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash
+uv run --frozen --project benchmark python benchmark/ax_gp.py --target training --seeds 60 --trials 12 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash
+uv run --frozen --project benchmark python benchmark/ax_gp.py --target training --seeds 30 --trials 24 --repeats 2 --jobs 8 --variant harness --variant harness-crash --variant ax-crash
+```
+
+**Compute**, at #47's 10-25 s per GP suggestion (a planning probe on 20 random levers took 11-29 s): A about 10,000
+Ax suggestions, B about 15,000; about 13 h on 8 processes. TPE's arms take minutes.
+
+### Limits fixed in advance
+
+- Still synthetic, and still mostly smooth: most of the regret sits in terms smooth in a GP's log encoding; the
+  divergence step, the choices and the conditional levers are the rest. The crash is permanent and spans batch,
+  width, precision and checkpointing, but is a half-space in that encoding, the easiest shape to learn.
+- One removal (a harmful numeric lever), no supersede; the benchmark queues only the incumbent and that removal's
+  investigation, while probes made 64% of the real run's gain, so the optimizer's share of the search is overstated.
+- Guard noise is gentler than the real run's (a 2% change to one lever moved its R² by more than its whole tolerance).
+- 9 rounds against the real run's 30.
