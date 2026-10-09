@@ -99,7 +99,7 @@ class OptunaBackend:
         return cls(study, space)
 
     def add_warm(self, valid: list[dict], defaults: dict[str, Any]) -> None:
-        """Copy in earlier trial records (warmstart.select's set) as finished trials."""
+        """Copy in earlier trial records (warmstart.copied's trials) as finished trials."""
         self._study.add_trials(build_frozen_trials(valid, self._space, defaults))
 
     def enqueue(self, label: str, params: dict[str, Any]) -> None:

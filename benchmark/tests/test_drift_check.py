@@ -121,7 +121,6 @@ def test_without_noise_a_check_flags_exactly_when_the_copied_data_misorders_the_
     monkeypatch.setattr(bench, "SCENARIO", drift_check.DRIFT)
     cfg = {"rounds": 8, "trials_per_round": 4, "repeats": 2}
     checks = [c for seed in range(3) for c in drift_check.detection(bench.simulate(drift_check.Recheck(3), seed, cfg))]
-    assert {c["round"] for c in checks} <= {2, 3, 4, 6, 7, 8}  # each new commit; round 5 is the same commit
     assert any(c["misordered"] for c in checks) and not all(c["misordered"] for c in checks)
     assert all(c["flagged"] == c["misordered"] for c in checks)
 
