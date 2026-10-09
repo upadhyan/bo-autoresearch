@@ -337,6 +337,7 @@ def test_explore_trials_are_random_draws_whatever_was_copied_in_and_k_0_leaves_t
     harness = configs(run(), None)[0]
     assert configs(run(variant=bench.Explore(3)))[0] == harness
     assert configs(run(variant=bench.Explore(2)))[0] == harness[:2]
+    assert configs(run(variant=bench.Explore(2)), None)[0] != harness[2:]  # then TPE's
     assert configs(run(variant=bench.Explore(0)), None)[0][0] != harness[0]  # TPE's, from the baseline alone
     assert configs(run(variant=ColdExplore(2))) == configs(run(variant=bench.Explore(2)))
 
