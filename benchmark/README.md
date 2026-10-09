@@ -35,6 +35,9 @@ measured with noise seeded like an eval that reads `BOAR_SPLIT` and `BOAR_REPEAT
 shifts, some of which reorder configs. The round itself is the harness's `warmstart`, `OptunaBackend`, `rounds` and
 `control` code.
 
+`--scenario staggered` runs `SCENARIOS`' other scenario instead: every hypothesis but H3 starts after round 1, one per
+round, and the world never changes.
+
 ## Adding a variant
 
 A variant is a subclass of `Harness` that overrides one or more of its three methods:

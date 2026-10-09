@@ -239,3 +239,80 @@ def test_a_second_variant_is_compared_with_the_first_on_the_same_seeds(capsys):
     out = capsys.readouterr().out
     assert "harness − harness, per seed:" in out
     assert "| regret (s) | 0 | [0, 0] | 0 / 2 / 0 |" in out
+
+
+def test_seeding_queues_each_hypothesis_activated_from_round_2_at_its_seed_from_the_incumbent():
+    rounds = run(variant=bench.Seeded(bench.SEEDS["good"]))
+    assert [[t["queued"] for t in rec["trials"] if t["queued"]] for rec in rounds] == [
+        ["baseline"], ["incumbent", "seed H4"], ["incumbent", "seed H5"], ["incumbent", "seed H6"], [],
+        ["incumbent"]]  # H1-H3 start in round 1; round 5 has the same commit as round 4
+    incumbent, seed = rounds[3]["trials"][:2]
+    assert seed["config"] == {**incumbent["config"], "prefetch": 0.5, "prefetch_async": True}
+    assert [len(rec["trials"]) for rec in rounds] == [4, 5, 5, 5, 4, 4]  # a seed is an extra trial
+
+
+def test_a_bool_lever_with_no_seed_is_seeded_at_its_non_default_value_a_numeric_or_categorical_one_not_at_all():
+    assert [bench.seed_config(p, {}) for p in bench.PROPOSALS.values()] == [
+        {"dedup_set": True}, {}, {}, {}, {}, {"prefetch_async": True}]  # H2's lever is categorical
+    rounds = run(variant=bench.Seeded({}))
+    seeds = [t for rec in rounds for t in rec["trials"] if (t["queued"] or "").startswith("seed")]
+    assert [(t["round"], t["queued"]) for t in seeds] == [(4, "seed H6")]  # an empty seed queues nothing
+
+
+def seed_outcomes(seeds: dict) -> dict:
+    """Each hypothesis's seed against the baseline, at the world where the scenario activates it."""
+    world, out = dict(bench.WORLD), {}
+    for step in bench.SCENARIO:
+        world.update(step.get("world", {}))
+        for hid in step.get("add", []):
+            seed = bench.seed_config(bench.PROPOSALS[hid], seeds.get(hid, {}))
+            state = bench.measure(seed, world, "c1", 0, 1)["state"]
+            delta = bench.true_metric(seed, world)[0] - bench.true_metric({}, world)[0]
+            out[hid] = state if state != "complete" else "same" if delta == 0 else "better" if delta < 0 else "worse"
+    return out
+
+
+def test_bad_seeds_crash_break_the_guard_or_lose_to_the_default_where_good_ones_win():
+    # H1's bool and H2's choices have no setting worse than default, and H3's lever has no effect.
+    assert seed_outcomes(bench.SEEDS["good"]) == {
+        "H1": "better", "H2": "better", "H3": "same", "H4": "better", "H5": "better", "H6": "better"}
+    assert seed_outcomes(bench.SEEDS["bad"]) == {
+        "H1": "better", "H2": "better", "H3": "same", "H4": "failed", "H5": "worse", "H6": "infeasible"}
+    assert seed_outcomes(bench.SEEDS["mixed"]) == {  # odd-numbered hypotheses good, even ones bad
+        "H1": "better", "H2": "better", "H3": "same", "H4": "failed", "H5": "better", "H6": "infeasible"}
+
+
+def test_each_seed_set_is_a_variant_seeding_from_round_2_and_the_mixed_one_seeds_round_1_too():
+    assert {"seed-good", "seed-bad", "seed-mixed", "seed-mixed-r1"} <= set(bench.VARIANTS)
+    round1 = run(variant=bench.VARIANTS["seed-mixed-r1"])[0]["trials"]
+    assert [t["queued"] for t in round1] == ["baseline", "seed H1", "seed H2", "seed H3", None, None, None]
+    assert round1[2]["config"] == {"dedup_set": False, "route_table": "per_file", "buffer_kb": 8}  # from the baseline
+    assert not any(t["queued"] for t in run(variant=bench.VARIANTS["seed-mixed"])[0]["trials"][1:])
+
+
+def test_the_budget_matched_control_samples_the_trials_seeding_would_queue():
+    for suffix in ("", "-r1"):
+        seeded, sampled = (run(variant=bench.VARIANTS[name + suffix]) for name in ("seed-mixed", "extra-sampled"))
+        assert [len(rec["trials"]) for rec in sampled] == [len(rec["trials"]) for rec in seeded]
+        assert not any((t["queued"] or "").startswith("seed") for rec in sampled for t in rec["trials"])
+    assert [len(rec["trials"]) for rec in sampled] == [7, 5, 5, 5, 4, 4]
+    # Every seed set seeds every hypothesis, so extra-sampled is the control for each.
+    control = run(variant=bench.VARIANTS["extra-sampled"])
+    assert all(run(variant=bench.ExtraSampled(seeds)) == control for seeds in bench.SEEDS.values())
+
+
+def test_the_staggered_scenario_activates_one_hypothesis_a_round_in_an_unchanging_world():
+    rounds = bench.simulate(Baseline(), 0, SMALL, bench.SCENARIOS["staggered"])
+    assert [sorted(rec["trials"][0]["config"]) for rec in rounds][:2] == [["buffer_kb"], ["buffer_kb", "dedup_set"]]
+    assert len({rec["commit"] for rec in rounds}) == 6
+    # The baseline's regret grows by each new lever's best gain: H3 none, H1 5.9, H2 4.2, H4 1.6, H5 0.15 ln²4, H6 1.2.
+    assert [rec["regret"] for rec in rounds] == pytest.approx([0, 5.9, 10.1, 11.7, 11.7 + 0.15 * 1.921812,
+                                                               12.9 + 0.15 * 1.921812], abs=1e-6)
+    assert bench.SCENARIOS["default"] is bench.SCENARIO
+
+
+def test_the_scenario_comes_from_the_command_line(capsys, monkeypatch):
+    monkeypatch.setitem(bench.VARIANTS, "baseline", Baseline())
+    bench.main(["--seeds", "1", "--rounds", "2", "--trials", "1", "--repeats", "1", "--variant", "baseline",
+                "--scenario", "staggered"])
+    assert "| 2 | 5.9 [5.9, 5.9] |" in capsys.readouterr().out  # 11.7 on the default scenario
