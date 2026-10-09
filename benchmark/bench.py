@@ -130,63 +130,6 @@ class Harness:
 
 VARIANTS = {"harness": Harness()}
 
-# --- #44: a deliberate first trial for each new hypothesis ------------------------------------------------------
-
-# Seed settings the proposals could carry: good ones near the best config, bad ones far from it, crashing or breaking
-# the guard (H2 has no choice worse than its default, so its bad seed is the weaker one; H3's lever has no effect).
-SEEDS = {
-    "good": {"H2": {"route_table": "once"}, "H3": {"buffer_kb": 64}, "H4": {"batch": 8}, "H5": {"gc_scale": 2.0},
-             "H6": {"prefetch": 0.5}},
-    "bad": {"H2": {"route_table": "per_file"}, "H3": {"buffer_kb": 4096}, "H4": {"batch": 64},
-            "H5": {"gc_scale": 0.05}, "H6": {"prefetch": 1.0}},
-}
-SEEDS["mixed"] = {hid: SEEDS["good" if int(hid[1]) % 2 else "bad"][hid] for hid in SEEDS["good"]}  # odd ones good
-
-# All but H3 start after round 1, each in a round of its own; the world never changes.
-SCENARIOS = {"default": SCENARIO, "staggered": [{"add": [hid]} for hid in ("H3", "H1", "H2", "H4", "H5", "H6")]}
-
-
-def seed_config(hyp: dict, seeds: dict) -> dict:
-    """The hypothesis's seed: each lever at the proposal's setting, a bool lever with none at its non-default value."""
-    return {lever["name"]: seeds.get(lever["name"], not lever["default"]) for lever in hyp["levers"]
-            if lever["name"] in seeds or lever["type"] == "bool"}
-
-
-class Seeded(Harness):
-    """Also queues each hypothesis activated this round, from round `first` on, at its seed, the other levers at the
-    incumbent."""
-
-    def __init__(self, seeds: dict, first: int = 2) -> None:
-        self.seeds, self.first = seeds, first
-
-    def queue(self, hyps: list[dict], r: int, incumbent: dict | None) -> dict:
-        warm = super().queue(hyps, r, incumbent)
-        for h in store.active_hypotheses(hyps):
-            config = seed_config(h, self.seeds.get(h["id"], {}))
-            if r >= self.first and h["activated_round"] == r and config:
-                warm["queue"].append({"label": f"seed {h['id']}", "config": config})
-        return warm
-
-
-class _SamplesSeeds(optimizer.OptunaBackend):
-    """Samples the trials labelled seed instead of queuing them."""
-
-    def enqueue(self, label: str, params: dict) -> None:
-        if not label.startswith("seed "):
-            super().enqueue(label, params)
-
-
-class ExtraSampled(Seeded):
-    """The budget-matched control: as many trials as Seeded, the seeds' sampled by TPE instead."""
-
-    def backend(self, space: dict, seed: int, n_startup: int):
-        return _SamplesSeeds.create(None, "round", DIRECTION, space, seed, n_startup)
-
-
-VARIANTS.update({f"seed-{kind}": Seeded(SEEDS[kind]) for kind in SEEDS})
-VARIANTS.update({"seed-mixed-r1": Seeded(SEEDS["mixed"], 1), "extra-sampled": ExtraSampled(SEEDS["mixed"]),
-                 "extra-sampled-r1": ExtraSampled(SEEDS["mixed"], 1)})
-
 # --- a simulated run -------------------------------------------------------------------------------------------
 
 
@@ -203,15 +146,14 @@ def _change(hyps: list[dict], step: dict, r: int) -> None:
         store.hypothesis(hyps, hid)["decisions"][str(r - 1)] = {"decision": "fix"}
 
 
-def simulate(variant: Harness, seed: int, cfg: dict, scenario: list[dict] | None = None) -> list[dict]:
+def simulate(variant: Harness, seed: int, cfg: dict) -> list[dict]:
     """One run through `variant`, the same for the same seed: a record per round. `cfg` has the harness config's
-    rounds, trials_per_round and repeats; `scenario` is SCENARIO, as it is when called, unless given."""
-    scenario = SCENARIO if scenario is None else scenario
+    rounds, trials_per_round and repeats."""
     hyps: list[dict] = []
     trials: list[dict] = []
     world, commit, out, seen = dict(WORLD), "", [], set()
     for r in range(1, cfg["rounds"] + 1):
-        step = scenario[r - 1] if r <= len(scenario) else {}
+        step = SCENARIO[r - 1] if r <= len(SCENARIO) else {}
         _change(hyps, step, r)
         world.update(step.get("world", {}))
         if not commit or step:
@@ -291,14 +233,13 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--repeats", type=int, default=3, help="eval runs per trial (default 3)")
     ap.add_argument("--variant", action="append", choices=sorted(VARIANTS),
                     help="repeat to compare with the first (default harness)")
-    ap.add_argument("--scenario", default="default", choices=sorted(SCENARIOS), help="default: SCENARIO")
     args = ap.parse_args(argv)
     cfg = {"rounds": args.rounds, "trials_per_round": args.trials, "repeats": args.repeats}
     names = args.variant or ["harness"]
     base = None
     for name in names:
         start = time.monotonic()
-        runs = [simulate(VARIANTS[name], seed, cfg, SCENARIOS[args.scenario]) for seed in range(args.seeds)]
+        runs = [simulate(VARIANTS[name], seed, cfg) for seed in range(args.seeds)]
         print(f"{name}: {args.seeds} seeds in {time.monotonic() - start:.0f} s; median [IQR] over seeds\n")
         print(report(runs) + "\n")
         if base is None:
