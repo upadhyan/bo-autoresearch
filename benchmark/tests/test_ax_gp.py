@@ -39,6 +39,10 @@ def test_queued_configs_come_first_in_order_then_ax_samples_the_space():
 
 def test_ax_gets_each_result_with_its_guard_and_a_crash_as_a_failed_trial():
     backend = ax_gp.AxBackend(SPACE, 0, 6)
+    # Ax minimises the metric, and a trial holds its guards only if `guards` stays at most 0.5.
+    assert str(backend._client._experiment.optimization_config) == (
+        'OptimizationConfig(objective=Objective(expression="-metric"), '
+        'outcome_constraints=[OutcomeConstraint(guards <= 0.5)])')
     for n, (state, metric) in enumerate((("complete", 3.0), ("infeasible", 2.0), ("failed", None)), 1):
         backend.ask(n)
         backend.tell(state, metric)
