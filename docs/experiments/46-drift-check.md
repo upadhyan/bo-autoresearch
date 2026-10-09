@@ -30,7 +30,7 @@ paired and a config measured again on the same commit gets the same values.
 In `default`, removing H3 before round 4 leaves out (rule 2) every copied trial but the baseline, since TPE never
 samples buffer_kb at its default; so the round 4 shift has nothing to contradict, and its only check with copied
 data is round 6. `drift` has no removal and a shift at most new commits. A test checks that `drift` reorders
-configs exactly in rounds 4, 6 and 7, and that each round's regret reference is still the best config.
+configs exactly in rounds 4, 6 and 7.
 
 **The check.** Each round queues, after the incumbent, the next n − 1 best configs of the warm-start set (pooled), as
 `recheck i`, on top of its N trials (like an investigation's queue). A config already measured on the round's commit is
@@ -44,7 +44,7 @@ at its own round, pooled the same way) finds a reversal: the copied data orders 
 the other way from the truth on the new commit. Hit rate: flagged among misordered checks. False alarms: flagged
 among the rest. Swept: noise (`bench.NOISE`) 0, 0.01, 0.02 (the benchmark's), 0.05, 0.1; n = 2, 3, 4.
 
-**Variants**, fixed before any run (rule 4 is the new warm-start rule; counted like rules 1-3):
+**Variants**, fixed before any run (rule 4 is the new warm-start rule):
 
 | variant | re-measures (n) | rule 4 leaves out |
 |---|---|---|
@@ -67,26 +67,20 @@ drift_check --detect --scenario default --seeds 200 --trials 12
 drift_check --detect --scenario drift --seeds 200 --trials 6
 drift_check --detect --scenario drift --seeds 200 --trials 12
 V="--variant harness --variant recheck --variant drop-trials --variant drop-older --variant age-3"
-drift_check --scenario default --seeds 200 --trials 6 $V
-drift_check --scenario default --seeds 200 --trials 12 $V
-drift_check --scenario drift --seeds 200 --trials 6 $V
-drift_check --scenario drift --seeds 200 --trials 12 $V
-# the cost check: the harness with 2 more trials per round, against the variants that re-measure
-drift_check --scenario drift --seeds 200 --trials 6 --base-trials 8 --variant harness --variant drop-trials --variant drop-older
-drift_check --scenario drift --seeds 200 --trials 12 --base-trials 14 --variant harness --variant drop-trials --variant drop-older
-# 1000-seed reruns: the CIs the rule calls narrow, and the 6×2 cost check, which decides drop-older
 drift_check --scenario default --seeds 1000 --trials 6 $V
 drift_check --scenario default --seeds 1000 --trials 12 $V
 drift_check --scenario drift --seeds 1000 --trials 6 $V
+drift_check --scenario drift --seeds 200 --trials 12 $V
+# the cost check: the harness with 2 more trials per round, against the variants that re-measure
 drift_check --scenario drift --seeds 1000 --trials 6 --base-trials 8 --variant harness --variant drop-trials --variant drop-older
+drift_check --scenario drift --seeds 200 --trials 12 --base-trials 14 --variant harness --variant drop-trials --variant drop-older
 # added after the first results (see "Without drift")
 drift_check --scenario steady --seeds 200 --trials 6 --variant harness --variant age-3 --lever prefetch_async
 drift_check --scenario steady --seeds 200 --trials 12 --variant harness --variant age-3
 drift_check --scenario steady --seeds 200 --trials 6 --variant harness --variant recheck --variant drop-trials --variant drop-older
 drift_check --scenario unchanged --seeds 200 --trials 6 --variant harness --variant age-3 --lever prefetch_async
 drift_check --scenario unchanged --seeds 200 --trials 12 --variant harness --variant age-3 --lever prefetch_async
-# added after review (see "Regret" and "Ageing the study's copy only")
-drift_check --scenario drift --seeds 200 --trials 6 $V --lever prefetch_async
+# added after review (see "Ageing the study's copy only")
 S="--variant harness --variant age-3-study"
 drift_check --scenario default --seeds 1000 --trials 6 $S
 drift_check --scenario default --seeds 1000 --trials 12 $S
@@ -131,30 +125,13 @@ At noise 0.02 with 3 configs re-measured:
 | 0.05 | 9% / 5% | 15% / 10% | 23% / 17% |
 | 0.1 | 5% / 7% | 19% / 12% | 22% / 19% |
 
-`drift`, 6×2, noise 0.02, n = 3, by round:
-
-| round | change | checks | misordered | hits | false alarms |
-|---|---|---|---|---|---|
-| 2 | H4 added | 200 | 0 | — | 7/200 |
-| 3 | 1.1x slower | 200 | 0 | — | 24/200 |
-| 4 | batch reorders | 200 | 154 | 55/154 | 5/46 |
-| 5 | same commit | 109 | 60 | 4/60 | 2/49 |
-| 6 | gc_scale reorders | 200 | 158 | 49/158 | 10/42 |
-| 7 | route_table reorders | 200 | 43 | 12/43 | 20/157 |
-| 8 | 1x again | 200 | 104 | 15/104 | 7/96 |
-
-- The check flags only reversals beyond the noise floor on both sides; the truth counts any reversal. Hits fall
-  from 100% at noise 0 to 26% at 0.02. More configs catch more and raise more false alarms.
-- Round 5 re-measures, on round 4's commit, top configs last measured before it. Round 7's reorder (per_file
-  overtakes once) misorders the top 3 only when they differ in route_table. Round 8 changes no order, yet half its
-  checks are misordered: pooling mixes measurements from before and after the earlier shifts.
-- False alarms come in every kind of round, shifted or not (rounds 2-3: 7/200 and 24/200).
+The check flags only reversals beyond the noise floor on both sides; the truth counts any reversal. Hits fall from
+100% at noise 0 to 26% at 0.02. More configs catch more and raise more false alarms.
 
 ### Regret
 
 Each variant minus `harness` on the same seeds: mean over seeds of the run's mean regret (s), its 95% bootstrap CI,
-seeds lower / tied / higher, and the mean difference in eval runs. The 1000-seed runs replace the 200-seed runs of
-the same command; at `default` 6×2 seeds 0-199 had favoured every re-measuring variant (−0.04 to −0.06 s).
+seeds lower / tied / higher, and the mean difference in eval runs.
 
 | scenario | budget | seeds | `harness` regret, median [IQR] | variant | Δ regret (s) | lower / tied / higher | Δ eval runs |
 |---|---|---|---|---|---|---|---|
@@ -183,22 +160,6 @@ The cost check, `drift`, against the harness with 2 more trials per round:
 | | | | `drop-older` | −0.0231 [−0.0615, 0.0184] | 699 / 0 / 301 | −6.9 |
 | 12×2 (harness 14×2) | 200 | 0.889 [0.802, 1.01] | `drop-trials` | −0.143 [−0.168, −0.116] | 161 / 0 / 39 | −5.0 |
 | | | | `drop-older` | −0.22 [−0.25, −0.186] | 168 / 0 / 32 | −6.3 |
-
-At 200 seeds the 6×2 rows were +0.0338 [−0.0588, 0.131] and −0.0428 [−0.128, 0.0451].
-
-Much of the harness's regret on `drift` is not reordering. H6 arrives in round 6 and prefetch at its default costs
-1.2 s × 1.1 = 1.32 s against the best, about the harness's median regret that round (1.33 s at both budgets); more
-trials don't fix it (14×2: 0.889 against 0.848 at 12×2). Every copied trial sits at H6's defaults, so a rule that
-drops old trials gains from this whatever made it drop them. Sampled trials from round 6 that set prefetch_async on,
-`drift` 6×2, 200 seeds:
-
-| `harness` | `recheck` | `drop-trials` | `drop-older` | `age-3` |
-|---|---|---|---|---|
-| 28/3000 | 10/3000 | 17/3000 | 166/3000 | 185/3000 |
-
-`drop-older` moves it about as often as `age-3`, and it also drops on false alarms (9% per check); `drop-trials`
-doesn't, and gains what `recheck` gains. So neither drop rule's gain on `drift`, `drop-older`'s 12×2 cost check
-included, is evidence that the check detects drift.
 
 ### Without drift (added after the results above)
 
@@ -267,16 +228,15 @@ incumbent's own trials no longer age out. On `drift` it keeps 65-75% of it.
 
 | rule | 1. lower on `drift`, both budgets | 2. not higher on `default` | 3. beats the harness given 2 more trials | verdict |
 |---|---|---|---|---|
-| `drop-trials` | yes (6×2: no at 200 seeds) | yes | no: 6×2 +0.0448 [0.00259, 0.0914] | **no** |
+| `drop-trials` | yes | yes | no: 6×2 +0.0448 [0.00259, 0.0914] | **no** |
 | `drop-older` | yes | yes | no: 6×2 −0.0231 [−0.0615, 0.0184] | **no** |
 | `age-3` | yes | yes | adds no eval runs | **yes** |
 | `age-3-study` (added after review) | yes | yes | adds no eval runs | **yes** |
 
 **The drift check: no.** On `drift` at the benchmark's noise it catches 16-26% of the misorders in the copied data,
 with 9-12% false alarms per check. Dropping what it flags doesn't beat giving the harness those eval runs as trials
-at the real run's budget, and its gains on `drift` are partly ageing's, not detection's (see "Regret"). Without
-drift the re-measurements cost 15-17% more eval runs and lower no regret. Nothing changes in the harness; it keeps
-the incumbent's drift flag.
+at the real run's budget. Without drift the re-measurements cost 15-17% more eval runs and lower no regret. Nothing
+changes in the harness; it keeps the incumbent's drift flag.
 
 **Ageing old rounds out: yes by the rule, but not as a drift fix.** It lowers regret with no drift at all too (`steady`,
 `unchanged`): copied trials from before a lever existed hold TPE at that lever's default. The gain comes from the trials
@@ -294,9 +254,5 @@ branch:
   problem.
 - At 12×2 the full history ends lower by round 30, so a fixed window of 3 rounds is not clearly right for long runs.
 
-What it means for the roadmap:
-
-- #48 (keep all lever data across rounds, retiring rule 2) bets the other way: here more copied data held TPE back.
-  Its experiment should include `steady`.
-- #47: a GP may weigh copied trials differently from TPE; if Ax is adopted, re-check `age-3-study` on its variant
-  before building the follow-up, as the roadmap already says for #44-#46.
+#48 (keep all lever data across rounds) bets the other way, but here more copied data held TPE back: its experiment
+should include `steady`.

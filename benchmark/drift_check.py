@@ -36,11 +36,11 @@ UNCHANGED = [*STEADY[:4], *[{}] * 26]
 SCENARIOS = {"default": bench.SCENARIO, "drift": DRIFT, "steady": STEADY, "unchanged": UNCHANGED}
 
 
-def worlds(scenario: list[dict], n_rounds: int) -> list[dict]:
+def worlds(scenario: list[dict]) -> list[dict]:
     """The world at each round, as bench.simulate builds it from `scenario`."""
     world, out = dict(bench.WORLD), []
-    for r in range(1, n_rounds + 1):
-        world.update((scenario[r - 1] if r <= len(scenario) else {}).get("world", {}))
+    for step in scenario:
+        world.update(step.get("world", {}))
         out.append(dict(world))
     return out
 
@@ -61,9 +61,6 @@ def contradicted(
     return out
 
 
-RULE4 = "rule4_dropped"
-
-
 def rechecked(trials: list[dict], r: int) -> list[dict]:
     """Round r's re-measurements of copied configs: the incumbent and the rechecks."""
     return [t for t in trials if t["round"] == r and (t["queued"] or "").startswith(("incumbent", "recheck"))]
@@ -77,9 +74,7 @@ class Rule4(bench.Harness):
 
     def warm(self, trials, hyps, r):
         out = self.dropped(trials, r)
-        valid, excluded, _ = super().warm(trials, hyps, r)
-        kept, _, incumbent = super().warm([t for t in trials if t["trial"] not in out], hyps, r)
-        return kept, {**excluded, RULE4: len(valid) - len(kept)}, incumbent
+        return super().warm([t for t in trials if t["trial"] not in out], hyps, r)
 
 
 class Recheck(Rule4):
@@ -142,7 +137,7 @@ def detection(run: list[dict]) -> list[dict]:
     """Each check in a simulated run of bench.SCENARIO, one per round that re-measured two or more copied configs:
     whether it flagged a pair, and whether the copied data misorders a pair of those configs at the round's world
     (the same check on noise-free metrics)."""
-    world = worlds(bench.SCENARIO, len(run))
+    world = worlds(bench.SCENARIO)
     trials = [t for rec in run for t in rec["trials"]]
 
     def noise_free(ts: list[dict]) -> list[dict]:
@@ -186,22 +181,16 @@ def _rates(checks: list[dict]) -> list[str]:
 
 
 def detect(seeds: int, cfg: dict) -> str:
-    """Tables of the checks in Recheck runs: by noise level and configs re-measured, then by round."""
+    """A table of the checks in Recheck runs by noise level and configs re-measured."""
     headers = ["checks", "misordered", "flagged if misordered", "flagged if in order"]
-    default, rows, by_round = bench.NOISE, [], {}
+    default, rows = bench.NOISE, []
     for noise in NOISES:
         bench.NOISE = noise
         for n in (2, 3, 4):
             checks = [c for seed in range(seeds) for c in detection(bench.simulate(Recheck(n), seed, cfg))]
             rows.append([noise, n, *_rates(checks)])
-            if (noise, n) == (default, 3):
-                by_round = {r: [c for c in checks if c["round"] == r] for r in sorted({c["round"] for c in checks})}
     bench.NOISE = default
-    return "\n\n".join([
-        rounds.md_table(["noise", "re-measured", *headers], rows),
-        f"By round, at noise {default} with 3 configs re-measured:",
-        rounds.md_table(["round", *headers], [[r, *_rates(cs)] for r, cs in by_round.items()]),
-    ])
+    return rounds.md_table(["noise", "re-measured", *headers], rows)
 
 
 def main(argv: list[str] | None = None) -> None:
