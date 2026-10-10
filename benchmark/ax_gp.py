@@ -15,6 +15,7 @@ import logging.handlers
 import multiprocessing
 import os
 import re
+import sys
 import time
 import warnings
 from concurrent.futures import ProcessPoolExecutor
@@ -219,6 +220,7 @@ def main(argv: list[str] | None = None) -> None:
     if not all(0 < level < 1 for level in levels):
         ap.error(f"--level {levels}: fractions, e.g. 0.95")
     os.environ.update(OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1")  # read by torch and numpy in each process
+    sys.stdout.reconfigure(line_buffering=True)  # each arm's table shows as it finishes, even redirected to a file
     runs, records = {}, {}
     with ProcessPoolExecutor(args.jobs, mp_context=multiprocessing.get_context("spawn")) as pool:
         for name in names:
@@ -229,9 +231,9 @@ def main(argv: list[str] | None = None) -> None:
             print(f"{name}: {args.seeds} seeds in {time.monotonic() - start:.0f} s on {args.jobs} processes; "
                   "median [IQR] over seeds\n")
             print(bench.report(runs[name]) + "\n")
-    if args.out:
-        with open(args.out, "w") as f:
-            json.dump({"args": vars(args), "runs": runs, "suggestions": records}, f)
+            if args.out:  # after each arm, so a crash in a later one keeps the earlier ones
+                with open(args.out, "w") as f:
+                    json.dump({"args": vars(args), "runs": runs, "suggestions": records}, f)
     for i, name in enumerate(names):
         for base in names[:i]:
             for label, window in windows.items():
